@@ -1,0 +1,197 @@
+#!/usr/bin/env zsh
+# ==============================================================================
+# yt-srt - YouTube動画から字幕（SRT）を取得
+# ==============================================================================
+#
+# 概要:
+#   YouTube URLから自動生成字幕（SRT形式）をダウンロードする単機能ツール。
+#   「Gitの陶器と配管」思想に基づくシンプルな配管ツール。
+#
+# 使用方法:
+#   yt-srt <YouTube_URL> [OPTIONS]
+#
+# 引数:
+#   YouTube_URL  - YouTubeの動画URL（必須）
+#
+# オプション:
+#   -l, --lang LANG  - 字幕言語コード（デフォルト: ja）
+#   -o, --output DIR - 出力ディレクトリ（デフォルト: カレントディレクトリ）
+#   -v, --video      - 動画も一緒にダウンロード
+#   -h, --help       - ヘルプを表示
+#
+# 出力:
+#   <video_title>.ja.srt  - 日本語字幕ファイル（または指定言語）
+#   <video_title>.mp4     - 動画ファイル（-v オプション時）
+#
+# 依存:
+#   - yt-dlp: YouTube動画/字幕ダウンロードツール
+#
+# 作成日: 2025-12-24
+# バージョン: 1.0.0
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# ヘルプ表示
+# ------------------------------------------------------------------------------
+show_help() {
+    cat << 'EOF'
+Usage: yt-srt <YouTube_URL> [OPTIONS]
+
+YouTube動画から字幕（SRT形式）を取得します。
+
+Options:
+  -l, --lang LANG   字幕言語コード（デフォルト: ja）
+  -o, --output DIR  出力ディレクトリ（デフォルト: .）
+  -v, --video       動画も一緒にダウンロード
+  -h, --help        このヘルプを表示
+
+Examples:
+  yt-srt "https://youtu.be/VIDEO_ID"
+  yt-srt "https://youtu.be/VIDEO_ID" -l en
+  yt-srt "https://youtu.be/VIDEO_ID" -v -o ~/Downloads
+EOF
+}
+
+# ------------------------------------------------------------------------------
+# 色付きログ出力
+# ------------------------------------------------------------------------------
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly NC='\033[0m'
+
+log_info() { echo "${GREEN}[INFO]${NC} $1" }
+log_warn() { echo "${YELLOW}[WARN]${NC} $1" }
+log_error() { echo "${RED}[ERROR]${NC} $1" >&2 }
+
+# ------------------------------------------------------------------------------
+# 引数解析
+# ------------------------------------------------------------------------------
+local youtube_url=""
+local lang="ja"
+local output_dir="."
+local download_video=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            return 0
+            ;;
+        -l|--lang)
+            lang="$2"
+            shift 2
+            ;;
+        -o|--output)
+            output_dir="$2"
+            shift 2
+            ;;
+        -v|--video)
+            download_video=true
+            shift
+            ;;
+        -*)
+            log_error "Unknown option: $1"
+            show_help
+            return 1
+            ;;
+        *)
+            if [[ -z "$youtube_url" ]]; then
+                youtube_url="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# ------------------------------------------------------------------------------
+# 検証
+# ------------------------------------------------------------------------------
+if [[ -z "$youtube_url" ]]; then
+    log_error "YouTube URL is required"
+    show_help
+    return 1
+fi
+
+# URLの基本的な検証
+if [[ ! "$youtube_url" =~ ^https?://(www\.)?(youtube\.com|youtu\.be)/ ]]; then
+    log_error "Invalid YouTube URL format"
+    return 1
+fi
+
+# yt-dlpの存在確認
+if ! command -v yt-dlp &>/dev/null; then
+    log_error "yt-dlp is not installed"
+    echo "Install with: brew install yt-dlp" >&2
+    return 1
+fi
+
+# 出力ディレクトリの確認
+if [[ ! -d "$output_dir" ]]; then
+    log_error "Output directory does not exist: $output_dir"
+    return 1
+fi
+
+# ------------------------------------------------------------------------------
+# 字幕ダウンロード
+# ------------------------------------------------------------------------------
+log_info "Downloading subtitles (lang: ${lang})..."
+
+local yt_opts=(
+    --write-auto-sub
+    --sub-lang "$lang"
+    --sub-format srt
+    --convert-subs srt
+    --skip-download
+    -o "${output_dir}/%(title)s.%(ext)s"
+)
+
+if [[ "$download_video" == true ]]; then
+    log_info "Including video download..."
+    yt_opts=(
+        --write-auto-sub
+        --sub-lang "$lang"
+        --sub-format srt
+        --convert-subs srt
+        -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+        --merge-output-format mp4
+        -o "${output_dir}/%(title)s.%(ext)s"
+    )
+fi
+
+if ! yt-dlp "${yt_opts[@]}" "$youtube_url"; then
+    log_error "Failed to download subtitles"
+    return 1
+fi
+
+# ------------------------------------------------------------------------------
+# 結果表示
+# ------------------------------------------------------------------------------
+log_info "Download complete!"
+log_info "Output directory: ${output_dir}"
+
+# 生成されたファイルを表示
+setopt localoptions nullglob
+local srt_files=(${output_dir}/*.srt(N))
+local mp4_files=(${output_dir}/*.mp4(N))
+
+if [[ ${#srt_files[@]} -gt 0 ]]; then
+    log_info "Subtitle files:"
+    for f in "${srt_files[@]}"; do
+        echo "  - ${f:t}"
+    done
+fi
+
+if [[ ${#mp4_files[@]} -gt 0 ]] && [[ "$download_video" == true ]]; then
+    log_info "Video files:"
+    for f in "${mp4_files[@]}"; do
+        echo "  - ${f:t}"
+    done
+fi
+
+# ==============================================================================
+# 使用例:
+#   yt-srt "https://youtu.be/dQw4w9WgXcQ"
+#   yt-srt "https://youtu.be/dQw4w9WgXcQ" -l en -o ~/Downloads
+#   yt-srt "https://youtu.be/dQw4w9WgXcQ" -v
+# ==============================================================================

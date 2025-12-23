@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<java version="22" class="java.beans.XMLDecoder">
+ <object class="padtools.Setting">
+  <void property="disableSaveMenu">
+   <boolean>true</boolean>
+  </void>
+  <void property="disableToolbar">
+   <boolean>true</boolean>
+  </void>
+ </object>
+</java>

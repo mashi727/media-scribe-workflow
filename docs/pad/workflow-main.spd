@@ -1,0 +1,29 @@
+# rehearsal-workflow-main.spd
+# リハーサルワークフロー全体
+
+:terminal 開始
+
+:comment Phase 1: 前処理
+:switch 入力ソース
+:case YouTube URL
+	:call yt-srt
+		字幕を直接取得
+:case ローカル動画
+	:call 基本パターン
+		動画整形 → 字幕取得
+:case 音声 + 動画（複数ソース）
+	:call 拡張パターン
+		音声処理 → 動画処理 → 合成 → 字幕取得
+
+:comment Phase 2: 分析（ユーザーが実施）
+:comment プロンプト例を参照
+LLMでSRTを分析@（Claude, ChatGPT等）
+
+:comment Phase 3: 出力（オプション）
+:if LaTeX出力が必要
+	:call luatex-docker-remote
+		PDF生成
+:else
+	Markdown等で出力
+
+:terminal 終了

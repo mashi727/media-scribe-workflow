@@ -1,0 +1,57 @@
+# rehearsal-workflow-advanced.spd
+# 拡張ワークフロー：複数ソース対応
+
+:terminal 開始
+
+:comment 入力ソース
+:switch 入力タイプ
+:case 音声のみ（Wireless Pro）
+	指揮者近くマイク音声
+:case 動画のみ（iPhone）
+	後方からの撮影動画
+:case 両方あり
+	音声 + 動画
+
+:if 複数ソースあり
+	:comment A. 音声処理
+	:call audio-normalize
+		音量正規化
+	:call audio-extract-channel
+		指揮者チャンネルのみ抽出
+		→ 文字起こし用音声
+
+	:comment B. 映像処理
+	:call video-trim
+		不要部分削除
+	:call movie-viewer
+		チャプター付け
+
+	:comment C. 合成
+	:call video-replace-audio
+		動画 + 指揮者音声
+		→ 最終動画
+:else
+	:comment 単一ソース処理
+	:call video-trim
+		不要部分削除
+	:call movie-viewer
+		チャプター付け
+
+:comment 字幕取得
+:switch 文字起こし方法
+:case YouTube字幕
+	:call yt-srt
+		YouTube字幕を取得
+:case Whisper（高精度）
+	:call whisper-remote
+		指揮者音声から文字起こし
+:case 両方
+	:call yt-srt
+		YouTube字幕
+	:call whisper-remote
+		Whisper字幕
+
+:comment 出力
+SRTファイル（1つまたは2つ）
+
+:terminal 終了

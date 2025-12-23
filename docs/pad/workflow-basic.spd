@@ -1,0 +1,30 @@
+# rehearsal-workflow-basic.spd
+# 基本ワークフロー：動画 → SRT
+
+:terminal 開始
+
+:comment 入力
+生の長時間動画@（例：13:30-17:00の練習録画）
+
+:comment 1. 不要部分の削除
+:call video-trim
+	休憩時間のカット
+	準備・片付け時間のカット
+	演奏・練習部分のみ抽出
+
+:comment 2. 構造化（チャプター付け）
+:call movie-viewer
+	曲ごとに分割点を決定
+	チャプター名（曲名）付与
+
+:comment 3. 単一動画に結合
+:call video-chapters
+	チャプター情報を埋め込み
+	構造化された1つのMP4を出力
+
+:comment 4. 字幕取得
+:call yt-srt
+	YouTube字幕を取得
+	→ SRTファイル出力
+
+:terminal 終了
