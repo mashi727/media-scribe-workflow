@@ -1,0 +1,50 @@
+#!/bin/bash
+# spd2png - Convert SPD file to PNG using PADtools
+#
+# Usage: spd2png input.spd [output.png] [scale]
+#
+# Dependencies:
+#   - Java JRE 1.8+
+#   - PADtools installed at $PADTOOLS_HOME or /Users/mashi/local/src/padtools1.4
+
+set -e
+
+PADTOOLS_HOME="${PADTOOLS_HOME:-/Users/mashi/local/src/padtools1.4}"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Check PADtools installation
+if [[ ! -f "$PADTOOLS_HOME/PadTools.jar" ]]; then
+    echo "Error: PADtools not found at $PADTOOLS_HOME" >&2
+    echo "Set PADTOOLS_HOME environment variable to PADtools installation directory" >&2
+    exit 1
+fi
+
+# Parse arguments
+if [[ $# -lt 1 ]]; then
+    echo "Usage: spd2png input.spd [output.png] [scale]" >&2
+    echo "" >&2
+    echo "Arguments:" >&2
+    echo "  input.spd   Input SPD file" >&2
+    echo "  output.png  Output PNG file (default: input with .png extension)" >&2
+    echo "  scale       Image scale factor (default: 2.0)" >&2
+    exit 1
+fi
+
+INPUT="$1"
+OUTPUT="${2:-${INPUT%.spd}.png}"
+SCALE="${3:-2.0}"
+
+if [[ ! -f "$INPUT" ]]; then
+    echo "Error: Input file not found: $INPUT" >&2
+    exit 1
+fi
+
+# Build classpath
+CLASSPATH="$PADTOOLS_HOME/PadTools.jar"
+for jar in "$PADTOOLS_HOME"/libs/*.jar; do
+    CLASSPATH="$CLASSPATH:$jar"
+done
+CLASSPATH="$CLASSPATH:$SCRIPT_DIR/tools"
+
+# Run converter
+java -Djava.awt.headless=true -cp "$CLASSPATH" PadCLI "$INPUT" "$OUTPUT" "$SCALE"
