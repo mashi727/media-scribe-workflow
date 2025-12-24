@@ -463,7 +463,7 @@ public class PadAlignedRenderer {
         // Draw top border line
         g2d.drawLine((int)pennantX, (int)y, (int)arrowX, (int)y);
 
-        // Draw cases (no horizontal separator lines between cases)
+        // Draw cases with separator lines
         double caseY = y;
 
         for (Map.Entry<String, NodeBase> entry : cases.entrySet()) {
@@ -485,6 +485,9 @@ public class PadAlignedRenderer {
             // Draw case label as plain text (no box) - original PADtools style
             drawCenteredText(caseLabel, pennantX, caseY, arrowX - pennantX, rowHeight, TEXT_COLOR, MAIN_FONT);
 
+            // Draw bottom border line for this case (also serves as separator)
+            g2d.drawLine((int)pennantX, (int)(caseY + rowHeight), (int)arrowX, (int)(caseY + rowHeight));
+
             // Draw vertical line connecting to children (at arrow tip)
             if (caseChild != null && childHeight > 0) {
                 double lineX = arrowX + arrowWidth;
@@ -494,9 +497,6 @@ public class PadAlignedRenderer {
 
             caseY += rowHeight;
         }
-
-        // Draw bottom border line
-        g2d.drawLine((int)pennantX, (int)(y + totalHeight), (int)arrowX, (int)(y + totalHeight));
 
         return y + totalHeight;
     }
@@ -528,6 +528,9 @@ public class PadAlignedRenderer {
         double thenMidY = y + thenRowHeight / 2;
         g2d.draw(new Line2D.Double(arrowX, y, arrowX + arrowWidth, thenMidY));
         g2d.draw(new Line2D.Double(arrowX + arrowWidth, thenMidY, arrowX, y + thenRowHeight));
+
+        // Draw bottom border line for then branch (separator to else)
+        g2d.drawLine((int)pennantX, (int)(y + thenRowHeight), (int)arrowX, (int)(y + thenRowHeight));
 
         // Draw vertical line connecting to then children (at arrow tip)
         if (node.getTrueNode() != null && thenChildHeight > 0) {
