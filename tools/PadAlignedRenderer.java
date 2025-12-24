@@ -460,7 +460,10 @@ public class PadAlignedRenderer {
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.drawLine((int)pennantX, (int)y, (int)pennantX, (int)(y + totalHeight));
 
-        // Draw cases (no horizontal separator lines - original PADtools style)
+        // Draw top border line
+        g2d.drawLine((int)pennantX, (int)y, (int)arrowX, (int)y);
+
+        // Draw cases (no horizontal separator lines between cases)
         double caseY = y;
 
         for (Map.Entry<String, NodeBase> entry : cases.entrySet()) {
@@ -492,6 +495,9 @@ public class PadAlignedRenderer {
             caseY += rowHeight;
         }
 
+        // Draw bottom border line
+        g2d.drawLine((int)pennantX, (int)(y + totalHeight), (int)arrowX, (int)(y + totalHeight));
+
         return y + totalHeight;
     }
 
@@ -515,7 +521,10 @@ public class PadAlignedRenderer {
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.drawLine((int)pennantX, (int)y, (int)pennantX, (int)(y + totalHeight));
 
-        // Draw then branch arrow shape (chevron pointing right) - no horizontal lines
+        // Draw top border line
+        g2d.drawLine((int)pennantX, (int)y, (int)arrowX, (int)y);
+
+        // Draw then branch arrow shape (chevron pointing right)
         double thenMidY = y + thenRowHeight / 2;
         g2d.draw(new Line2D.Double(arrowX, y, arrowX + arrowWidth, thenMidY));
         g2d.draw(new Line2D.Double(arrowX + arrowWidth, thenMidY, arrowX, y + thenRowHeight));
@@ -547,6 +556,9 @@ public class PadAlignedRenderer {
 
             drawNode(node.getFalseNode(), depth + 1, elseY);
         }
+
+        // Draw bottom border line
+        g2d.drawLine((int)pennantX, (int)(y + totalHeight), (int)arrowX, (int)(y + totalHeight));
 
         return y + totalHeight;
     }
