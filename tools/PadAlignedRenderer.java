@@ -29,8 +29,7 @@ public class PadAlignedRenderer {
     private static final int BOX_MAX_WIDTH = 180;  // Maximum width before text wrapping
     private static final int COLUMN_GAP = 8;
     private static final int ROW_GAP = 4;
-    private static final int SPINE_WIDTH = 4;
-    private static final int BAR_WIDTH = 6;
+    private static final int BAR_WIDTH = 6;  // For call box double lines
     private static final int TERMINAL_RADIUS = 16;
     private static final int LINE_HEIGHT = 16;
     private static final int TEXT_PADDING = 8;
@@ -39,17 +38,10 @@ public class PadAlignedRenderer {
     private static final Font MAIN_FONT = new Font("Hiragino Kaku Gothic ProN", Font.PLAIN, 12);
     private static final Font COMMENT_FONT = new Font("Hiragino Kaku Gothic ProN", Font.PLAIN, 10);
 
-    // Colors
-    private static final Color SPINE_COLOR = new Color(0x33, 0x41, 0x55);
-    private static final Color BOX_STROKE = new Color(0x33, 0x41, 0x55);
-    private static final Color BOX_FILL = Color.WHITE;
-    private static final Color CALL_FILL = new Color(0xDB, 0xEA, 0xFE);
-    private static final Color CALL_TEXT = new Color(0x1E, 0x40, 0xAF);
-    private static final Color TERMINAL_FILL = new Color(0xE2, 0xE8, 0xF0);
-    private static final Color COMMENT_FILL = new Color(0xF8, 0xFA, 0xFC);
-    private static final Color COMMENT_STROKE = new Color(0x94, 0xA3, 0xB8);
-    private static final Color TEXT_COLOR = new Color(0x1E, 0x29, 0x3B);
-    private static final Color COMMENT_TEXT = new Color(0x64, 0x74, 0x8B);
+    // Colors - Original PADtools style (black & white)
+    private static final Color STROKE_COLOR = Color.BLACK;
+    private static final Color FILL_COLOR = Color.WHITE;
+    private static final Color TEXT_COLOR = Color.BLACK;
 
     // Layout state
     private Map<Integer, Double> columnWidths = new HashMap<>();
@@ -334,10 +326,11 @@ public class PadAlignedRenderer {
                 y = drawNode(child, depth, y);
                 y += ROW_GAP;
             }
-            // Draw spine
+            // Draw vertical connecting line (original PADtools style)
             if (list.getChildren().size() > 1) {
-                g2d.setColor(SPINE_COLOR);
-                g2d.fill(new Rectangle2D.Double(x, startY, SPINE_WIDTH, y - startY - ROW_GAP));
+                g2d.setColor(STROKE_COLOR);
+                g2d.setStroke(new BasicStroke(1.5f));
+                g2d.drawLine((int)x, (int)startY, (int)x, (int)(y - ROW_GAP));
             }
             return y - ROW_GAP;
         } else if (node instanceof TerminalNode) {
@@ -363,62 +356,48 @@ public class PadAlignedRenderer {
         String text = node.getText();
         double boxHeight = getTextBoxHeight(text, width);
 
-        RoundRectangle2D rect = new RoundRectangle2D.Double(
-            x, y, width, boxHeight, TERMINAL_RADIUS * 2, TERMINAL_RADIUS * 2);
-        g2d.setColor(TERMINAL_FILL);
-        g2d.fill(rect);
-        g2d.setColor(BOX_STROKE);
+        // Draw ellipse (original PADtools style)
+        Ellipse2D ellipse = new Ellipse2D.Double(x, y, width, boxHeight);
+        g2d.setColor(FILL_COLOR);
+        g2d.fill(ellipse);
+        g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
-        g2d.draw(rect);
+        g2d.draw(ellipse);
 
         drawCenteredText(text, x, y, width, boxHeight, TEXT_COLOR, MAIN_FONT);
         return y + boxHeight;
     }
 
     private double drawComment(CommentNode node, double x, double y, double width) {
-        String text = node.getText();
+        String text = "(" + node.getText() + ")";  // Original PADtools style: parentheses
         double boxHeight = getTextBoxHeight(text, width);
 
-        Rectangle2D rect = new Rectangle2D.Double(x, y, width, boxHeight);
-        g2d.setColor(COMMENT_FILL);
-        g2d.fill(rect);
-        g2d.setColor(COMMENT_STROKE);
-        g2d.setStroke(new BasicStroke(1f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
-            10f, new float[]{4f, 2f}, 0f));
-        g2d.draw(rect);
-
-        drawCenteredText(text, x, y, width, boxHeight, COMMENT_TEXT, MAIN_FONT);
+        // No box, just text with parentheses (original PADtools style)
+        drawCenteredText(text, x, y, width, boxHeight, TEXT_COLOR, MAIN_FONT);
         return y + boxHeight;
     }
 
     private double drawCall(CallNode node, int depth, double x, double y, double width) {
         String text = node.getText();
-        double textBoxHeight = getTextBoxHeight(text, width - SPINE_WIDTH - BAR_WIDTH * 2);
+        double textBoxHeight = getTextBoxHeight(text, width - BAR_WIDTH * 2);
         double childHeight = calculateHeight(node.getChildNode());
         double boxHeight = Math.max(textBoxHeight, childHeight);
 
-        // Draw spine
-        g2d.setColor(SPINE_COLOR);
-        g2d.fill(new Rectangle2D.Double(x, y, SPINE_WIDTH, boxHeight));
-
-        // Draw call box with double bars
-        double boxX = x + SPINE_WIDTH;
-        double boxWidth = width - SPINE_WIDTH;
-
-        Rectangle2D rect = new Rectangle2D.Double(boxX, y, boxWidth, textBoxHeight);
-        g2d.setColor(CALL_FILL);
+        // Draw call box with double vertical bars (original PADtools style)
+        Rectangle2D rect = new Rectangle2D.Double(x, y, width, textBoxHeight);
+        g2d.setColor(FILL_COLOR);
         g2d.fill(rect);
-        g2d.setColor(BOX_STROKE);
+        g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.draw(rect);
 
-        // Draw vertical bars
-        g2d.drawLine((int)(boxX + BAR_WIDTH), (int)y, (int)(boxX + BAR_WIDTH), (int)(y + textBoxHeight));
-        g2d.drawLine((int)(boxX + boxWidth - BAR_WIDTH), (int)y,
-                     (int)(boxX + boxWidth - BAR_WIDTH), (int)(y + textBoxHeight));
+        // Draw double vertical bars on left and right
+        g2d.drawLine((int)(x + BAR_WIDTH), (int)y, (int)(x + BAR_WIDTH), (int)(y + textBoxHeight));
+        g2d.drawLine((int)(x + width - BAR_WIDTH), (int)y,
+                     (int)(x + width - BAR_WIDTH), (int)(y + textBoxHeight));
 
-        drawCenteredText(text, boxX + BAR_WIDTH, y,
-                        boxWidth - BAR_WIDTH * 2, textBoxHeight, CALL_TEXT, MAIN_FONT);
+        drawCenteredText(text, x + BAR_WIDTH, y,
+                        width - BAR_WIDTH * 2, textBoxHeight, TEXT_COLOR, MAIN_FONT);
 
         // Draw child
         if (node.getChildNode() != null) {
@@ -430,26 +409,19 @@ public class PadAlignedRenderer {
 
     private double drawProcess(ProcessNode node, int depth, double x, double y, double width) {
         String text = node.getText();
-        double textBoxHeight = getTextBoxHeight(text, width - SPINE_WIDTH);
+        double textBoxHeight = getTextBoxHeight(text, width);
         double childHeight = calculateHeight(node.getChildNode());
         double boxHeight = Math.max(textBoxHeight, childHeight);
 
-        // Draw spine
-        g2d.setColor(SPINE_COLOR);
-        g2d.fill(new Rectangle2D.Double(x, y, SPINE_WIDTH, boxHeight));
-
-        // Draw process box
-        double boxX = x + SPINE_WIDTH;
-        double boxWidth = width - SPINE_WIDTH;
-
-        Rectangle2D rect = new Rectangle2D.Double(boxX, y, boxWidth, textBoxHeight);
-        g2d.setColor(BOX_FILL);
+        // Draw process box (original PADtools style: simple rectangle)
+        Rectangle2D rect = new Rectangle2D.Double(x, y, width, textBoxHeight);
+        g2d.setColor(FILL_COLOR);
         g2d.fill(rect);
-        g2d.setColor(BOX_STROKE);
+        g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.draw(rect);
 
-        drawCenteredText(text, boxX, y, boxWidth, textBoxHeight, TEXT_COLOR, MAIN_FONT);
+        drawCenteredText(text, x, y, width, textBoxHeight, TEXT_COLOR, MAIN_FONT);
 
         // Draw child
         if (node.getChildNode() != null) {
@@ -462,60 +434,60 @@ public class PadAlignedRenderer {
     private double drawSwitch(SwitchNode node, int depth, double x, double y, double width) {
         LinkedHashMap<String, NodeBase> cases = node.getCases();
 
-        double boxX = x + SPINE_WIDTH;
-        double boxWidth = width - SPINE_WIDTH;
-        double conditionWidth = boxWidth * 0.4;
-        double caseWidth = boxWidth - conditionWidth;
+        double conditionWidth = width * 0.35;
+        double arrowWidth = 16;  // Width for arrow part
+        double caseWidth = width - conditionWidth;
 
         // Calculate total height with wrapped text
         double totalHeight = 0;
         for (Map.Entry<String, NodeBase> entry : cases.entrySet()) {
             String caseLabel = entry.getKey();
             NodeBase caseChild = entry.getValue();
-            double caseBoxHeight = getTextBoxHeight(caseLabel, caseWidth - 8);
-            totalHeight += caseBoxHeight + ROW_GAP + calculateHeight(caseChild);
+            double caseBoxHeight = getTextBoxHeight(caseLabel, caseWidth - arrowWidth);
+            double childHeight = calculateHeight(caseChild);
+            totalHeight += Math.max(caseBoxHeight, childHeight) + ROW_GAP;
         }
         totalHeight -= ROW_GAP;
 
-        // Draw spine
-        g2d.setColor(SPINE_COLOR);
-        g2d.fill(new Rectangle2D.Double(x, y, SPINE_WIDTH, totalHeight));
-
-        // Draw condition text on left
-        drawCenteredText(node.getText(), boxX, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
+        // Draw condition text on left (original style: plain text)
+        drawCenteredText(node.getText(), x, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
 
         // Draw cases
         double caseY = y;
-        double caseX = boxX + conditionWidth;
+        double caseX = x + conditionWidth;
 
         for (Map.Entry<String, NodeBase> entry : cases.entrySet()) {
             String caseLabel = entry.getKey();
             NodeBase caseChild = entry.getValue();
-            double caseBoxHeight = getTextBoxHeight(caseLabel, caseWidth - 8);
+            double caseBoxHeight = getTextBoxHeight(caseLabel, caseWidth - arrowWidth);
+            double childHeight = calculateHeight(caseChild);
+            double rowHeight = Math.max(caseBoxHeight, childHeight);
 
-            // Draw flag shape for case
-            Path2D flag = new Path2D.Double();
-            flag.moveTo(caseX, caseY);
-            flag.lineTo(caseX + caseWidth, caseY);
-            flag.lineTo(caseX + caseWidth, caseY + caseBoxHeight);
-            flag.lineTo(caseX, caseY + caseBoxHeight);
-            flag.lineTo(caseX + 8, caseY + caseBoxHeight/2);
-            flag.closePath();
+            // Draw arrow shape (original PADtools style: chevron pointing right)
+            Path2D arrow = new Path2D.Double();
+            arrow.moveTo(caseX, caseY);
+            arrow.lineTo(caseX + caseWidth - arrowWidth, caseY);
+            arrow.lineTo(caseX + caseWidth, caseY + caseBoxHeight / 2);
+            arrow.lineTo(caseX + caseWidth - arrowWidth, caseY + caseBoxHeight);
+            arrow.lineTo(caseX, caseY + caseBoxHeight);
+            arrow.lineTo(caseX + arrowWidth, caseY + caseBoxHeight / 2);
+            arrow.closePath();
 
-            g2d.setColor(BOX_FILL);
-            g2d.fill(flag);
-            g2d.setColor(BOX_STROKE);
+            g2d.setColor(FILL_COLOR);
+            g2d.fill(arrow);
+            g2d.setColor(STROKE_COLOR);
             g2d.setStroke(new BasicStroke(1.5f));
-            g2d.draw(flag);
+            g2d.draw(arrow);
 
-            drawCenteredText(caseLabel, caseX + 8, caseY, caseWidth - 8, caseBoxHeight, TEXT_COLOR, MAIN_FONT);
+            drawCenteredText(caseLabel, caseX + arrowWidth, caseY,
+                            caseWidth - arrowWidth * 2, caseBoxHeight, TEXT_COLOR, MAIN_FONT);
 
-            caseY += caseBoxHeight + ROW_GAP;
-
+            // Draw child
             if (caseChild != null) {
-                caseY = drawNode(caseChild, depth + 1, caseY - ROW_GAP);
-                caseY += ROW_GAP;
+                drawNode(caseChild, depth + 1, caseY);
             }
+
+            caseY += rowHeight + ROW_GAP;
         }
 
         return y + totalHeight;
@@ -527,34 +499,30 @@ public class PadAlignedRenderer {
             BOX_HEIGHT + calculateHeight(node.getFalseNode()) : 0;
         double totalHeight = thenHeight + elseHeight + (elseHeight > 0 ? ROW_GAP : 0);
 
-        // Draw spine
-        g2d.setColor(SPINE_COLOR);
-        g2d.fill(new Rectangle2D.Double(x, y, SPINE_WIDTH, totalHeight));
+        double conditionWidth = width * 0.35;
+        double arrowWidth = 16;
+        double branchWidth = width - conditionWidth;
 
-        double boxX = x + SPINE_WIDTH;
-        double boxWidth = width - SPINE_WIDTH;
-        double conditionWidth = boxWidth * 0.4;
+        // Draw condition text on left (original style)
+        drawCenteredText(node.getText(), x, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
 
-        // Draw condition
-        drawCenteredText(node.getText(), boxX, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
+        // Draw then branch with arrow shape (original PADtools style)
+        double branchX = x + conditionWidth;
 
-        // Draw then branch (flag shape)
-        double branchX = boxX + conditionWidth;
-        double branchWidth = boxWidth - conditionWidth;
+        Path2D thenArrow = new Path2D.Double();
+        thenArrow.moveTo(branchX, y);
+        thenArrow.lineTo(branchX + branchWidth - arrowWidth, y);
+        thenArrow.lineTo(branchX + branchWidth, y + BOX_HEIGHT / 2);
+        thenArrow.lineTo(branchX + branchWidth - arrowWidth, y + BOX_HEIGHT);
+        thenArrow.lineTo(branchX, y + BOX_HEIGHT);
+        thenArrow.lineTo(branchX + arrowWidth, y + BOX_HEIGHT / 2);
+        thenArrow.closePath();
 
-        Path2D thenFlag = new Path2D.Double();
-        thenFlag.moveTo(branchX, y);
-        thenFlag.lineTo(branchX + branchWidth, y);
-        thenFlag.lineTo(branchX + branchWidth, y + BOX_HEIGHT);
-        thenFlag.lineTo(branchX, y + BOX_HEIGHT);
-        thenFlag.lineTo(branchX + 8, y + BOX_HEIGHT/2);
-        thenFlag.closePath();
-
-        g2d.setColor(BOX_FILL);
-        g2d.fill(thenFlag);
-        g2d.setColor(BOX_STROKE);
+        g2d.setColor(FILL_COLOR);
+        g2d.fill(thenArrow);
+        g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
-        g2d.draw(thenFlag);
+        g2d.draw(thenArrow);
 
         // Draw then child
         double thenY = y + BOX_HEIGHT;
@@ -566,21 +534,23 @@ public class PadAlignedRenderer {
         if (node.getFalseNode() != null) {
             double elseY = thenY + ROW_GAP;
 
-            Path2D elseFlag = new Path2D.Double();
-            elseFlag.moveTo(branchX, elseY);
-            elseFlag.lineTo(branchX + branchWidth, elseY);
-            elseFlag.lineTo(branchX + branchWidth, elseY + BOX_HEIGHT);
-            elseFlag.lineTo(branchX, elseY + BOX_HEIGHT);
-            elseFlag.lineTo(branchX + 8, elseY + BOX_HEIGHT/2);
-            elseFlag.closePath();
+            Path2D elseArrow = new Path2D.Double();
+            elseArrow.moveTo(branchX, elseY);
+            elseArrow.lineTo(branchX + branchWidth - arrowWidth, elseY);
+            elseArrow.lineTo(branchX + branchWidth, elseY + BOX_HEIGHT / 2);
+            elseArrow.lineTo(branchX + branchWidth - arrowWidth, elseY + BOX_HEIGHT);
+            elseArrow.lineTo(branchX, elseY + BOX_HEIGHT);
+            elseArrow.lineTo(branchX + arrowWidth, elseY + BOX_HEIGHT / 2);
+            elseArrow.closePath();
 
-            g2d.setColor(BOX_FILL);
-            g2d.fill(elseFlag);
-            g2d.setColor(BOX_STROKE);
+            g2d.setColor(FILL_COLOR);
+            g2d.fill(elseArrow);
+            g2d.setColor(STROKE_COLOR);
             g2d.setStroke(new BasicStroke(1.5f));
-            g2d.draw(elseFlag);
+            g2d.draw(elseArrow);
 
-            drawCenteredText("else", branchX + 8, elseY, branchWidth - 8, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
+            drawCenteredText("else", branchX + arrowWidth, elseY,
+                            branchWidth - arrowWidth * 2, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
 
             drawNode(node.getFalseNode(), depth + 1, elseY + BOX_HEIGHT);
         }
@@ -592,22 +562,15 @@ public class PadAlignedRenderer {
         double childHeight = calculateHeight(node.getChildNode());
         double boxHeight = Math.max(BOX_HEIGHT, childHeight + BOX_HEIGHT);
 
-        // Draw spine
-        g2d.setColor(SPINE_COLOR);
-        g2d.fill(new Rectangle2D.Double(x, y, SPINE_WIDTH, boxHeight));
-
-        // Draw loop condition box
-        double boxX = x + SPINE_WIDTH;
-        double boxWidth = width - SPINE_WIDTH;
-
-        Rectangle2D rect = new Rectangle2D.Double(boxX, y, boxWidth, BOX_HEIGHT);
-        g2d.setColor(BOX_FILL);
+        // Draw loop condition box (original PADtools style)
+        Rectangle2D rect = new Rectangle2D.Double(x, y, width, BOX_HEIGHT);
+        g2d.setColor(FILL_COLOR);
         g2d.fill(rect);
-        g2d.setColor(BOX_STROKE);
+        g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.draw(rect);
 
-        drawCenteredText(node.getText(), boxX, y, boxWidth, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
+        drawCenteredText(node.getText(), x, y, width, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
 
         // Draw child
         if (node.getChildNode() != null) {
