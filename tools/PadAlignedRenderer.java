@@ -471,24 +471,23 @@ public class PadAlignedRenderer {
             double childHeight = calculateHeight(caseChild);
             double rowHeight = Math.max(caseBoxHeight, childHeight);
 
-            // Draw arrow shape (original PADtools style: chevron pointing right)
-            Path2D arrow = new Path2D.Double();
-            arrow.moveTo(caseX, caseY);
-            arrow.lineTo(caseX + caseWidth - arrowWidth, caseY);
-            arrow.lineTo(caseX + caseWidth, caseY + caseBoxHeight / 2);
-            arrow.lineTo(caseX + caseWidth - arrowWidth, caseY + caseBoxHeight);
-            arrow.lineTo(caseX, caseY + caseBoxHeight);
-            arrow.lineTo(caseX + arrowWidth, caseY + caseBoxHeight / 2);
-            arrow.closePath();
+            // Draw pennant/flag shape (original PADtools style: flat left, pointed right)
+            Path2D pennant = new Path2D.Double();
+            pennant.moveTo(caseX, caseY);
+            pennant.lineTo(caseX + caseWidth - arrowWidth, caseY);
+            pennant.lineTo(caseX + caseWidth, caseY + caseBoxHeight / 2);
+            pennant.lineTo(caseX + caseWidth - arrowWidth, caseY + caseBoxHeight);
+            pennant.lineTo(caseX, caseY + caseBoxHeight);
+            pennant.closePath();
 
             g2d.setColor(FILL_COLOR);
-            g2d.fill(arrow);
+            g2d.fill(pennant);
             g2d.setColor(STROKE_COLOR);
             g2d.setStroke(new BasicStroke(1.5f));
-            g2d.draw(arrow);
+            g2d.draw(pennant);
 
-            drawCenteredText(caseLabel, caseX + arrowWidth, caseY,
-                            caseWidth - arrowWidth * 2, caseBoxHeight, TEXT_COLOR, MAIN_FONT);
+            drawCenteredText(caseLabel, caseX, caseY,
+                            caseWidth - arrowWidth, caseBoxHeight, TEXT_COLOR, MAIN_FONT);
 
             // Draw vertical line connecting to children
             if (caseChild != null && childHeight > 0) {
@@ -525,23 +524,22 @@ public class PadAlignedRenderer {
         // Draw condition text on left (original style)
         drawCenteredText(node.getText(), x, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
 
-        // Draw then branch with arrow shape (original PADtools style)
+        // Draw then branch with pennant shape (original PADtools style: flat left, pointed right)
         double branchX = x + conditionWidth;
 
-        Path2D thenArrow = new Path2D.Double();
-        thenArrow.moveTo(branchX, y);
-        thenArrow.lineTo(branchX + branchWidth - arrowWidth, y);
-        thenArrow.lineTo(branchX + branchWidth, y + BOX_HEIGHT / 2);
-        thenArrow.lineTo(branchX + branchWidth - arrowWidth, y + BOX_HEIGHT);
-        thenArrow.lineTo(branchX, y + BOX_HEIGHT);
-        thenArrow.lineTo(branchX + arrowWidth, y + BOX_HEIGHT / 2);
-        thenArrow.closePath();
+        Path2D thenPennant = new Path2D.Double();
+        thenPennant.moveTo(branchX, y);
+        thenPennant.lineTo(branchX + branchWidth - arrowWidth, y);
+        thenPennant.lineTo(branchX + branchWidth, y + BOX_HEIGHT / 2);
+        thenPennant.lineTo(branchX + branchWidth - arrowWidth, y + BOX_HEIGHT);
+        thenPennant.lineTo(branchX, y + BOX_HEIGHT);
+        thenPennant.closePath();
 
         g2d.setColor(FILL_COLOR);
-        g2d.fill(thenArrow);
+        g2d.fill(thenPennant);
         g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
-        g2d.draw(thenArrow);
+        g2d.draw(thenPennant);
 
         // Draw vertical line connecting to then children
         if (node.getTrueNode() != null && thenChildHeight > 0) {
@@ -561,23 +559,22 @@ public class PadAlignedRenderer {
         if (node.getFalseNode() != null) {
             double elseY = thenY + ROW_GAP;
 
-            Path2D elseArrow = new Path2D.Double();
-            elseArrow.moveTo(branchX, elseY);
-            elseArrow.lineTo(branchX + branchWidth - arrowWidth, elseY);
-            elseArrow.lineTo(branchX + branchWidth, elseY + BOX_HEIGHT / 2);
-            elseArrow.lineTo(branchX + branchWidth - arrowWidth, elseY + BOX_HEIGHT);
-            elseArrow.lineTo(branchX, elseY + BOX_HEIGHT);
-            elseArrow.lineTo(branchX + arrowWidth, elseY + BOX_HEIGHT / 2);
-            elseArrow.closePath();
+            Path2D elsePennant = new Path2D.Double();
+            elsePennant.moveTo(branchX, elseY);
+            elsePennant.lineTo(branchX + branchWidth - arrowWidth, elseY);
+            elsePennant.lineTo(branchX + branchWidth, elseY + BOX_HEIGHT / 2);
+            elsePennant.lineTo(branchX + branchWidth - arrowWidth, elseY + BOX_HEIGHT);
+            elsePennant.lineTo(branchX, elseY + BOX_HEIGHT);
+            elsePennant.closePath();
 
             g2d.setColor(FILL_COLOR);
-            g2d.fill(elseArrow);
+            g2d.fill(elsePennant);
             g2d.setColor(STROKE_COLOR);
             g2d.setStroke(new BasicStroke(1.5f));
-            g2d.draw(elseArrow);
+            g2d.draw(elsePennant);
 
-            drawCenteredText("else", branchX + arrowWidth, elseY,
-                            branchWidth - arrowWidth * 2, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
+            drawCenteredText("else", branchX, elseY,
+                            branchWidth - arrowWidth, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
 
             // Draw vertical line connecting to else children
             if (elseChildHeight > 0) {
