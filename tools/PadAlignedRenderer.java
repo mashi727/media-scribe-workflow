@@ -26,19 +26,15 @@ public class PadAlignedRenderer {
     private static final int MARGIN = 20;
     private static final int BOX_HEIGHT = 32;
     private static final int BOX_MIN_WIDTH = 100;
-    private static final int BOX_MAX_WIDTH = 180;  // Maximum width before text wrapping
     private static final int COLUMN_GAP = 8;
     private static final int ROW_GAP = 4;
     private static final int BAR_WIDTH = 6;  // For call box double lines
     private static final int TERMINAL_RADIUS = 16;
-    private static final int LINE_HEIGHT = 16;
-    private static final int TEXT_PADDING = 8;
 
     // Fonts
     private static final Font MAIN_FONT = new Font("Hiragino Kaku Gothic ProN", Font.PLAIN, 12);
-    private static final Font COMMENT_FONT = new Font("Hiragino Kaku Gothic ProN", Font.PLAIN, 10);
 
-    // Colors - Original PADtools style (black & white)
+    // Colors
     private static final Color STROKE_COLOR = Color.BLACK;
     private static final Color FILL_COLOR = Color.WHITE;
     private static final Color TEXT_COLOR = Color.BLACK;
@@ -48,7 +44,6 @@ public class PadAlignedRenderer {
     private Map<Integer, Double> columnX = new HashMap<>();
     private Graphics2D g2d;
     private FontMetrics fm;
-    private FontMetrics fmComment;
     private double scale = 2.0;
 
     public static void main(String[] args) {
@@ -92,7 +87,6 @@ public class PadAlignedRenderer {
         g2d = tmpImg.createGraphics();
         g2d.setFont(MAIN_FONT);
         fm = g2d.getFontMetrics(MAIN_FONT);
-        fmComment = g2d.getFontMetrics(COMMENT_FONT);
 
         // Pass 1: Calculate column widths
         calculateColumnWidths(model.getTopNode(), 0);
@@ -127,7 +121,6 @@ public class PadAlignedRenderer {
         g2d.fillRect(0, 0, (int)totalWidth, (int)totalHeight);
 
         fm = g2d.getFontMetrics(MAIN_FONT);
-        fmComment = g2d.getFontMetrics(COMMENT_FONT);
 
         // Draw PAD
         drawNode(model.getTopNode(), 0, MARGIN);
@@ -188,20 +181,26 @@ public class PadAlignedRenderer {
         double width;
 
         if (node instanceof CallNode) {
-            width = Math.min(BOX_MAX_WIDTH, Math.max(BOX_MIN_WIDTH, textWidth + BAR_WIDTH * 4 + 16));
+            // Call box needs extra space for double bars
+            width = Math.max(BOX_MIN_WIDTH, textWidth + BAR_WIDTH * 4 + 16);
         } else if (node instanceof TerminalNode) {
-            width = Math.min(BOX_MAX_WIDTH, Math.max(BOX_MIN_WIDTH, textWidth + TERMINAL_RADIUS * 2 + 8));
+            // Terminal (ellipse) needs extra padding
+            width = Math.max(BOX_MIN_WIDTH, textWidth + TERMINAL_RADIUS * 2 + 8);
         } else if (node instanceof SwitchNode || node instanceof IfNode) {
+            // Switch/If: condition text + case labels + arrow
             SwitchNode sw = node instanceof SwitchNode ? (SwitchNode) node : null;
             double maxCaseWidth = 0;
             if (sw != null) {
                 for (String caseLabel : sw.getCases().keySet()) {
                     maxCaseWidth = Math.max(maxCaseWidth, fm.stringWidth(caseLabel));
                 }
+            } else {
+                maxCaseWidth = fm.stringWidth("else");  // For If nodes
             }
-            width = Math.min(BOX_MAX_WIDTH * 1.5, Math.max(BOX_MIN_WIDTH, textWidth + maxCaseWidth + 40));
+            width = Math.max(BOX_MIN_WIDTH, textWidth + maxCaseWidth + 60);
         } else {
-            width = Math.min(BOX_MAX_WIDTH, Math.max(BOX_MIN_WIDTH, textWidth + 16));
+            // Regular process/comment nodes
+            width = Math.max(BOX_MIN_WIDTH, textWidth + 16);
         }
         return width;
     }
@@ -217,60 +216,16 @@ public class PadAlignedRenderer {
         return "";
     }
 
-    // Wrap text to fit within maxWidth, breaking at logical points
+    // No text wrapping - always single line
     private List<String> wrapText(String text, double maxWidth, FontMetrics metrics) {
         List<String> lines = new ArrayList<>();
-        if (text == null || text.isEmpty()) {
-            lines.add("");
-            return lines;
-        }
-
-        // If text fits in one line, return as is
-        if (metrics.stringWidth(text) <= maxWidth) {
-            lines.add(text);
-            return lines;
-        }
-
-        // Try to break at logical points: →, 、, ・, spaces, or between characters
-        StringBuilder currentLine = new StringBuilder();
-        String[] segments = text.split("(?<=[→、・ ])|(?=[→、・ ])");
-
-        for (String segment : segments) {
-            String testLine = currentLine.toString() + segment;
-            if (metrics.stringWidth(testLine) <= maxWidth) {
-                currentLine.append(segment);
-            } else {
-                if (currentLine.length() > 0) {
-                    lines.add(currentLine.toString().trim());
-                    currentLine = new StringBuilder(segment);
-                } else {
-                    // Segment itself is too long, break by character
-                    for (char c : segment.toCharArray()) {
-                        testLine = currentLine.toString() + c;
-                        if (metrics.stringWidth(testLine) <= maxWidth) {
-                            currentLine.append(c);
-                        } else {
-                            if (currentLine.length() > 0) {
-                                lines.add(currentLine.toString());
-                            }
-                            currentLine = new StringBuilder(String.valueOf(c));
-                        }
-                    }
-                }
-            }
-        }
-
-        if (currentLine.length() > 0) {
-            lines.add(currentLine.toString().trim());
-        }
-
-        return lines.isEmpty() ? Arrays.asList("") : lines;
+        lines.add(text == null ? "" : text);
+        return lines;
     }
 
-    // Calculate box height based on text content
+    // Fixed box height - no wrapping
     private double getTextBoxHeight(String text, double maxWidth) {
-        List<String> lines = wrapText(text, maxWidth - TEXT_PADDING * 2, fm);
-        return Math.max(BOX_HEIGHT, lines.size() * LINE_HEIGHT + TEXT_PADDING * 2);
+        return BOX_HEIGHT;
     }
 
     private double calculateHeight(NodeBase node) {
@@ -288,28 +243,25 @@ public class PadAlignedRenderer {
             SwitchNode sw = (SwitchNode) node;
             double height = 0;
             for (Map.Entry<String, NodeBase> entry : sw.getCases().entrySet()) {
-                String caseLabel = entry.getKey();
                 NodeBase caseChild = entry.getValue();
-                double caseBoxHeight = getTextBoxHeight(caseLabel, BOX_MAX_WIDTH);
-                height += caseBoxHeight + ROW_GAP;
-                height += calculateHeight(caseChild);
+                double childHeight = calculateHeight(caseChild);
+                // Each case row: max of BOX_HEIGHT or child height
+                height += Math.max(BOX_HEIGHT, childHeight);
             }
-            return height > 0 ? height - ROW_GAP : BOX_HEIGHT;
+            return height;
         } else if (node instanceof IfNode) {
             IfNode ifNode = (IfNode) node;
-            double thenHeight = BOX_HEIGHT + ROW_GAP + calculateHeight(ifNode.getTrueNode());
-            double elseHeight = ifNode.getFalseNode() != null ?
-                BOX_HEIGHT + ROW_GAP + calculateHeight(ifNode.getFalseNode()) : 0;
+            double thenChildHeight = calculateHeight(ifNode.getTrueNode());
+            double thenHeight = Math.max(BOX_HEIGHT, thenChildHeight);
+            double elseChildHeight = ifNode.getFalseNode() != null ? calculateHeight(ifNode.getFalseNode()) : 0;
+            double elseHeight = ifNode.getFalseNode() != null ? Math.max(BOX_HEIGHT, elseChildHeight) : 0;
             return thenHeight + elseHeight;
         } else if (node instanceof WithChildNode) {
             WithChildNode wc = (WithChildNode) node;
-            String text = getNodeText(node);
-            double boxHeight = getTextBoxHeight(text, BOX_MAX_WIDTH);
             double childHeight = calculateHeight(wc.getChildNode());
-            return Math.max(boxHeight, childHeight);
+            return Math.max(BOX_HEIGHT, childHeight);
         } else {
-            String text = getNodeText(node);
-            return getTextBoxHeight(text, BOX_MAX_WIDTH);
+            return BOX_HEIGHT;
         }
     }
 
@@ -347,37 +299,34 @@ public class PadAlignedRenderer {
 
     private double drawTerminal(TerminalNode node, double x, double y, double width) {
         String text = node.getText();
-        double boxHeight = getTextBoxHeight(text, width);
 
         // Draw ellipse (original PADtools style)
-        Ellipse2D ellipse = new Ellipse2D.Double(x, y, width, boxHeight);
+        Ellipse2D ellipse = new Ellipse2D.Double(x, y, width, BOX_HEIGHT);
         g2d.setColor(FILL_COLOR);
         g2d.fill(ellipse);
         g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.draw(ellipse);
 
-        drawCenteredText(text, x, y, width, boxHeight, TEXT_COLOR, MAIN_FONT);
-        return y + boxHeight;
+        drawCenteredText(text, x, y, width, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
+        return y + BOX_HEIGHT;
     }
 
     private double drawComment(CommentNode node, double x, double y, double width) {
         String text = "(" + node.getText() + ")";  // Original PADtools style: parentheses
-        double boxHeight = getTextBoxHeight(text, width);
 
         // No box, just text with parentheses (original PADtools style)
-        drawCenteredText(text, x, y, width, boxHeight, TEXT_COLOR, MAIN_FONT);
-        return y + boxHeight;
+        drawCenteredText(text, x, y, width, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
+        return y + BOX_HEIGHT;
     }
 
     private double drawCall(CallNode node, int depth, double x, double y, double width) {
         String text = node.getText();
-        double textBoxHeight = getTextBoxHeight(text, width - BAR_WIDTH * 2);
         double childHeight = calculateHeight(node.getChildNode());
-        double boxHeight = Math.max(textBoxHeight, childHeight);
+        double totalHeight = Math.max(BOX_HEIGHT, childHeight);
 
         // Draw call box with double vertical bars (original PADtools style)
-        Rectangle2D rect = new Rectangle2D.Double(x, y, width, textBoxHeight);
+        Rectangle2D rect = new Rectangle2D.Double(x, y, width, BOX_HEIGHT);
         g2d.setColor(FILL_COLOR);
         g2d.fill(rect);
         g2d.setColor(STROKE_COLOR);
@@ -385,113 +334,108 @@ public class PadAlignedRenderer {
         g2d.draw(rect);
 
         // Draw double vertical bars on left and right
-        g2d.drawLine((int)(x + BAR_WIDTH), (int)y, (int)(x + BAR_WIDTH), (int)(y + textBoxHeight));
+        g2d.drawLine((int)(x + BAR_WIDTH), (int)y, (int)(x + BAR_WIDTH), (int)(y + BOX_HEIGHT));
         g2d.drawLine((int)(x + width - BAR_WIDTH), (int)y,
-                     (int)(x + width - BAR_WIDTH), (int)(y + textBoxHeight));
+                     (int)(x + width - BAR_WIDTH), (int)(y + BOX_HEIGHT));
 
         drawCenteredText(text, x + BAR_WIDTH, y,
-                        width - BAR_WIDTH * 2, textBoxHeight, TEXT_COLOR, MAIN_FONT);
+                        width - BAR_WIDTH * 2, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
 
         // Draw vertical line connecting to children (on right side of box)
         if (node.getChildNode() != null && childHeight > 0) {
             double lineX = x + width;
             g2d.setColor(STROKE_COLOR);
             g2d.setStroke(new BasicStroke(1.5f));
-            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + boxHeight));
+            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + totalHeight));
 
             drawNode(node.getChildNode(), depth + 1, y);
         }
 
-        return y + boxHeight;
+        return y + totalHeight;
     }
 
     private double drawProcess(ProcessNode node, int depth, double x, double y, double width) {
         String text = node.getText();
-        double textBoxHeight = getTextBoxHeight(text, width);
         double childHeight = calculateHeight(node.getChildNode());
-        double boxHeight = Math.max(textBoxHeight, childHeight);
+        double totalHeight = Math.max(BOX_HEIGHT, childHeight);
 
         // Draw process box (original PADtools style: simple rectangle)
-        Rectangle2D rect = new Rectangle2D.Double(x, y, width, textBoxHeight);
+        Rectangle2D rect = new Rectangle2D.Double(x, y, width, BOX_HEIGHT);
         g2d.setColor(FILL_COLOR);
         g2d.fill(rect);
         g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.draw(rect);
 
-        drawCenteredText(text, x, y, width, textBoxHeight, TEXT_COLOR, MAIN_FONT);
+        drawCenteredText(text, x, y, width, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
 
         // Draw vertical line connecting to children (on right side of box)
         if (node.getChildNode() != null && childHeight > 0) {
             double lineX = x + width;
             g2d.setColor(STROKE_COLOR);
             g2d.setStroke(new BasicStroke(1.5f));
-            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + boxHeight));
+            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + totalHeight));
 
             drawNode(node.getChildNode(), depth + 1, y);
         }
 
-        return y + boxHeight;
+        return y + totalHeight;
     }
 
     private double drawSwitch(SwitchNode node, int depth, double x, double y, double width) {
         LinkedHashMap<String, NodeBase> cases = node.getCases();
 
-        double conditionWidth = width * 0.35;
-        double arrowWidth = 20;  // Width for arrow part
-        double pennantX = x + conditionWidth;  // Pennant area starts after condition text
-        double arrowX = pennantX + conditionWidth - arrowWidth;  // Arrow starts here
+        // Layout: [condition] | [case label] > [children]
+        double conditionWidth = width * 0.4;
+        double caseWidth = width * 0.6;
+        double arrowWidth = 15;
 
-        // Calculate total height with wrapped text (no gaps between cases)
+        // Calculate total height
         double totalHeight = 0;
         for (Map.Entry<String, NodeBase> entry : cases.entrySet()) {
-            String caseLabel = entry.getKey();
             NodeBase caseChild = entry.getValue();
-            double caseBoxHeight = getTextBoxHeight(caseLabel, arrowX - pennantX);
             double childHeight = calculateHeight(caseChild);
-            totalHeight += Math.max(caseBoxHeight, childHeight);
+            totalHeight += Math.max(BOX_HEIGHT, childHeight);
         }
 
-        // Draw condition text on far left (original PADtools style)
+        // Draw condition text on far left
         drawCenteredText(node.getText(), x, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
 
-        // Draw vertical line at pennant left edge (connects all arrows)
+        // Draw vertical line at condition right edge
+        double lineX = x + conditionWidth;
         g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
-        g2d.drawLine((int)pennantX, (int)y, (int)pennantX, (int)(y + totalHeight));
+        g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + totalHeight));
 
-        // Draw top border line
-        g2d.drawLine((int)pennantX, (int)y, (int)arrowX, (int)y);
-
-        // Draw cases with separator lines
+        // Draw each case
         double caseY = y;
+        double caseX = x + conditionWidth;
+        double arrowX = caseX + caseWidth - arrowWidth;
+        double arrowTipX = caseX + caseWidth;
 
         for (Map.Entry<String, NodeBase> entry : cases.entrySet()) {
             String caseLabel = entry.getKey();
             NodeBase caseChild = entry.getValue();
-            double caseBoxHeight = getTextBoxHeight(caseLabel, arrowX - pennantX);
             double childHeight = calculateHeight(caseChild);
-            double rowHeight = Math.max(caseBoxHeight, childHeight);
+            double rowHeight = Math.max(BOX_HEIGHT, childHeight);
 
-            // Draw arrow shape (chevron pointing right) - original PADtools style
-            g2d.setColor(STROKE_COLOR);
-            g2d.setStroke(new BasicStroke(1.5f));
+            // Draw top line for this case
+            g2d.drawLine((int)caseX, (int)caseY, (int)arrowTipX, (int)caseY);
+
+            // Draw arrow shape (chevron)
             double arrowMidY = caseY + rowHeight / 2;
-            // Top diagonal of arrow
-            g2d.draw(new Line2D.Double(arrowX, caseY, arrowX + arrowWidth, arrowMidY));
-            // Bottom diagonal of arrow
-            g2d.draw(new Line2D.Double(arrowX + arrowWidth, arrowMidY, arrowX, caseY + rowHeight));
+            g2d.draw(new Line2D.Double(arrowX, caseY, arrowTipX, arrowMidY));
+            g2d.draw(new Line2D.Double(arrowTipX, arrowMidY, arrowX, caseY + rowHeight));
 
-            // Draw case label as plain text (no box) - original PADtools style
-            drawCenteredText(caseLabel, pennantX, caseY, arrowX - pennantX, rowHeight, TEXT_COLOR, MAIN_FONT);
+            // Draw case label
+            drawCenteredText(caseLabel, caseX, caseY, caseWidth - arrowWidth, rowHeight, TEXT_COLOR, MAIN_FONT);
 
-            // Draw bottom border line for this case (also serves as separator)
-            g2d.drawLine((int)pennantX, (int)(caseY + rowHeight), (int)arrowX, (int)(caseY + rowHeight));
+            // Draw bottom line for this case
+            g2d.drawLine((int)caseX, (int)(caseY + rowHeight), (int)arrowTipX, (int)(caseY + rowHeight));
 
-            // Draw vertical line connecting to children (at arrow tip)
+            // Draw vertical line to children and draw children
             if (caseChild != null && childHeight > 0) {
-                double lineX = arrowX + arrowWidth;
-                g2d.drawLine((int)lineX, (int)caseY, (int)lineX, (int)(caseY + rowHeight));
+                g2d.drawLine((int)arrowTipX, (int)caseY, (int)arrowTipX, (int)(caseY + rowHeight));
                 drawNode(caseChild, depth + 1, caseY);
             }
 
@@ -508,34 +452,42 @@ public class PadAlignedRenderer {
         double elseRowHeight = node.getFalseNode() != null ? Math.max(BOX_HEIGHT, elseChildHeight) : 0;
         double totalHeight = thenRowHeight + elseRowHeight;
 
-        double conditionWidth = width * 0.35;
-        double arrowWidth = 20;  // Width for arrow part
-        double pennantX = x + conditionWidth;  // Pennant area starts after condition text
-        double arrowX = pennantX + conditionWidth - arrowWidth;  // Arrow starts here
+        // Layout: [condition] | [then/else] > [children]
+        double conditionWidth = width * 0.4;
+        double branchWidth = width * 0.6;
+        double arrowWidth = 15;
 
-        // Draw condition text on far left (original PADtools style)
+        // Draw condition text on far left
         drawCenteredText(node.getText(), x, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
 
-        // Draw vertical line at pennant left edge (connects all arrows)
+        // Draw vertical line at condition right edge
+        double lineX = x + conditionWidth;
         g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
-        g2d.drawLine((int)pennantX, (int)y, (int)pennantX, (int)(y + totalHeight));
+        g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + totalHeight));
 
-        // Draw top border line
-        g2d.drawLine((int)pennantX, (int)y, (int)arrowX, (int)y);
+        double branchX = x + conditionWidth;
+        double arrowX = branchX + branchWidth - arrowWidth;
+        double arrowTipX = branchX + branchWidth;
 
-        // Draw then branch arrow shape (chevron pointing right)
+        // Draw then branch
+        // Top line
+        g2d.drawLine((int)branchX, (int)y, (int)arrowTipX, (int)y);
+
+        // Arrow shape
         double thenMidY = y + thenRowHeight / 2;
-        g2d.draw(new Line2D.Double(arrowX, y, arrowX + arrowWidth, thenMidY));
-        g2d.draw(new Line2D.Double(arrowX + arrowWidth, thenMidY, arrowX, y + thenRowHeight));
+        g2d.draw(new Line2D.Double(arrowX, y, arrowTipX, thenMidY));
+        g2d.draw(new Line2D.Double(arrowTipX, thenMidY, arrowX, y + thenRowHeight));
 
-        // Draw bottom border line for then branch (separator to else)
-        g2d.drawLine((int)pennantX, (int)(y + thenRowHeight), (int)arrowX, (int)(y + thenRowHeight));
+        // Then label (empty or "then")
+        drawCenteredText("", branchX, y, branchWidth - arrowWidth, thenRowHeight, TEXT_COLOR, MAIN_FONT);
 
-        // Draw vertical line connecting to then children (at arrow tip)
+        // Bottom line
+        g2d.drawLine((int)branchX, (int)(y + thenRowHeight), (int)arrowTipX, (int)(y + thenRowHeight));
+
+        // Vertical line to children
         if (node.getTrueNode() != null && thenChildHeight > 0) {
-            double lineX = arrowX + arrowWidth;
-            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + thenRowHeight));
+            g2d.drawLine((int)arrowTipX, (int)y, (int)arrowTipX, (int)(y + thenRowHeight));
             drawNode(node.getTrueNode(), depth + 1, y);
         }
 
@@ -543,34 +495,33 @@ public class PadAlignedRenderer {
         if (node.getFalseNode() != null) {
             double elseY = y + thenRowHeight;
 
-            // Draw else branch arrow shape (chevron pointing right)
+            // Arrow shape
             double elseMidY = elseY + elseRowHeight / 2;
-            g2d.draw(new Line2D.Double(arrowX, elseY, arrowX + arrowWidth, elseMidY));
-            g2d.draw(new Line2D.Double(arrowX + arrowWidth, elseMidY, arrowX, elseY + elseRowHeight));
+            g2d.draw(new Line2D.Double(arrowX, elseY, arrowTipX, elseMidY));
+            g2d.draw(new Line2D.Double(arrowTipX, elseMidY, arrowX, elseY + elseRowHeight));
 
-            // Draw else label
-            drawCenteredText("else", pennantX, elseY, arrowX - pennantX, elseRowHeight, TEXT_COLOR, MAIN_FONT);
+            // Else label
+            drawCenteredText("else", branchX, elseY, branchWidth - arrowWidth, elseRowHeight, TEXT_COLOR, MAIN_FONT);
 
-            // Draw vertical line connecting to else children (at arrow tip)
+            // Bottom line
+            g2d.drawLine((int)branchX, (int)(elseY + elseRowHeight), (int)arrowTipX, (int)(elseY + elseRowHeight));
+
+            // Vertical line to children
             if (elseChildHeight > 0) {
-                double lineX = arrowX + arrowWidth;
-                g2d.drawLine((int)lineX, (int)elseY, (int)lineX, (int)(elseY + elseRowHeight));
+                g2d.drawLine((int)arrowTipX, (int)elseY, (int)arrowTipX, (int)(elseY + elseRowHeight));
             }
 
             drawNode(node.getFalseNode(), depth + 1, elseY);
         }
-
-        // Draw bottom border line
-        g2d.drawLine((int)pennantX, (int)(y + totalHeight), (int)arrowX, (int)(y + totalHeight));
 
         return y + totalHeight;
     }
 
     private double drawLoop(LoopNode node, int depth, double x, double y, double width) {
         double childHeight = calculateHeight(node.getChildNode());
-        double boxHeight = Math.max(BOX_HEIGHT, childHeight + BOX_HEIGHT);
+        double totalHeight = Math.max(BOX_HEIGHT, childHeight + BOX_HEIGHT);
 
-        // Draw loop condition box (original PADtools style)
+        // Draw loop condition box
         Rectangle2D rect = new Rectangle2D.Double(x, y, width, BOX_HEIGHT);
         g2d.setColor(FILL_COLOR);
         g2d.fill(rect);
@@ -583,56 +534,24 @@ public class PadAlignedRenderer {
         // Draw vertical line connecting to children
         if (node.getChildNode() != null && childHeight > 0) {
             double lineX = x + width;
-            g2d.setColor(STROKE_COLOR);
-            g2d.setStroke(new BasicStroke(1.5f));
-            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + boxHeight));
-
+            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + totalHeight));
             drawNode(node.getChildNode(), depth + 1, y + BOX_HEIGHT);
         }
 
-        return y + boxHeight;
+        return y + totalHeight;
     }
 
     private void drawCenteredText(String text, double x, double y, double width, double height,
                                   Color color, Font font) {
+        if (text == null || text.isEmpty()) return;
+
         g2d.setFont(font);
         g2d.setColor(color);
         FontMetrics metrics = g2d.getFontMetrics(font);
 
-        // Wrap text if needed
-        List<String> lines = wrapText(text, width - TEXT_PADDING * 2, metrics);
-
-        // Calculate total text height
-        double totalTextHeight = lines.size() * LINE_HEIGHT;
-        double startY = y + (height - totalTextHeight) / 2 + metrics.getAscent();
-
-        // Draw each line centered
-        for (int i = 0; i < lines.size(); i++) {
-            String line = lines.get(i);
-            double textX = x + (width - metrics.stringWidth(line)) / 2;
-            double textY = startY + i * LINE_HEIGHT;
-            g2d.drawString(line, (float)textX, (float)textY);
-        }
-    }
-
-    // Draw text with wrapping, returning actual height used
-    private double drawWrappedText(String text, double x, double y, double width,
-                                   Color color, Font font) {
-        g2d.setFont(font);
-        g2d.setColor(color);
-        FontMetrics metrics = g2d.getFontMetrics(font);
-
-        List<String> lines = wrapText(text, width - TEXT_PADDING * 2, metrics);
-        double boxHeight = Math.max(BOX_HEIGHT, lines.size() * LINE_HEIGHT + TEXT_PADDING * 2);
-
-        double startY = y + TEXT_PADDING + metrics.getAscent();
-        for (int i = 0; i < lines.size(); i++) {
-            String line = lines.get(i);
-            double textX = x + (width - metrics.stringWidth(line)) / 2;
-            double textY = startY + i * LINE_HEIGHT;
-            g2d.drawString(line, (float)textX, (float)textY);
-        }
-
-        return boxHeight;
+        // Single line, centered
+        double textX = x + (width - metrics.stringWidth(text)) / 2;
+        double textY = y + (height - metrics.getHeight()) / 2 + metrics.getAscent();
+        g2d.drawString(text, (float)textX, (float)textY);
     }
 }
