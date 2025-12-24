@@ -321,16 +321,9 @@ public class PadAlignedRenderer {
 
         if (node instanceof NodeListNode) {
             NodeListNode list = (NodeListNode) node;
-            double startY = y;
             for (NodeBase child : list.getChildren()) {
                 y = drawNode(child, depth, y);
                 y += ROW_GAP;
-            }
-            // Draw vertical connecting line (original PADtools style)
-            if (list.getChildren().size() > 1) {
-                g2d.setColor(STROKE_COLOR);
-                g2d.setStroke(new BasicStroke(1.5f));
-                g2d.drawLine((int)x, (int)startY, (int)x, (int)(y - ROW_GAP));
             }
             return y - ROW_GAP;
         } else if (node instanceof TerminalNode) {
@@ -399,8 +392,13 @@ public class PadAlignedRenderer {
         drawCenteredText(text, x + BAR_WIDTH, y,
                         width - BAR_WIDTH * 2, textBoxHeight, TEXT_COLOR, MAIN_FONT);
 
-        // Draw child
-        if (node.getChildNode() != null) {
+        // Draw vertical line connecting to children (on right side of box)
+        if (node.getChildNode() != null && childHeight > 0) {
+            double lineX = x + width;
+            g2d.setColor(STROKE_COLOR);
+            g2d.setStroke(new BasicStroke(1.5f));
+            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + boxHeight));
+
             drawNode(node.getChildNode(), depth + 1, y);
         }
 
@@ -423,8 +421,13 @@ public class PadAlignedRenderer {
 
         drawCenteredText(text, x, y, width, textBoxHeight, TEXT_COLOR, MAIN_FONT);
 
-        // Draw child
-        if (node.getChildNode() != null) {
+        // Draw vertical line connecting to children (on right side of box)
+        if (node.getChildNode() != null && childHeight > 0) {
+            double lineX = x + width;
+            g2d.setColor(STROKE_COLOR);
+            g2d.setStroke(new BasicStroke(1.5f));
+            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + boxHeight));
+
             drawNode(node.getChildNode(), depth + 1, y);
         }
 
@@ -448,6 +451,11 @@ public class PadAlignedRenderer {
             totalHeight += Math.max(caseBoxHeight, childHeight) + ROW_GAP;
         }
         totalHeight -= ROW_GAP;
+
+        // Draw vertical line on left for condition area (original PADtools style)
+        g2d.setColor(STROKE_COLOR);
+        g2d.setStroke(new BasicStroke(1.5f));
+        g2d.drawLine((int)x, (int)y, (int)x, (int)(y + totalHeight));
 
         // Draw condition text on left (original style: plain text)
         drawCenteredText(node.getText(), x, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
@@ -482,8 +490,13 @@ public class PadAlignedRenderer {
             drawCenteredText(caseLabel, caseX + arrowWidth, caseY,
                             caseWidth - arrowWidth * 2, caseBoxHeight, TEXT_COLOR, MAIN_FONT);
 
-            // Draw child
-            if (caseChild != null) {
+            // Draw vertical line connecting to children
+            if (caseChild != null && childHeight > 0) {
+                double lineX = x + width;
+                g2d.setColor(STROKE_COLOR);
+                g2d.setStroke(new BasicStroke(1.5f));
+                g2d.drawLine((int)lineX, (int)caseY, (int)lineX, (int)(caseY + rowHeight));
+
                 drawNode(caseChild, depth + 1, caseY);
             }
 
@@ -494,14 +507,20 @@ public class PadAlignedRenderer {
     }
 
     private double drawIf(IfNode node, int depth, double x, double y, double width) {
-        double thenHeight = BOX_HEIGHT + calculateHeight(node.getTrueNode());
-        double elseHeight = node.getFalseNode() != null ?
-            BOX_HEIGHT + calculateHeight(node.getFalseNode()) : 0;
+        double thenChildHeight = calculateHeight(node.getTrueNode());
+        double thenHeight = BOX_HEIGHT + thenChildHeight;
+        double elseChildHeight = node.getFalseNode() != null ? calculateHeight(node.getFalseNode()) : 0;
+        double elseHeight = node.getFalseNode() != null ? BOX_HEIGHT + elseChildHeight : 0;
         double totalHeight = thenHeight + elseHeight + (elseHeight > 0 ? ROW_GAP : 0);
 
         double conditionWidth = width * 0.35;
         double arrowWidth = 16;
         double branchWidth = width - conditionWidth;
+
+        // Draw vertical line on left for condition area (original PADtools style)
+        g2d.setColor(STROKE_COLOR);
+        g2d.setStroke(new BasicStroke(1.5f));
+        g2d.drawLine((int)x, (int)y, (int)x, (int)(y + totalHeight));
 
         // Draw condition text on left (original style)
         drawCenteredText(node.getText(), x, y, conditionWidth, totalHeight, TEXT_COLOR, MAIN_FONT);
@@ -523,6 +542,14 @@ public class PadAlignedRenderer {
         g2d.setColor(STROKE_COLOR);
         g2d.setStroke(new BasicStroke(1.5f));
         g2d.draw(thenArrow);
+
+        // Draw vertical line connecting to then children
+        if (node.getTrueNode() != null && thenChildHeight > 0) {
+            double lineX = x + width;
+            g2d.setColor(STROKE_COLOR);
+            g2d.setStroke(new BasicStroke(1.5f));
+            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + thenHeight));
+        }
 
         // Draw then child
         double thenY = y + BOX_HEIGHT;
@@ -552,6 +579,14 @@ public class PadAlignedRenderer {
             drawCenteredText("else", branchX + arrowWidth, elseY,
                             branchWidth - arrowWidth * 2, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
 
+            // Draw vertical line connecting to else children
+            if (elseChildHeight > 0) {
+                double lineX = x + width;
+                g2d.setColor(STROKE_COLOR);
+                g2d.setStroke(new BasicStroke(1.5f));
+                g2d.drawLine((int)lineX, (int)elseY, (int)lineX, (int)(elseY + elseHeight));
+            }
+
             drawNode(node.getFalseNode(), depth + 1, elseY + BOX_HEIGHT);
         }
 
@@ -572,8 +607,13 @@ public class PadAlignedRenderer {
 
         drawCenteredText(node.getText(), x, y, width, BOX_HEIGHT, TEXT_COLOR, MAIN_FONT);
 
-        // Draw child
-        if (node.getChildNode() != null) {
+        // Draw vertical line connecting to children
+        if (node.getChildNode() != null && childHeight > 0) {
+            double lineX = x + width;
+            g2d.setColor(STROKE_COLOR);
+            g2d.setStroke(new BasicStroke(1.5f));
+            g2d.drawLine((int)lineX, (int)y, (int)lineX, (int)(y + boxHeight));
+
             drawNode(node.getChildNode(), depth + 1, y + BOX_HEIGHT);
         }
 
