@@ -6,5 +6,5 @@ GUIツール:
     - report-workflow: レポート生成ワークフロー
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __author__ = "mashi727"
