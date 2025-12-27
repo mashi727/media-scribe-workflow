@@ -47,6 +47,121 @@ except ImportError:
 import tempfile
 import wave
 import struct
+import platform
+
+
+# ==============================================================================
+# GPUエンコーダ検出
+# ==============================================================================
+
+def detect_available_encoders() -> List[Tuple[str, str, str]]:
+    """
+    利用可能なH.264エンコーダを検出
+
+    Returns:
+        List of (encoder_id, display_name, description)
+        例: [("h264_videotoolbox", "GPU (VideoToolbox)", "Apple GPU高速エンコード")]
+    """
+    encoders = []
+
+    # プラットフォーム別のGPUエンコーダ候補
+    if platform.system() == "Darwin":
+        # macOS: VideoToolbox
+        gpu_candidates = [
+            ("h264_videotoolbox", "GPU (VideoToolbox)", "Apple GPUで高速エンコード"),
+        ]
+    elif platform.system() == "Windows":
+        # Windows: NVENC, QSV, AMF
+        gpu_candidates = [
+            ("h264_nvenc", "GPU (NVIDIA)", "NVIDIA GPUで高速エンコード"),
+            ("h264_qsv", "GPU (Intel QSV)", "Intel GPUで高速エンコード"),
+            ("h264_amf", "GPU (AMD)", "AMD GPUで高速エンコード"),
+        ]
+    else:
+        # Linux
+        gpu_candidates = [
+            ("h264_nvenc", "GPU (NVIDIA)", "NVIDIA GPUで高速エンコード"),
+            ("h264_vaapi", "GPU (VAAPI)", "VAAPI GPUで高速エンコード"),
+            ("h264_qsv", "GPU (Intel QSV)", "Intel GPUで高速エンコード"),
+        ]
+
+    # ffmpegでエンコーダの利用可否を確認
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        available_output = result.stdout
+
+        for encoder_id, display_name, description in gpu_candidates:
+            if encoder_id in available_output:
+                encoders.append((encoder_id, display_name, description))
+    except Exception as e:
+        print(f"[Encoder] GPU検出エラー: {e}")
+
+    # CPUエンコーダは常に利用可能
+    encoders.append(("libx264", "CPU (x264)", "CPU処理・高画質"))
+
+    return encoders
+
+
+def get_encoder_args(encoder_id: str) -> List[str]:
+    """
+    エンコーダIDに応じたffmpegオプションを返す
+
+    Args:
+        encoder_id: "h264_videotoolbox", "h264_nvenc", "libx264" など
+
+    Returns:
+        ffmpegコマンド引数リスト
+    """
+    if encoder_id == "h264_videotoolbox":
+        # macOS VideoToolbox
+        return [
+            '-c:v', 'h264_videotoolbox',
+            '-b:v', '8M',  # ビットレート指定（VBR）
+            '-pix_fmt', 'yuv420p',
+        ]
+    elif encoder_id == "h264_nvenc":
+        # NVIDIA NVENC
+        return [
+            '-c:v', 'h264_nvenc',
+            '-preset', 'p4',  # バランス（p1=最速, p7=最高画質）
+            '-b:v', '8M',
+            '-pix_fmt', 'yuv420p',
+        ]
+    elif encoder_id == "h264_qsv":
+        # Intel Quick Sync
+        return [
+            '-c:v', 'h264_qsv',
+            '-preset', 'medium',
+            '-b:v', '8M',
+            '-pix_fmt', 'nv12',
+        ]
+    elif encoder_id == "h264_amf":
+        # AMD AMF
+        return [
+            '-c:v', 'h264_amf',
+            '-quality', 'balanced',
+            '-b:v', '8M',
+            '-pix_fmt', 'yuv420p',
+        ]
+    elif encoder_id == "h264_vaapi":
+        # VAAPI (Linux)
+        return [
+            '-c:v', 'h264_vaapi',
+            '-b:v', '8M',
+        ]
+    else:
+        # CPU (libx264) - デフォルト
+        return [
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+        ]
 
 
 # ==============================================================================
@@ -1276,6 +1391,7 @@ class ExportWorker(QThread):
                  embed_title: bool = True,
                  overlay_chapter_titles: bool = False,
                  total_duration_ms: int = 0,
+                 encoder_id: str = "libx264",
                  parent=None):
         super().__init__(parent)
         self.input_file = input_file
@@ -1285,6 +1401,7 @@ class ExportWorker(QThread):
         self.embed_title = embed_title
         self.overlay_chapter_titles = overlay_chapter_titles
         self.total_duration_ms = total_duration_ms
+        self.encoder_id = encoder_id
         self._temp_files: List[str] = []  # 一時ファイル管理
 
         # 除外チャプターの処理
@@ -1507,6 +1624,17 @@ class ExportWorker(QThread):
         try:
             self.progress_update.emit("書出を開始します...")
 
+            # エンコーダ情報を表示
+            encoder_name = {
+                "h264_videotoolbox": "GPU (VideoToolbox)",
+                "h264_nvenc": "GPU (NVIDIA NVENC)",
+                "h264_qsv": "GPU (Intel QSV)",
+                "h264_amf": "GPU (AMD AMF)",
+                "h264_vaapi": "GPU (VAAPI)",
+                "libx264": "CPU (x264)",
+            }.get(self.encoder_id, self.encoder_id)
+            self.progress_update.emit(f"エンコーダ: {encoder_name}")
+
             # 除外区間の情報を表示
             if self._has_excluded_segments():
                 excluded_count = len(self._excluded_segments)
@@ -1543,27 +1671,23 @@ class ExportWorker(QThread):
                     combined_filter = trim_concat_filter + f";[outv]{drawtext_filter}[finalv]"
                     self.progress_update.emit(f"チャプタータイトル: {len(chapters_to_use)}件を映像に焼き込み")
 
+                    encoder_args = get_encoder_args(self.encoder_id)
                     cmd.extend([
                         '-filter_complex', combined_filter,
                         '-map', '[finalv]',
                         '-map', '[outa]',
-                        '-c:v', 'libx264',
-                        '-preset', 'ultrafast',
-                        '-crf', '23',
-                        '-pix_fmt', 'yuv420p',
+                    ] + encoder_args + [
                         '-c:a', 'aac', '-b:a', '192k',
                         '-movflags', '+faststart'
                     ])
                 else:
                     # カット＆結合のみ（オーバーレイなし）
+                    encoder_args = get_encoder_args(self.encoder_id)
                     cmd.extend([
                         '-filter_complex', trim_concat_filter,
                         '-map', '[outv]',
                         '-map', '[outa]',
-                        '-c:v', 'libx264',
-                        '-preset', 'ultrafast',
-                        '-crf', '23',
-                        '-pix_fmt', 'yuv420p',
+                    ] + encoder_args + [
                         '-c:a', 'aac', '-b:a', '192k',
                         '-movflags', '+faststart'
                     ])
@@ -1572,12 +1696,10 @@ class ExportWorker(QThread):
                 vf = self._create_drawtext_filter()
                 self.progress_update.emit(f"チャプタータイトル: {len(self.chapters)}件を映像に焼き込み")
 
+                encoder_args = get_encoder_args(self.encoder_id)
                 cmd.extend([
                     '-vf', vf,
-                    '-c:v', 'libx264',
-                    '-preset', 'ultrafast',
-                    '-crf', '23',
-                    '-pix_fmt', 'yuv420p',
+                ] + encoder_args + [
                     '-c:a', 'aac', '-b:a', '192k',
                     '-movflags', '+faststart'
                 ])
@@ -2626,6 +2748,39 @@ class EditTab(QWidget):
         embed_layout.addStretch()
         right_layout.addLayout(embed_layout)
 
+        # エンコーダ選択
+        encoder_layout = QHBoxLayout()
+        encoder_layout.setSpacing(4)
+        encoder_label = QLabel("エンコーダ:")
+        encoder_label.setStyleSheet(label_header)
+        encoder_label.setFixedWidth(80)
+        encoder_layout.addWidget(encoder_label)
+
+        self.encoder_combo = QComboBox()
+        self.encoder_combo.setStyleSheet("""
+            QComboBox {
+                font-size: 14px;
+                padding: 4px 8px;
+                background: #3a3a3a;
+                color: #ddd;
+                border: 1px solid #555;
+                border-radius: 4px;
+            }
+            QComboBox:hover { border-color: #666; }
+            QComboBox::drop-down { border: none; }
+            QComboBox::down-arrow { image: none; border: none; }
+        """)
+        # 利用可能なエンコーダを検出して追加
+        self._available_encoders = detect_available_encoders()
+        for encoder_id, display_name, description in self._available_encoders:
+            self.encoder_combo.addItem(display_name, encoder_id)
+            # ツールチップにdescriptionを設定
+            idx = self.encoder_combo.count() - 1
+            self.encoder_combo.setItemData(idx, description, Qt.ItemDataRole.ToolTipRole)
+        encoder_layout.addWidget(self.encoder_combo)
+        encoder_layout.addStretch()
+        right_layout.addLayout(encoder_layout)
+
         # アクションボタン（開く + 書出）- 幅2分割
         action_layout = QHBoxLayout()
         action_layout.setSpacing(6)
@@ -3140,6 +3295,9 @@ class EditTab(QWidget):
         self.export_progress.setFormat("0% - 準備中...")
         self.export_progress.show()
 
+        # 選択されたエンコーダを取得
+        encoder_id = self.encoder_combo.currentData()
+
         # ワーカーを起動
         self._export_worker = ExportWorker(
             input_file=self.media_file,
@@ -3149,6 +3307,7 @@ class EditTab(QWidget):
             embed_title=True,  # メタデータタイトルは常に埋め込む
             overlay_chapter_titles=overlay_titles,
             total_duration_ms=total_duration_ms,
+            encoder_id=encoder_id,
             parent=self
         )
         self._export_worker.progress_update.connect(self._on_export_progress)
