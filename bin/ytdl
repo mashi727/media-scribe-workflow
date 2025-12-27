@@ -1,0 +1,211 @@
+#!/usr/bin/env zsh
+# ==============================================================================
+# ytdl - YouTube動画/字幕ダウンロード
+# ==============================================================================
+#
+# 使用方法:
+#   ytdl <YouTube_URL> -o <ファイル名> [OPTIONS]
+#
+# オプション:
+#   -o, --output NAME  出力ファイル名（拡張子なし、必須）
+#   -S, --srt-only     字幕のみダウンロード
+#   --sub-lang LANG    字幕言語（デフォルト: ja）
+#   --no-subs          字幕をダウンロードしない
+#   -h, --help         ヘルプを表示
+#
+# 出力:
+#   動画: {NAME}.mp4
+#   字幕: {NAME}_yt.srt
+#
+# 備考:
+#   同名の動画ファイルが存在する場合、動画ダウンロードはスキップ
+#
+# ==============================================================================
+
+local url=""
+local output_name=""
+local srt_only=false
+local download_subs=true
+local sub_lang="ja"
+local help=false
+
+# 引数解析
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            help=true
+            shift
+            ;;
+        -o|--output)
+            output_name="$2"
+            shift 2
+            ;;
+        -S|--srt-only)
+            srt_only=true
+            shift
+            ;;
+        --sub-lang)
+            sub_lang="$2"
+            shift 2
+            ;;
+        --no-subs)
+            download_subs=false
+            shift
+            ;;
+        *)
+            if [[ -z "$url" ]]; then
+                url="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# ヘルプ表示
+if [[ "$help" == true ]]; then
+    cat <<EOF
+Usage: ytdl <YouTube URL> -o <filename> [options]
+
+Options:
+  -o, --output NAME  Output filename (without extension, required)
+  -S, --srt-only     Download subtitles only (no video)
+  --sub-lang LANG    Subtitle language (default: ja)
+  --no-subs          Do not download subtitles
+  -h, --help         Show this help message
+
+Output files:
+  Video: {NAME}.mp4
+  Subtitle: {NAME}_yt.srt
+
+Note:
+  If video file already exists, download will be skipped.
+
+Example:
+  ytdl "https://youtu.be/VIDEO_ID" -o "my_video"
+  ytdl "https://youtu.be/VIDEO_ID" -o "lecture" --srt-only
+  ytdl "https://youtu.be/VIDEO_ID" -o "video" --sub-lang en
+EOF
+    return 0
+fi
+
+# 検証
+if [[ -z "$url" ]]; then
+    echo "[ERROR] YouTube URL is required"
+    return 1
+fi
+
+if [[ -z "$output_name" ]]; then
+    echo "[ERROR] Output filename is required (-o option)"
+    return 1
+fi
+
+# yt-dlp確認
+if ! command -v yt-dlp &> /dev/null; then
+    echo "[ERROR] yt-dlp is not installed. Install with: brew install yt-dlp"
+    return 1
+fi
+
+echo "[INFO] URL: $url"
+echo "[INFO] Output: $output_name"
+
+# 字幕のみダウンロード
+if [[ "$srt_only" == true ]]; then
+    echo "[INFO] Downloading subtitles only (lang: $sub_lang)..."
+
+    yt-dlp --cookies-from-browser safari \
+        --skip-download \
+        --write-auto-sub \
+        --sub-lang "$sub_lang" \
+        --sub-format srt \
+        --convert-subs srt \
+        -o "${output_name}.%(ext)s" \
+        "$url"
+
+    if [[ $? -eq 0 ]]; then
+        local sub_file="${output_name}.${sub_lang}.srt"
+        local target_file="${output_name}_yt.srt"
+
+        if [[ -f "$sub_file" ]]; then
+            mv "$sub_file" "$target_file"
+            echo "[SUCCESS] Subtitle saved: ${target_file}"
+        else
+            echo "[ERROR] No subtitles available for this video"
+            return 1
+        fi
+    else
+        echo "[ERROR] Subtitle download failed"
+        return 1
+    fi
+    return 0
+fi
+
+# 動画ダウンロード（既存チェック）
+local video_file="${output_name}.mp4"
+local target_file="${output_name}_yt.srt"
+
+if [[ -f "$video_file" ]]; then
+    echo "[INFO] Video already exists: ${video_file}"
+    echo "[INFO] Skipping video download."
+else
+    echo "[INFO] Downloading video..."
+    local ytdlp_opts=(
+        --cookies-from-browser safari
+        -f 'bv*+ba/b'
+        --merge-output-format mp4
+        -o "${output_name}.%(ext)s"
+        --no-abort-on-error
+        --ignore-errors
+    )
+
+    if [[ "$download_subs" == true ]]; then
+        echo "[INFO] Subtitles: enabled (lang: $sub_lang)"
+        ytdlp_opts+=(
+            --write-sub
+            --write-auto-sub
+            --sub-lang "$sub_lang"
+            --sub-format srt
+            --convert-subs srt
+        )
+    else
+        echo "[INFO] Subtitles: disabled"
+    fi
+
+    yt-dlp "${ytdlp_opts[@]}" "$url"
+
+    if [[ $? -eq 0 ]]; then
+        echo "[SUCCESS] Video saved: ${video_file}"
+    else
+        echo "[ERROR] Download failed"
+        return 1
+    fi
+fi
+
+# 字幕ダウンロード（動画が既存の場合も実行）
+if [[ "$download_subs" == true ]] && [[ ! -f "$target_file" ]]; then
+    echo "[INFO] Downloading subtitles (lang: $sub_lang)..."
+
+    # まず手動字幕を試す、なければ自動生成字幕
+    yt-dlp --cookies-from-browser safari \
+        --skip-download \
+        --write-sub \
+        --write-auto-sub \
+        --sub-lang "$sub_lang" \
+        --sub-format srt \
+        --convert-subs srt \
+        -o "${output_name}.%(ext)s" \
+        "$url" 2>/dev/null
+fi
+
+# 字幕リネーム
+if [[ "$download_subs" == true ]]; then
+    local sub_file="${output_name}.${sub_lang}.srt"
+
+    if [[ -f "$sub_file" ]]; then
+        mv "$sub_file" "$target_file"
+        echo "[SUCCESS] Subtitle saved: ${target_file}"
+    elif [[ -f "$target_file" ]]; then
+        echo "[INFO] Subtitle already exists: ${target_file}"
+    else
+        echo "[WARN] No subtitles available for this video"
+    fi
+fi

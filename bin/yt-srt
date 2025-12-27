@@ -159,6 +159,11 @@ if [[ "$download_video" == true ]]; then
     )
 fi
 
+# 実行前のSRTファイル数を記録
+setopt localoptions nullglob
+local srt_before=(${output_dir}/*.srt(N))
+local srt_count_before=${#srt_before[@]}
+
 if ! yt-dlp "${yt_opts[@]}" "$youtube_url"; then
     log_error "Failed to download subtitles"
     return 1
@@ -167,13 +172,20 @@ fi
 # ------------------------------------------------------------------------------
 # 結果表示
 # ------------------------------------------------------------------------------
-log_info "Download complete!"
-log_info "Output directory: ${output_dir}"
-
-# 生成されたファイルを表示
-setopt localoptions nullglob
+# 生成されたファイルを確認
 local srt_files=(${output_dir}/*.srt(N))
 local mp4_files=(${output_dir}/*.mp4(N))
+local srt_count_after=${#srt_files[@]}
+
+# 新しいSRTファイルが生成されたか確認
+if [[ $srt_count_after -le $srt_count_before ]]; then
+    log_error "No subtitles available for this video (lang: ${lang})"
+    log_warn "Try with different language: yt-srt URL -l en"
+    return 1
+fi
+
+log_info "Download complete!"
+log_info "Output directory: ${output_dir}"
 
 if [[ ${#srt_files[@]} -gt 0 ]]; then
     log_info "Subtitle files:"
