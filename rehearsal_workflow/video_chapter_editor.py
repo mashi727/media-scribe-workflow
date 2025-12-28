@@ -25,10 +25,10 @@ from PySide6.QtWidgets import (
     QComboBox, QCheckBox, QProgressBar, QTabWidget, QScrollArea,
     QMessageBox, QSplitter, QFrame, QPlainTextEdit, QListWidget,
     QListWidgetItem, QSlider, QSpinBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QSizePolicy, QDialog
+    QHeaderView, QAbstractItemView, QSizePolicy, QDialog, QMenuBar, QMenu
 )
-from PySide6.QtCore import Qt, QProcess, QTimer, Signal, Slot, QUrl, QSize, QThread, QRectF, QPointF, QBuffer, QIODevice
-from PySide6.QtGui import QFont, QColor, QPalette, QImage, QPixmap, QPainter, QBrush, QTransform, QPen
+from PySide6.QtCore import Qt, QProcess, QTimer, Signal, Slot, QUrl, QSize, QThread, QRectF, QPointF, QBuffer, QIODevice, QSettings
+from PySide6.QtGui import QFont, QColor, QPalette, QImage, QPixmap, QPainter, QBrush, QTransform, QPen, QAction
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices, QAudioDevice
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -107,21 +107,66 @@ def detect_available_encoders() -> List[Tuple[str, str, str]]:
     return encoders
 
 
-def get_encoder_args(encoder_id: str) -> List[str]:
+def detect_system_font() -> str:
+    """プラットフォームに応じた日本語フォントパスを検出"""
+    system = platform.system()
+
+    if system == "Darwin":
+        # macOS: ヒラギノ角ゴシック優先
+        candidates = [
+            "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+        ]
+    elif system == "Windows":
+        # Windows: メイリオ、游ゴシック、MSゴシック
+        fonts_dir = "C:/Windows/Fonts"
+        candidates = [
+            f"{fonts_dir}/meiryo.ttc",      # メイリオ
+            f"{fonts_dir}/YuGothM.ttc",     # 游ゴシック Medium
+            f"{fonts_dir}/YuGothR.ttc",     # 游ゴシック Regular
+            f"{fonts_dir}/msgothic.ttc",    # MS ゴシック
+            f"{fonts_dir}/msmincho.ttc",    # MS 明朝
+        ]
+    else:
+        # Linux等: Noto Sans CJK
+        candidates = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+
+    for font_path in candidates:
+        if Path(font_path).exists():
+            return font_path
+
+    # フォールバック: ffmpegのデフォルトフォントを使用
+    return ""
+
+
+def get_encoder_args(encoder_id: str, bitrate_kbps: int = 4000, crf: int = 23) -> List[str]:
     """
     エンコーダIDに応じたffmpegオプションを返す
 
     Args:
         encoder_id: "h264_videotoolbox", "h264_nvenc", "libx264" など
+        bitrate_kbps: GPUエンコーダ用ビットレート（kbps）
+        crf: CPUエンコーダ(libx264)用の品質値（低いほど高画質）
 
     Returns:
         ffmpegコマンド引数リスト
     """
+    bitrate = f"{bitrate_kbps}k"
+    maxrate = f"{int(bitrate_kbps * 1.2)}k"  # 最大ビットレート（指定の1.2倍）
+    bufsize = f"{bitrate_kbps * 2}k"  # バッファサイズ（指定の2倍）
+
     if encoder_id == "h264_videotoolbox":
         # macOS VideoToolbox
         return [
             '-c:v', 'h264_videotoolbox',
-            '-b:v', '8M',  # ビットレート指定（VBR）
+            '-b:v', bitrate,
+            '-maxrate', maxrate,
+            '-bufsize', bufsize,
             '-pix_fmt', 'yuv420p',
         ]
     elif encoder_id == "h264_nvenc":
@@ -129,7 +174,9 @@ def get_encoder_args(encoder_id: str) -> List[str]:
         return [
             '-c:v', 'h264_nvenc',
             '-preset', 'p4',  # バランス（p1=最速, p7=最高画質）
-            '-b:v', '8M',
+            '-b:v', bitrate,
+            '-maxrate', maxrate,
+            '-bufsize', bufsize,
             '-pix_fmt', 'yuv420p',
         ]
     elif encoder_id == "h264_qsv":
@@ -137,7 +184,9 @@ def get_encoder_args(encoder_id: str) -> List[str]:
         return [
             '-c:v', 'h264_qsv',
             '-preset', 'medium',
-            '-b:v', '8M',
+            '-b:v', bitrate,
+            '-maxrate', maxrate,
+            '-bufsize', bufsize,
             '-pix_fmt', 'nv12',
         ]
     elif encoder_id == "h264_amf":
@@ -145,23 +194,143 @@ def get_encoder_args(encoder_id: str) -> List[str]:
         return [
             '-c:v', 'h264_amf',
             '-quality', 'balanced',
-            '-b:v', '8M',
+            '-b:v', bitrate,
+            '-maxrate', maxrate,
+            '-bufsize', bufsize,
             '-pix_fmt', 'yuv420p',
         ]
     elif encoder_id == "h264_vaapi":
         # VAAPI (Linux)
         return [
             '-c:v', 'h264_vaapi',
-            '-b:v', '8M',
+            '-b:v', bitrate,
+            '-maxrate', maxrate,
+            '-bufsize', bufsize,
         ]
     else:
-        # CPU (libx264) - デフォルト
+        # CPU (libx264) - CRFで品質ベースエンコード
         return [
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-crf', '23',
+            '-crf', str(crf),
             '-pix_fmt', 'yuv420p',
         ]
+
+
+def detect_video_bitrate(file_path: str) -> Optional[int]:
+    """
+    動画のビットレートを取得（kbps単位）
+
+    Args:
+        file_path: 動画ファイルパス
+
+    Returns:
+        ビットレート（kbps）、取得失敗時はNone
+    """
+    try:
+        # まず動画ストリームのビットレートを試行
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=bit_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                file_path
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        bitrate_str = result.stdout.strip()
+
+        if bitrate_str and bitrate_str != "N/A":
+            bitrate_bps = int(bitrate_str)
+            return bitrate_bps // 1000  # bps → kbps
+
+        # 動画ストリームで取得できない場合、format全体のビットレートを使用
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=bit_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                file_path
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        bitrate_str = result.stdout.strip()
+
+        if bitrate_str and bitrate_str != "N/A":
+            bitrate_bps = int(bitrate_str)
+            return bitrate_bps // 1000  # bps → kbps
+
+    except Exception as e:
+        print(f"[Bitrate] 検出エラー: {e}")
+
+    return None
+
+
+@dataclass
+class ColorspaceInfo:
+    """色空間情報"""
+    color_space: str = ""
+    color_primaries: str = ""
+    color_transfer: str = ""
+
+    def get_ffmpeg_args(self) -> List[str]:
+        """ffmpeg用の色空間引数を返す"""
+        args = []
+        if self.color_space and self.color_space != "unknown":
+            args.extend(['-colorspace', self.color_space])
+        if self.color_primaries and self.color_primaries != "unknown":
+            args.extend(['-color_primaries', self.color_primaries])
+        if self.color_transfer and self.color_transfer != "unknown":
+            args.extend(['-color_trc', self.color_transfer])
+        return args
+
+
+def detect_video_colorspace(file_path: str) -> ColorspaceInfo:
+    """
+    動画の色空間情報を取得
+
+    Args:
+        file_path: 動画ファイルパス
+
+    Returns:
+        ColorspaceInfo
+    """
+    info = ColorspaceInfo()
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=color_space,color_primaries,color_transfer",
+                "-of", "default=noprint_wrappers=1",
+                file_path
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        for line in result.stdout.strip().split('\n'):
+            if '=' in line:
+                key, value = line.split('=', 1)
+                if key == "color_space":
+                    info.color_space = value
+                elif key == "color_primaries":
+                    info.color_primaries = value
+                elif key == "color_transfer":
+                    info.color_transfer = value
+
+        print(f"[Colorspace] 検出: space={info.color_space}, primaries={info.color_primaries}, transfer={info.color_transfer}")
+
+    except Exception as e:
+        print(f"[Colorspace] 検出エラー: {e}")
+
+    return info
 
 
 # ==============================================================================
@@ -743,6 +912,12 @@ class ImageCropWidget(QWidget):
     def load_image(self, path: str) -> bool:
         """画像ファイルを読み込み"""
         image = QImage(path)
+        if image.isNull():
+            return False
+        return self.load_image_from_qimage(image)
+
+    def load_image_from_qimage(self, image: QImage) -> bool:
+        """QImageから画像を読み込み"""
         if image.isNull():
             return False
         self.original_image = image
@@ -1378,9 +1553,9 @@ class ExportWorker(QThread):
     export_completed = Signal(str)  # 出力ファイルパス
     error_occurred = Signal(str)
 
-    # チャプタータイトル表示設定
-    FONT_PATH = "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc"
-    FONT_SIZE = 56
+    # チャプタータイトル表示設定（動画高さに対する割合）
+    # 1080p で約58px相当 (1080 * 0.054 ≈ 58)
+    FONT_SIZE_RATIO = 0.054
 
     # 除外チャプターのプレフィックス
     EXCLUDE_PREFIX = "--"
@@ -1392,6 +1567,9 @@ class ExportWorker(QThread):
                  overlay_chapter_titles: bool = False,
                  total_duration_ms: int = 0,
                  encoder_id: str = "libx264",
+                 bitrate_kbps: int = 4000,
+                 crf: int = 23,
+                 colorspace: Optional[ColorspaceInfo] = None,
                  parent=None):
         super().__init__(parent)
         self.input_file = input_file
@@ -1402,7 +1580,13 @@ class ExportWorker(QThread):
         self.overlay_chapter_titles = overlay_chapter_titles
         self.total_duration_ms = total_duration_ms
         self.encoder_id = encoder_id
+        self.bitrate_kbps = bitrate_kbps
+        self.crf = crf
+        self.colorspace = colorspace or ColorspaceInfo()
         self._temp_files: List[str] = []  # 一時ファイル管理
+        self.font_path = detect_system_font()  # プラットフォーム別フォント
+        self._cancelled = False  # キャンセルフラグ
+        self._process: Optional[subprocess.Popen] = None  # ffmpegプロセス
 
         # 除外チャプターの処理
         self._excluded_segments: List[Tuple[int, int]] = []  # (start_ms, end_ms)
@@ -1410,6 +1594,13 @@ class ExportWorker(QThread):
         self._adjusted_chapters: List[ChapterInfo] = []  # 時間調整後のチャプター
         self._adjusted_duration_ms: int = 0  # 調整後の動画長
         self._process_excluded_chapters()
+
+    def cancel(self):
+        """エクスポートをキャンセル"""
+        self._cancelled = True
+        # プロセスが動作中なら強制終了
+        if self._process and self._process.poll() is None:
+            self._process.kill()
 
     def _process_excluded_chapters(self):
         """除外チャプター（--で始まる）を処理し、保持区間と調整後チャプターを計算"""
@@ -1592,10 +1783,11 @@ class ExportWorker(QThread):
 
             # drawtext フィルター（既存スクリプトのスタイルを踏襲）
             # textfile を使用して日本語対応
+            # fontsize: 動画高さに対する割合で指定（解像度非依存）
             drawtext = (
-                f"drawtext=fontfile='{self.FONT_PATH}'"
+                f"drawtext=fontfile='{self.font_path}'"
                 f":textfile='{textfiles[i]}'"
-                f":fontsize={self.FONT_SIZE}"
+                f":fontsize=h*{self.FONT_SIZE_RATIO}"
                 f":fontcolor=white"
                 f":borderw=2:bordercolor=black"
                 f":box=1:boxcolor=black@0.6:boxborderw=15"
@@ -1671,23 +1863,25 @@ class ExportWorker(QThread):
                     combined_filter = trim_concat_filter + f";[outv]{drawtext_filter}[finalv]"
                     self.progress_update.emit(f"チャプタータイトル: {len(chapters_to_use)}件を映像に焼き込み")
 
-                    encoder_args = get_encoder_args(self.encoder_id)
+                    encoder_args = get_encoder_args(self.encoder_id, self.bitrate_kbps, self.crf)
+                    colorspace_args = self.colorspace.get_ffmpeg_args()
                     cmd.extend([
                         '-filter_complex', combined_filter,
                         '-map', '[finalv]',
                         '-map', '[outa]',
-                    ] + encoder_args + [
+                    ] + encoder_args + colorspace_args + [
                         '-c:a', 'aac', '-b:a', '192k',
                         '-movflags', '+faststart'
                     ])
                 else:
                     # カット＆結合のみ（オーバーレイなし）
-                    encoder_args = get_encoder_args(self.encoder_id)
+                    encoder_args = get_encoder_args(self.encoder_id, self.bitrate_kbps, self.crf)
+                    colorspace_args = self.colorspace.get_ffmpeg_args()
                     cmd.extend([
                         '-filter_complex', trim_concat_filter,
                         '-map', '[outv]',
                         '-map', '[outa]',
-                    ] + encoder_args + [
+                    ] + encoder_args + colorspace_args + [
                         '-c:a', 'aac', '-b:a', '192k',
                         '-movflags', '+faststart'
                     ])
@@ -1696,10 +1890,11 @@ class ExportWorker(QThread):
                 vf = self._create_drawtext_filter()
                 self.progress_update.emit(f"チャプタータイトル: {len(self.chapters)}件を映像に焼き込み")
 
-                encoder_args = get_encoder_args(self.encoder_id)
+                encoder_args = get_encoder_args(self.encoder_id, self.bitrate_kbps, self.crf)
+                colorspace_args = self.colorspace.get_ffmpeg_args()
                 cmd.extend([
                     '-vf', vf,
-                ] + encoder_args + [
+                ] + encoder_args + colorspace_args + [
                     '-c:a', 'aac', '-b:a', '192k',
                     '-movflags', '+faststart'
                 ])
@@ -1721,7 +1916,7 @@ class ExportWorker(QThread):
 
             # ffmpegを実行（リアルタイム進捗取得）
             import re
-            process = subprocess.Popen(
+            self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1734,8 +1929,19 @@ class ExportWorker(QThread):
             total_sec = duration_for_progress / 1000.0 if duration_for_progress > 0 else 0
 
             while True:
-                line = process.stderr.readline()
-                if not line and process.poll() is not None:
+                # キャンセルチェック
+                if self._cancelled:
+                    self._process.kill()
+                    self._process.wait()
+                    self._cleanup_temp_files()
+                    # 出力途中のファイルを削除
+                    if os.path.exists(self.output_file):
+                        os.remove(self.output_file)
+                    self.error_occurred.emit("エクスポートを中止しました")
+                    return
+
+                line = self._process.stderr.readline()
+                if not line and self._process.poll() is not None:
                     break
                 if line:
                     stderr_output.append(line)
@@ -1748,7 +1954,8 @@ class ExportWorker(QThread):
                         time_str = f"{h}:{m:02d}:{s:02d}"
                         self.progress_percent.emit(percent, time_str)
 
-            returncode = process.wait()
+            returncode = self._process.wait()
+            self._process = None
 
             # 一時ファイルをクリーンアップ
             self._cleanup_temp_files()
@@ -1945,16 +2152,9 @@ class MergeTab(QWidget):
             QPushButton:disabled { background: #333; color: #666; }
         """
 
-        # 画像選択 + 結合実行
+        # 結合実行ボタン
         action_btn_layout = QHBoxLayout()
         action_btn_layout.setSpacing(10)
-
-        self.cover_select_btn = QPushButton("🖼 画像選択")
-        self.cover_select_btn.setStyleSheet(btn_small)
-        self.cover_select_btn.setToolTip("カバー画像を選択")
-        self.cover_select_btn.clicked.connect(self.select_cover)
-        action_btn_layout.addWidget(self.cover_select_btn)
-
         action_btn_layout.addStretch()
 
         # 結合実行（メインアクション）
@@ -1964,6 +2164,28 @@ class MergeTab(QWidget):
         self.merge_btn.setToolTip("MP3を結合してMP4を作成")
         self.merge_btn.clicked.connect(self.execute_merge)
         action_btn_layout.addWidget(self.merge_btn)
+
+        # キャンセルボタン（エンコード中のみ表示）
+        btn_cancel = """
+            QPushButton {
+                background: #f44336;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #e53935; }
+            QPushButton:pressed { background: #c62828; }
+        """
+        self.cancel_btn = QPushButton("■ 中止")
+        self.cancel_btn.setStyleSheet(btn_cancel)
+        self.cancel_btn.setMinimumWidth(80)
+        self.cancel_btn.setToolTip("エンコードを中止")
+        self.cancel_btn.clicked.connect(self.cancel_encoding)
+        self.cancel_btn.hide()  # 初期状態は非表示
+        action_btn_layout.addWidget(self.cancel_btn)
 
         left_layout.addLayout(action_btn_layout)
 
@@ -1991,6 +2213,78 @@ class MergeTab(QWidget):
         self.crop_widget = ImageCropWidget()
         self.crop_widget.compressionChanged.connect(self._on_compression_changed)
         right_layout.addWidget(self.crop_widget, stretch=1)
+
+        # カバー画像操作ボタン（クロップウィジェットの下）
+        cover_btn_layout = QHBoxLayout()
+        cover_btn_layout.setSpacing(8)
+
+        cover_btn_style = """
+            QPushButton {
+                background: #3a3a3a;
+                color: #ddd;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 14px;
+            }
+            QPushButton:hover { background: #4a4a4a; border-color: #666; }
+        """
+        paste_btn_style = """
+            QPushButton {
+                background: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #42A5F5; }
+        """
+        toggle_btn_style = """
+            QPushButton {
+                background: #3a3a3a;
+                color: #aaa;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 14px;
+            }
+            QPushButton:hover { background: #4a4a4a; border-color: #666; }
+            QPushButton:checked {
+                background: #4CAF50;
+                color: white;
+                border-color: #4CAF50;
+            }
+            QPushButton:checked:hover { background: #66BB6A; }
+        """
+
+        btn_width = 110  # ボタン幅を統一
+
+        self.cover_select_btn = QPushButton("📂 選択")
+        self.cover_select_btn.setStyleSheet(cover_btn_style)
+        self.cover_select_btn.setFixedWidth(btn_width)
+        self.cover_select_btn.setToolTip("ファイルからカバー画像を選択")
+        self.cover_select_btn.clicked.connect(self.select_cover)
+        cover_btn_layout.addWidget(self.cover_select_btn)
+
+        self.cover_paste_btn = QPushButton("📋 貼り付け")
+        self.cover_paste_btn.setStyleSheet(paste_btn_style)
+        self.cover_paste_btn.setFixedWidth(btn_width)
+        self.cover_paste_btn.setToolTip("クリップボードから画像を貼り付け (Cmd+V)")
+        self.cover_paste_btn.clicked.connect(self.paste_cover_from_clipboard)
+        cover_btn_layout.addWidget(self.cover_paste_btn)
+
+        self.preview_btn = QPushButton("👁 プレビュー")
+        self.preview_btn.setStyleSheet(toggle_btn_style)
+        self.preview_btn.setFixedWidth(btn_width)
+        self.preview_btn.setCheckable(True)
+        self.preview_btn.setToolTip("圧縮プレビュー表示 (左: 元画像 / 右: 圧縮後)")
+        self.preview_btn.toggled.connect(self._on_preview_toggled)
+        cover_btn_layout.addWidget(self.preview_btn)
+
+        cover_btn_layout.addStretch()
+        right_layout.addLayout(cover_btn_layout)
 
         # コントロール
         ctrl_layout = QHBoxLayout()
@@ -2048,14 +2342,6 @@ class MergeTab(QWidget):
         self.quality_spin.setStyleSheet("font-size: 16px;")
         self.quality_spin.valueChanged.connect(self._on_quality_spin_changed)
         ctrl_layout.addWidget(self.quality_spin)
-
-        ctrl_layout.addSpacing(16)
-
-        # プレビュー
-        self.preview_check = QCheckBox("プレビュー")
-        self.preview_check.setStyleSheet("font-size: 16px;")
-        self.preview_check.stateChanged.connect(self._on_preview_toggled)
-        ctrl_layout.addWidget(self.preview_check)
 
         ctrl_layout.addStretch()
 
@@ -2131,6 +2417,28 @@ class MergeTab(QWidget):
                 self.rotation_slider.setValue(0)
                 self.rotation_spin.setValue(0)
 
+    def paste_cover_from_clipboard(self):
+        """クリップボードから画像を貼り付け"""
+        clipboard = QApplication.clipboard()
+        image = clipboard.image()
+        if not image.isNull():
+            if self.crop_widget.load_image_from_qimage(image):
+                self.cover_label.setText("クリップボードから貼り付け")
+                self.rotation_slider.setValue(0)
+                self.rotation_spin.setValue(0)
+                self.log.appendPlainText("カバー画像: クリップボードから貼り付け")
+                return True
+        return False
+
+    def keyPressEvent(self, event):
+        """キーボードイベント処理"""
+        # Cmd+V (macOS) / Ctrl+V (Windows) でクリップボードから画像貼り付け
+        if event.key() == Qt.Key.Key_V and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if self.paste_cover_from_clipboard():
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def _on_rotation_changed(self, value):
         self.rotation_spin.blockSignals(True)
         self.rotation_spin.setValue(value)
@@ -2159,8 +2467,9 @@ class MergeTab(QWidget):
         self.quality_slider.blockSignals(False)
         self.crop_widget.set_compression_quality(value)
 
-    def _on_preview_toggled(self, state):
-        self.crop_widget.set_compression_preview(self.preview_check.isChecked())
+    def _on_preview_toggled(self, checked):
+        """プレビュートグルボタンの状態変更"""
+        self.crop_widget.set_compression_preview(checked)
 
     def _on_compression_changed(self, size_bytes):
         if size_bytes < 1024:
@@ -2212,8 +2521,9 @@ class MergeTab(QWidget):
         self.log.appendPlainText(f"結合開始: {len(ordered_files)} ファイル")
         self.log.appendPlainText(f"出力先: {self._pending_output_dir}")
 
-        # ボタンを無効化
+        # ボタン状態を変更
         self.merge_btn.setEnabled(False)
+        self.cancel_btn.show()
 
         # ワーカースレッドを作成・開始
         self.merge_worker = MergeWorker(ordered_files, self)
@@ -2231,6 +2541,7 @@ class MergeTab(QWidget):
         """ワーカーエラー時の処理"""
         self.log.appendPlainText(f"エラー: {error_msg}")
         self.merge_btn.setEnabled(True)
+        self.cancel_btn.hide()
 
     def _on_preparation_done(self, chapters: list, total_duration_ms: int, temp_audio: str, concat_file: str):
         """準備完了時にMP4エンコードを開始"""
@@ -2363,9 +2674,13 @@ class MergeTab(QWidget):
     def _on_encode_finished(self, exit_code, exit_status):
         """ffmpegエンコード完了時の処理"""
         self.merge_btn.setEnabled(True)
+        self.cancel_btn.hide()
 
         if exit_code != 0:
-            self.log.appendPlainText(f"エラー: ffmpeg終了コード {exit_code}")
+            if exit_code == -1:  # キャンセルされた場合
+                self.log.appendPlainText("エンコードを中止しました")
+            else:
+                self.log.appendPlainText(f"エラー: ffmpeg終了コード {exit_code}")
             return
 
         self.log.appendPlainText(f"結合完了: {self.encode_output_file}")
@@ -2382,6 +2697,23 @@ class MergeTab(QWidget):
         self.log.appendPlainText(f"チャプター保存: {self.encode_chapter_file}")
 
         self.merge_completed.emit(self.encode_output_file, self.encode_chapters, self.cover_image)
+
+    def cancel_encoding(self):
+        """エンコードを中止"""
+        # MergeWorker を停止
+        if hasattr(self, 'merge_worker') and self.merge_worker.isRunning():
+            self.merge_worker.terminate()
+            self.merge_worker.wait()
+            self.log.appendPlainText("準備処理を中止しました")
+
+        # QProcess (ffmpeg) を停止
+        if self.encode_process and self.encode_process.state() != QProcess.ProcessState.NotRunning:
+            self.encode_process.kill()
+            self.log.appendPlainText("エンコードを中止しています...")
+        else:
+            # プロセスが動いていない場合はボタンを戻す
+            self.merge_btn.setEnabled(True)
+            self.cancel_btn.hide()
 
 
 # ==============================================================================
@@ -2781,6 +3113,48 @@ class EditTab(QWidget):
         encoder_layout.addStretch()
         right_layout.addLayout(encoder_layout)
 
+        # 品質選択
+        quality_layout = QHBoxLayout()
+        quality_layout.setSpacing(4)
+        quality_label = QLabel("品質:")
+        quality_label.setStyleSheet(label_header)
+        quality_label.setFixedWidth(80)
+        quality_layout.addWidget(quality_label)
+
+        self.quality_combo = QComboBox()
+        self.quality_combo.setStyleSheet("""
+            QComboBox {
+                font-size: 14px;
+                padding: 4px 8px;
+                background: #3a3a3a;
+                color: #ddd;
+                border: 1px solid #555;
+                border-radius: 4px;
+            }
+            QComboBox:hover { border-color: #666; }
+            QComboBox::drop-down { border: none; }
+            QComboBox::down-arrow { image: none; border: none; }
+        """)
+        # 品質オプション: (display_name, bitrate_kbps, crf)
+        # bitrate_kbps=0 は「元と同じ」を意味する
+        self._detected_bitrate_kbps: Optional[int] = None  # 検出したビットレート
+        self._detected_colorspace: Optional[ColorspaceInfo] = None  # 検出した色空間
+        self._quality_options = [
+            ("元と同じ (自動)", 0, 23),  # 検出ビットレートを使用
+            ("高画質 (6Mbps)", 6000, 20),
+            ("標準 (4Mbps)", 4000, 23),
+            ("軽量 (2Mbps)", 2000, 28),
+            ("最小 (1Mbps)", 1000, 32),
+            ("静止画用 (500kbps)", 500, 35),
+        ]
+        for display_name, bitrate, crf in self._quality_options:
+            self.quality_combo.addItem(display_name, (bitrate, crf))
+        self.quality_combo.setCurrentIndex(0)  # デフォルト: 元と同じ
+        self.quality_combo.setToolTip("ビットレート設定\n「元と同じ」で元動画のビットレートを維持")
+        quality_layout.addWidget(self.quality_combo)
+        quality_layout.addStretch()
+        right_layout.addLayout(quality_layout)
+
         # アクションボタン（開く + 書出）- 幅2分割
         action_layout = QHBoxLayout()
         action_layout.setSpacing(6)
@@ -2807,8 +3181,25 @@ class EditTab(QWidget):
         self.export_btn = QPushButton("💾 書出")
         self.export_btn.setStyleSheet(btn_action)
         self.export_btn.setToolTip("編集した動画を書き出す")
-        self.export_btn.clicked.connect(self._execute_export)
+        self.export_btn.clicked.connect(self._on_export_btn_clicked)
         action_layout.addWidget(self.export_btn, stretch=1)
+
+        # ボタンスタイル保存（トグル用）
+        self._btn_style_action = btn_action
+        self._btn_style_cancel = """
+            QPushButton {
+                background: #f44336;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 10px 16px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #e53935; }
+            QPushButton:pressed { background: #c62828; }
+        """
+        self._is_exporting = False  # エクスポート中フラグ
 
         right_layout.addLayout(action_layout)
 
@@ -2924,9 +3315,9 @@ class EditTab(QWidget):
         self.media_label.setText(Path(file_path).name)
         self.player.setSource(QUrl.fromLocalFile(file_path))
 
-        # 書出ファイル名を動画ファイル名_finalに設定
+        # 書出ファイル名を動画ファイル名_chapteredに設定
         video_stem = Path(file_path).stem
-        self.export_name.setText(f"{video_stem}_final")
+        self.export_name.setText(f"{video_stem}_chaptered")
         # 出力先も動画と同じディレクトリに設定
         self.export_dir.setText(str(Path(file_path).parent))
 
@@ -2944,6 +3335,9 @@ class EditTab(QWidget):
         self._waveform_worker.finished.connect(self._on_waveform_ready)
         self._waveform_worker.start()
 
+        # ビットレートを検出して品質を自動選択
+        self._auto_select_quality(file_path)
+
         # 自動再生
         QTimer.singleShot(100, self.player.play)
 
@@ -2959,6 +3353,25 @@ class EditTab(QWidget):
         else:
             self._pending_waveform = None
             print("[Waveform] Failed to extract waveform")
+
+    def _auto_select_quality(self, file_path: str):
+        """動画のビットレートと色空間を検出して保存"""
+        # ビットレート検出
+        self._detected_bitrate_kbps = detect_video_bitrate(file_path)
+
+        if self._detected_bitrate_kbps is None:
+            print("[Quality] ビットレート取得失敗、標準 (4Mbps) を使用")
+            self._detected_bitrate_kbps = 4000  # フォールバック
+        else:
+            print(f"[Quality] 検出ビットレート: {self._detected_bitrate_kbps} kbps")
+
+        # 色空間検出
+        self._detected_colorspace = detect_video_colorspace(file_path)
+
+        # 「元と同じ」の表示を更新
+        display_text = f"元と同じ ({self._detected_bitrate_kbps} kbps)"
+        self.quality_combo.setItemText(0, display_text)
+        self.quality_combo.setCurrentIndex(0)  # 「元と同じ」を選択
 
     def set_media_file(self, file_path: str, chapters: List[ChapterInfo] = None):
         """外部からメディアファイルを設定"""
@@ -3231,6 +3644,13 @@ class EditTab(QWidget):
         if dir_path:
             self.export_dir.setText(dir_path)
 
+    def _on_export_btn_clicked(self):
+        """書出ボタンクリック（トグル動作）"""
+        if self._is_exporting:
+            self._cancel_export()
+        else:
+            self._execute_export()
+
     def _execute_export(self):
         """書出を実行"""
         if not self.media_file:
@@ -3285,18 +3705,35 @@ class EditTab(QWidget):
         print(f"[Export] チャプター数: {len(self.chapters)}")
         print(f"[Export] 動画長: {total_duration_ms}ms")
 
-        # ボタンを無効化・進捗バー表示
-        self.export_btn.setEnabled(False)
-        if overlay_titles:
-            self.export_btn.setText("⏳ 再エンコード中...")
-        else:
-            self.export_btn.setText("⏳ 書出中...")
+        # ボタンを中止モードに切り替え・進捗バー表示
+        self._is_exporting = True
+        self.export_btn.setText("■ 中止")
+        self.export_btn.setStyleSheet(self._btn_style_cancel)
+        self.export_btn.setToolTip("エクスポートを中止")
         self.export_progress.setValue(0)
         self.export_progress.setFormat("0% - 準備中...")
         self.export_progress.show()
 
-        # 選択されたエンコーダを取得
+        # 選択されたエンコーダと品質を取得
         encoder_id = self.encoder_combo.currentData()
+        bitrate_kbps, crf = self.quality_combo.currentData()
+
+        # 「元と同じ」が選択されている場合の処理
+        if bitrate_kbps == 0:
+            base_bitrate = self._detected_bitrate_kbps or 4000
+            if encoder_id == "libx264":
+                # CPU: CRFモードで高画質（ビットレートは使わない）
+                bitrate_kbps = base_bitrate  # 参考値として保持
+                crf = 18  # 高画質CRF
+                print(f"[Export] 「元と同じ」選択 → CRF {crf}（高画質）")
+            else:
+                # GPU: ビットレート×1.5で再エンコード劣化を補償
+                bitrate_kbps = int(base_bitrate * 1.5)
+                print(f"[Export] 「元と同じ」選択 → {bitrate_kbps} kbps（元{base_bitrate}の1.5倍）")
+        else:
+            print(f"[Export] 指定ビットレート: {bitrate_kbps} kbps")
+
+        print(f"[Export] エンコーダ: {encoder_id}")
 
         # ワーカーを起動
         self._export_worker = ExportWorker(
@@ -3308,6 +3745,9 @@ class EditTab(QWidget):
             overlay_chapter_titles=overlay_titles,
             total_duration_ms=total_duration_ms,
             encoder_id=encoder_id,
+            bitrate_kbps=bitrate_kbps,
+            crf=crf,
+            colorspace=self._detected_colorspace,
             parent=self
         )
         self._export_worker.progress_update.connect(self._on_export_progress)
@@ -3327,8 +3767,10 @@ class EditTab(QWidget):
 
     def _on_export_completed(self, output_path: str):
         """書出完了"""
-        self.export_btn.setEnabled(True)
+        self._is_exporting = False
         self.export_btn.setText("💾 書出")
+        self.export_btn.setStyleSheet(self._btn_style_action)
+        self.export_btn.setToolTip("編集した動画を書き出す")
         self.export_progress.setValue(100)
         self.export_progress.setFormat("100% - 完了")
         # 3秒後に進捗バーを非表示
@@ -3340,13 +3782,26 @@ class EditTab(QWidget):
 
     def _on_export_error(self, error_msg: str):
         """書出エラー"""
-        self.export_btn.setEnabled(True)
+        self._is_exporting = False
         self.export_btn.setText("💾 書出")
+        self.export_btn.setStyleSheet(self._btn_style_action)
+        self.export_btn.setToolTip("編集した動画を書き出す")
         self.export_progress.hide()
         print(f"[Export] エラー: {error_msg}")
 
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.critical(self, "書出エラー", error_msg)
+        # キャンセルの場合はメッセージを変更
+        if "中止" in error_msg:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "中止", error_msg)
+        else:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "書出エラー", error_msg)
+
+    def _cancel_export(self):
+        """エクスポートを中止"""
+        if hasattr(self, '_export_worker') and self._export_worker.isRunning():
+            self._export_worker.cancel()
+            print("[Export] 中止リクエスト送信")
 
 
 # ==============================================================================
@@ -3361,6 +3816,10 @@ class PrepGUI(QMainWindow):
     VIDEO_ASPECT = 16 / 9
     WINDOW_ASPECT = 16 / 9  # ウィンドウ全体のアスペクト比
 
+    # フォントサイズ設定
+    FONT_SIZES = [9, 10, 11, 12, 13, 14, 16, 18]  # 選択可能なサイズ
+    DEFAULT_FONT_SIZE = 13
+
     def __init__(self, working_dir: str = None):
         super().__init__()
         self.project = ProjectState()
@@ -3368,7 +3827,13 @@ class PrepGUI(QMainWindow):
         self.working_dir = working_dir
         if working_dir:
             os.chdir(working_dir)
+
+        # 設定の読み込み
+        self.settings = QSettings("mashi727", "VideoChapterEditor")
+        self._load_and_apply_font_size()
+
         self.init_ui()
+        self._create_menu_bar()
 
     def init_ui(self):
         title = "Video Chapter Editor"
@@ -3421,6 +3886,48 @@ class PrepGUI(QMainWindow):
 
         # タブ2に切り替え
         self.tabs.setCurrentIndex(1)
+
+    def _create_menu_bar(self):
+        """メニューバーを作成"""
+        menubar = self.menuBar()
+
+        # 表示メニュー
+        view_menu = menubar.addMenu("表示")
+
+        # フォントサイズサブメニュー
+        font_menu = view_menu.addMenu("フォントサイズ")
+
+        self.font_actions = []
+        current_size = self.settings.value("font_size", self.DEFAULT_FONT_SIZE, type=int)
+
+        for size in self.FONT_SIZES:
+            action = QAction(f"{size}pt", self)
+            action.setCheckable(True)
+            action.setChecked(size == current_size)
+            action.triggered.connect(lambda checked, s=size: self._set_font_size(s))
+            font_menu.addAction(action)
+            self.font_actions.append((size, action))
+
+    def _load_and_apply_font_size(self):
+        """保存されたフォントサイズを読み込んで適用"""
+        size = self.settings.value("font_size", self.DEFAULT_FONT_SIZE, type=int)
+        self._apply_font_size(size)
+
+    def _set_font_size(self, size: int):
+        """フォントサイズを設定して保存"""
+        self.settings.setValue("font_size", size)
+        self._apply_font_size(size)
+
+        # メニューのチェック状態を更新
+        for s, action in self.font_actions:
+            action.setChecked(s == size)
+
+    def _apply_font_size(self, size: int):
+        """アプリ全体のフォントサイズを適用"""
+        app = QApplication.instance()
+        font = app.font()
+        font.setPointSize(size)
+        app.setFont(font)
 
     def resizeEvent(self, event):
         """ウィンドウリサイズ時にアスペクト比を維持"""
