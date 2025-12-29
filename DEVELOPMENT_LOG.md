@@ -1,8 +1,176 @@
 # Development Log
 
-開発ログ（2025-12-29〜）
+開発ログ（2025-12-29〜）- 新しい順
 
 過去のログは `DEVELOPMENT_LOG_as_of_2025-12-29.md` を参照。
+
+---
+
+## 今後の予定
+
+### video-chapter-editor
+
+- UI大改造（下記参照）
+- 単一エンコードパス実装
+
+### report-workflow
+
+- 配管のプロトタイプは完了
+- 陶器（GUI）の設計は video-chapter-editor 完成後
+
+---
+
+## 2025-12-29: ユースケース拡張
+
+### ユースケース全体図
+
+```mermaid
+graph TD
+    subgraph "UC1: 自分で撮影した動画"
+        UC1[自分撮影MP4]
+        UC1 --> UC1A[UC1-A: 編集済み]
+        UC1 --> UC1B[UC1-B: 要編集/長尺]
+    end
+
+    subgraph "UC2: YouTube動画"
+        UC2[YouTube]
+        UC2 --> UC2A[UC2-A: 自分のチャンネル]
+        UC2 --> UC2B[UC2-B: 他者の動画]
+        UC2A --> UC2A1[UC2-A1: 編集済み]
+        UC2A --> UC2A2[UC2-A2: 要編集]
+    end
+
+    subgraph "UC3: 音声のみ録音"
+        UC3[音声録音]
+        UC3 --> UC3A[UC3-A: 編集済み]
+        UC3 --> UC3B[UC3-B: 要編集]
+        UC3A --> UC3A1[UC3-A1: 複数MP3/曲別]
+        UC3A --> UC3A2[UC3-A2: 単一MP3]
+        UC3B --> UC3B1[UC3-B1: 単一MP3/長尺]
+    end
+
+    subgraph "UC4: 既存編集済み"
+        UC4[既存MP4]
+        UC4 --> UC4A[UC4-A: チャプターなし]
+        UC4 --> UC4B[UC4-B: チャプター追加のみ]
+    end
+
+    style UC1 fill:#e3f2fd
+    style UC2 fill:#fff3e0
+    style UC3 fill:#f3e5f5
+    style UC4 fill:#e8f5e9
+```
+
+### 処理フロー統合図
+
+```mermaid
+graph LR
+    subgraph 入力ソース
+        YT[YouTube URL]
+        REC[iPhone/カメラ]
+        MIC[マイク録音]
+        LOC[ローカルファイル]
+    end
+
+    subgraph 前処理
+        YT -->|ytdl-claude| DL[ダウンロード]
+        DL --> MP4Y[MP4 + SRT]
+        REC -->|転送| MP4R[生MP4]
+        MIC -->|転送| MP3M[MP3]
+        LOC --> MP4L[MP4/MP3]
+    end
+
+    subgraph "video-chapter-editor"
+        MP4Y --> LOAD[ソース読込]
+        MP4R --> LOAD
+        MP3M --> LOAD
+        MP4L --> LOAD
+
+        LOAD --> EDIT{要編集?}
+        EDIT -->|Yes| TRIM[トリム]
+        EDIT -->|No| CHAP
+        TRIM --> CHAP[チャプター設定]
+
+        CHAP --> COV{MP3?}
+        COV -->|Yes| COVER[カバー画像]
+        COV -->|No| EXP
+        COVER --> EXP[書出]
+    end
+
+    subgraph 出力
+        EXP --> OUT1[配布用MP4]
+        EXP --> OUT2[YouTube用MP4]
+    end
+
+    subgraph 後続処理
+        OUT2 -->|アップロード| YTSUB[YouTube字幕取得]
+        YTSUB --> SRT[SRT]
+        SRT --> CLAUDE[Claude分析]
+        CLAUDE --> REPORT[レポート生成]
+    end
+
+    style TRIM fill:#ffecb3
+    style CHAP fill:#e3f2fd
+    style EXP fill:#c8e6c9
+    style REPORT fill:#f3e5f5
+```
+
+### ユースケース詳細マトリクス
+
+| UC | パターン | 入力 | トリム | 結合 | カバー | 後続処理 |
+|----|----------|------|--------|------|--------|----------|
+| UC1-A | 自撮/編集済 | MP4 | - | - | - | 字幕取得→分析 |
+| UC1-B | 自撮/長尺 | MP4 | 必要 | - | - | 字幕取得→分析 |
+| UC2-A1 | YouTube/自/編集済 | MP4+SRT | - | - | - | 焼込+チャプタ |
+| UC2-A2 | YouTube/自/要編集 | MP4+SRT | 必要 | - | - | 字幕取得→分析 |
+| UC2-B | YouTube/他者 | MP4+SRT | - | - | - | 個人学習用 |
+| UC3-A1 | 音声/曲別MP3 | 複数MP3 | - | 必要 | 必要 | 字幕取得→分析 |
+| UC3-A2 | 音声/単一編集済 | MP3 | - | - | 必要 | 字幕取得→分析 |
+| UC3-B1 | 音声/長尺未編集 | MP3 | 必要 | - | 必要 | 字幕取得→分析 |
+| UC4-A | 既存/チャプタなし | MP4 | - | - | - | 焼込+チャプタ |
+| UC4-B | 既存/チャプタ追加 | MP4 | - | - | - | 焼込+チャプタ |
+
+### 処理パス分類
+
+```mermaid
+graph TD
+    subgraph "パスA: フル処理（トリム→チャプタ→字幕→分析）"
+        PA1[UC1-B] --> PA[トリム→書出→YouTube→SRT→分析]
+        PA2[UC2-A2] --> PA
+        PA3[UC3-B1] --> PA
+    end
+
+    subgraph "パスB: チャプタ追加のみ"
+        PB1[UC2-A1] --> PB[焼込+チャプタ→配布]
+        PB2[UC4-A] --> PB
+        PB3[UC4-B] --> PB
+    end
+
+    subgraph "パスC: 結合→フル処理"
+        PC1[UC3-A1] --> PC[結合→カバー→書出→YouTube→SRT→分析]
+    end
+
+    subgraph "パスD: カバー追加→フル処理"
+        PD1[UC3-A2] --> PD[カバー→書出→YouTube→SRT→分析]
+    end
+
+    subgraph "パスE: 編集済→フル処理"
+        PE1[UC1-A] --> PE[書出→YouTube→SRT→分析]
+    end
+
+    style PA fill:#ffecb3
+    style PB fill:#c8e6c9
+    style PC fill:#e1bee7
+    style PD fill:#b2dfdb
+    style PE fill:#e3f2fd
+```
+
+### 設計への影響
+
+1. **トリム機能の重要性**: UC1-B, UC2-A2, UC3-B1 で必須 → video-chapter-editorに統合済み
+2. **YouTube連携**: 字幕取得インフラとしての活用が複数パスで発生
+3. **配布用 vs 字幕取得用**: 出力が2系統（ローカル配布、YouTube経由分析）
+4. **カバー画像**: MP3入力時のみ必要、MP4では不要
 
 ---
 
@@ -299,174 +467,6 @@ PADは構造化プログラミング時代の産物であり、実装レベル�
 ### 関連ファイル
 
 - `docs/dev-log-ui-redesign-2025-12-29.md` - 詳細な議論ログ
-
----
-
-## 2025-12-29: ユースケース拡張
-
-### ユースケース全体図
-
-```mermaid
-graph TD
-    subgraph "UC1: 自分で撮影した動画"
-        UC1[自分撮影MP4]
-        UC1 --> UC1A[UC1-A: 編集済み]
-        UC1 --> UC1B[UC1-B: 要編集/長尺]
-    end
-
-    subgraph "UC2: YouTube動画"
-        UC2[YouTube]
-        UC2 --> UC2A[UC2-A: 自分のチャンネル]
-        UC2 --> UC2B[UC2-B: 他者の動画]
-        UC2A --> UC2A1[UC2-A1: 編集済み]
-        UC2A --> UC2A2[UC2-A2: 要編集]
-    end
-
-    subgraph "UC3: 音声のみ録音"
-        UC3[音声録音]
-        UC3 --> UC3A[UC3-A: 編集済み]
-        UC3 --> UC3B[UC3-B: 要編集]
-        UC3A --> UC3A1[UC3-A1: 複数MP3/曲別]
-        UC3A --> UC3A2[UC3-A2: 単一MP3]
-        UC3B --> UC3B1[UC3-B1: 単一MP3/長尺]
-    end
-
-    subgraph "UC4: 既存編集済み"
-        UC4[既存MP4]
-        UC4 --> UC4A[UC4-A: チャプターなし]
-        UC4 --> UC4B[UC4-B: チャプター追加のみ]
-    end
-
-    style UC1 fill:#e3f2fd
-    style UC2 fill:#fff3e0
-    style UC3 fill:#f3e5f5
-    style UC4 fill:#e8f5e9
-```
-
-### 処理フロー統合図
-
-```mermaid
-graph LR
-    subgraph 入力ソース
-        YT[YouTube URL]
-        REC[iPhone/カメラ]
-        MIC[マイク録音]
-        LOC[ローカルファイル]
-    end
-
-    subgraph 前処理
-        YT -->|ytdl-claude| DL[ダウンロード]
-        DL --> MP4Y[MP4 + SRT]
-        REC -->|転送| MP4R[生MP4]
-        MIC -->|転送| MP3M[MP3]
-        LOC --> MP4L[MP4/MP3]
-    end
-
-    subgraph "video-chapter-editor"
-        MP4Y --> LOAD[ソース読込]
-        MP4R --> LOAD
-        MP3M --> LOAD
-        MP4L --> LOAD
-
-        LOAD --> EDIT{要編集?}
-        EDIT -->|Yes| TRIM[トリム]
-        EDIT -->|No| CHAP
-        TRIM --> CHAP[チャプター設定]
-
-        CHAP --> COV{MP3?}
-        COV -->|Yes| COVER[カバー画像]
-        COV -->|No| EXP
-        COVER --> EXP[書出]
-    end
-
-    subgraph 出力
-        EXP --> OUT1[配布用MP4]
-        EXP --> OUT2[YouTube用MP4]
-    end
-
-    subgraph 後続処理
-        OUT2 -->|アップロード| YTSUB[YouTube字幕取得]
-        YTSUB --> SRT[SRT]
-        SRT --> CLAUDE[Claude分析]
-        CLAUDE --> REPORT[レポート生成]
-    end
-
-    style TRIM fill:#ffecb3
-    style CHAP fill:#e3f2fd
-    style EXP fill:#c8e6c9
-    style REPORT fill:#f3e5f5
-```
-
-### ユースケース詳細マトリクス
-
-| UC | パターン | 入力 | トリム | 結合 | カバー | 後続処理 |
-|----|----------|------|--------|------|--------|----------|
-| UC1-A | 自撮/編集済 | MP4 | - | - | - | 字幕取得→分析 |
-| UC1-B | 自撮/長尺 | MP4 | 必要 | - | - | 字幕取得→分析 |
-| UC2-A1 | YouTube/自/編集済 | MP4+SRT | - | - | - | 焼込+チャプタ |
-| UC2-A2 | YouTube/自/要編集 | MP4+SRT | 必要 | - | - | 字幕取得→分析 |
-| UC2-B | YouTube/他者 | MP4+SRT | - | - | - | 個人学習用 |
-| UC3-A1 | 音声/曲別MP3 | 複数MP3 | - | 必要 | 必要 | 字幕取得→分析 |
-| UC3-A2 | 音声/単一編集済 | MP3 | - | - | 必要 | 字幕取得→分析 |
-| UC3-B1 | 音声/長尺未編集 | MP3 | 必要 | - | 必要 | 字幕取得→分析 |
-| UC4-A | 既存/チャプタなし | MP4 | - | - | - | 焼込+チャプタ |
-| UC4-B | 既存/チャプタ追加 | MP4 | - | - | - | 焼込+チャプタ |
-
-### 処理パス分類
-
-```mermaid
-graph TD
-    subgraph "パスA: フル処理（トリム→チャプタ→字幕→分析）"
-        PA1[UC1-B] --> PA[トリム→書出→YouTube→SRT→分析]
-        PA2[UC2-A2] --> PA
-        PA3[UC3-B1] --> PA
-    end
-
-    subgraph "パスB: チャプタ追加のみ"
-        PB1[UC2-A1] --> PB[焼込+チャプタ→配布]
-        PB2[UC4-A] --> PB
-        PB3[UC4-B] --> PB
-    end
-
-    subgraph "パスC: 結合→フル処理"
-        PC1[UC3-A1] --> PC[結合→カバー→書出→YouTube→SRT→分析]
-    end
-
-    subgraph "パスD: カバー追加→フル処理"
-        PD1[UC3-A2] --> PD[カバー→書出→YouTube→SRT→分析]
-    end
-
-    subgraph "パスE: 編集済→フル処理"
-        PE1[UC1-A] --> PE[書出→YouTube→SRT→分析]
-    end
-
-    style PA fill:#ffecb3
-    style PB fill:#c8e6c9
-    style PC fill:#e1bee7
-    style PD fill:#b2dfdb
-    style PE fill:#e3f2fd
-```
-
-### 設計への影響
-
-1. **トリム機能の重要性**: UC1-B, UC2-A2, UC3-B1 で必須 → video-chapter-editorに統合済み
-2. **YouTube連携**: 字幕取得インフラとしての活用が複数パスで発生
-3. **配布用 vs 字幕取得用**: 出力が2系統（ローカル配布、YouTube経由分析）
-4. **カバー画像**: MP3入力時のみ必要、MP4では不要
-
----
-
-## 今後の予定
-
-### video-chapter-editor
-
-- UI大改造（上記）
-- 単一エンコードパス実装
-
-### report-workflow
-
-- 配管のプロトタイプは完了
-- 陶器（GUI）の設計は video-chapter-editor 完成後
 
 ---
 
