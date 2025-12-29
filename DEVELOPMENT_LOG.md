@@ -163,7 +163,7 @@ graph LR
 | YouTubeアップロード | yt-upload (予定) | コマンド実行 → URL取得 | YouTube Data API v3 | yt-upload (APIラッパー) | 🔧 |
 | 字幕取得 | yt-srt | 新URLコピペ → コマンド実行 | - | yt-srt (yt-dlpラッパー) | 🔧 |
 | AI分析 | Claude Code | `/rehearsal` 入力 → 指示に従う | Claude API | skill定義 (.md) | 🔧 |
-| PDF生成 | rehearsal-finalize | .texファイル指定 → コマンド実行 | luatex-pdf (Docker) | Zshオーケストレーション | 🔧 |
+| PDF生成 | rehearsal-finalize | .texファイル指定 → コマンド実行 | - | luatex-pdf + rehearsal-finalize | 🔧 |
 | チャプター抽出 | tex2chapters | （PDF生成に含まれる） | grep, sed, awk | 正規表現 + 出力整形 | 🔧 |
 
 **コマンドリファレンス:**
