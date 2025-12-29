@@ -10,13 +10,83 @@
 
 ### video-chapter-editor
 
-- UI大改造（下記参照）
+- UI大改造: スケルトン完成 → 機能実装へ
 - 単一エンコードパス実装
+- 既存コンポーネント（WaveformWidget等）の移植
 
 ### report-workflow
 
 - 配管のプロトタイプは完了
 - 陶器（GUI）の設計は video-chapter-editor 完成後
+
+---
+
+## 2025-12-29: UIスケルトン作成
+
+### 新アーキテクチャ実装開始
+
+`rehearsal_workflow/ui_next/` に次世代UIのスケルトンを作成。
+
+**ファイル構成:**
+
+```
+ui_next/
+├── __init__.py          # パッケージエクスポート
+├── app.py               # メインウィンドウ (VideoChapterEditorNext)
+├── main_workspace.py    # 単一画面ワークスペース
+├── dialogs.py           # SourceSelectionDialog, CoverImageDialog
+└── log_panel.py         # ログ表示パネル
+```
+
+**LogPanel機能:**
+
+| 機能 | 説明 |
+|------|------|
+| ログレベル | DEBUG, INFO, WARNING, ERROR |
+| フィルタリング | 表示レベル切替（コンボボックス） |
+| コピー | Claude Code用フォーマットでクリップボードへ |
+| 折りたたみ | パネルの表示/非表示切替 |
+
+**コピー出力フォーマット:**
+
+```log
+# Log exported at 2025-12-29T15:30:00
+# Level filter: INFO+
+
+15:30:00 INFO  [ffmpeg] Export started
+15:30:05 ERROR [ffmpeg] Encoding failed: ...
+```
+
+**MainWorkspace構成:**
+
+```
+┌─────────────────────────────────────────────┐
+│ [ソース選択] [カバー画像]    ← ボタン行     │
+│ ソース: audio.mp3 (14:20)   ← 情報表示     │
+├─────────────────────────────────────────────┤
+│ [波形表示]                  ← プレースホルダ │
+├─────────────────────────────────────────────┤
+│ [チャプターテーブル]        ← 編集可能      │
+├─────────────────────────────────────────────┤
+│ [書出設定] [書出ボタン]     ← 進捗表示含む  │
+├─────────────────────────────────────────────┤
+│ [ログパネル]                ← 折りたたみ可  │
+└─────────────────────────────────────────────┘
+```
+
+**起動確認:**
+
+```bash
+python -c "from rehearsal_workflow.ui_next import VideoChapterEditorNext"
+# Import successful
+```
+
+### 次のステップ
+
+1. 既存WaveformWidgetの移植
+2. ffprobe連携（duration取得）
+3. ffmpegエクスポート処理の移植
+4. 既存コード（video_chapter_editor.py）との共存
 
 ---
 
