@@ -4,7 +4,7 @@
 from .log_panel import LogPanel, LogLevel
 from .dialogs import SourceSelectionDialog, CoverImageDialog
 from .main_workspace import MainWorkspace
-from .app import VideoChapterEditorNext
+from .app import VideoChapterEditorNext, main
 
 __all__ = [
     'LogPanel',
@@ -13,4 +13,5 @@ __all__ = [
     'CoverImageDialog',
     'MainWorkspace',
     'VideoChapterEditorNext',
+    'main',
 ]
