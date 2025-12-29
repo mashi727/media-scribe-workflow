@@ -141,25 +141,70 @@ graph LR
   ─── 境界線
 ```
 
-| ステップ | ツール | 分類 | 備考 |
-|----------|--------|------|------|
-| **入力取得** |||
-| YouTube DL | ytdl-claude | 🔧 | URL → MP4 + SRT |
-| ファイル転送 | Finder/手動 | 🔧 | iPhone → Mac |
-| **─── 境界線 ───** |||
-| **動画編集** |||
-| ソース選択 | video-chapter-editor | 🏺 | ダイアログ |
-| 結合（MP3） | video-chapter-editor | 🏺 | -c copy無劣化 |
-| トリム | video-chapter-editor | 🏺 | 波形+プレビュー |
-| カバー設定 | video-chapter-editor | 🏺 | ダイアログ |
-| チャプター編集 | video-chapter-editor | 🏺 | メイン機能 |
-| 書出 | video-chapter-editor | 🏺 | 焼込+エンコード |
-| **─── 境界線 ───** |||
-| **後続処理** |||
-| YouTubeアップロード | ブラウザ/手動 | 🔧 | 字幕生成待ち |
-| 字幕取得 | yt-srt | 🔧 | SRT出力 |
-| AI分析 | Claude Code | 🔧 | /rehearsal skill |
-| レポート生成 | rehearsal-finalize | 🔧 | PDF + chapters |
+| ステップ | ツール | コマンド/操作 | 分類 |
+|----------|--------|--------------|------|
+| **入力取得** ||||
+| YouTube DL | ytdl | `ytdl <URL> -o <name>` | 🔧 |
+| YouTube DL（統合） | rehearsal-download | `rehearsal-download <URL>` | 🔧 |
+| 字幕のみ取得 | yt-srt | `yt-srt <URL> [-v]` | 🔧 |
+| ファイル転送 | Finder | ドラッグ&ドロップ | 🔧 |
+| **─── 境界線（入力）───** ||||
+| **動画編集** ||||
+| ソース選択 | video-chapter-editor | `[ソース選択]` ダイアログ | 🏺 |
+| 結合（MP3） | video-chapter-editor | 内部: `ffmpeg -c copy` | 🏺 |
+| トリム | video-chapter-editor | 波形UI + `--`プレフィックス | 🏺 |
+| カバー設定 | video-chapter-editor | `[カバー画像]` ダイアログ | 🏺 |
+| チャプター編集 | video-chapter-editor | テーブル編集 + 波形クリック | 🏺 |
+| 書出 | video-chapter-editor | `[書出]` → ffmpeg実行 | 🏺 |
+| **─── 境界線（出力）───** ||||
+| **後続処理** ||||
+| YouTubeアップロード | ブラウザ | youtube.com/upload | 🔧 |
+| 字幕取得 | yt-srt | `yt-srt <URL>` | 🔧 |
+| AI分析 | Claude Code | `/rehearsal` skill | 🔧 |
+| PDF生成 | rehearsal-finalize | `rehearsal-finalize <file.tex>` | 🔧 |
+| チャプター抽出 | tex2chapters | `tex2chapters <file.tex>` | 🔧 |
+
+**コマンドリファレンス:**
+
+```bash
+# === 前処理（配管）===
+
+# YouTube動画+字幕ダウンロード
+ytdl "https://youtu.be/VIDEO_ID" -o "20251229_rehearsal"
+# → 20251229_rehearsal.mp4, 20251229_rehearsal_yt.srt
+
+# 統合ダウンロード（DL + Whisper起動）
+rehearsal-download "https://youtu.be/VIDEO_ID"
+# → MP4 + YouTube字幕 + Whisper字幕（非同期）
+
+# 字幕のみ取得
+yt-srt "https://youtu.be/VIDEO_ID"           # 字幕のみ
+yt-srt "https://youtu.be/VIDEO_ID" -v        # 動画も
+yt-srt "https://youtu.be/VIDEO_ID" -l en     # 英語字幕
+
+# === 動画編集（陶器）===
+
+# GUIを起動
+video-chapter-editor ./work_dir
+
+# === 後続処理（配管）===
+
+# 字幕取得（YouTube処理後）
+yt-srt "https://youtu.be/NEW_VIDEO_ID"
+
+# AI分析 + LaTeX生成
+claude code
+/rehearsal
+
+# PDF生成 + チャプター抽出
+rehearsal-finalize "リハーサル記録.tex"
+# → リハーサル記録.pdf
+# → リハーサル記録_youtube.txt
+# → リハーサル記録_movieviewer.txt
+
+# チャプター抽出のみ
+tex2chapters "リハーサル記録.tex"
+```
 
 **ユースケース別 責務分担:**
 
