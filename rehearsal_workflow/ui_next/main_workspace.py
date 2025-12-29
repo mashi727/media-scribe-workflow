@@ -21,8 +21,11 @@ from PySide6.QtWidgets import (
     QSizePolicy, QAbstractItemView, QSlider, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
+
+import platform
 
 from .log_panel import LogPanel, LogLevel
 from .dialogs import SourceSelectionDialog, CoverImageDialog, SourceFile
@@ -78,6 +81,28 @@ class MainWorkspace(QWidget):
     source_changed = Signal(list)  # List[SourceFile]
     chapter_changed = Signal(list)  # List[Chapter]
 
+    # プラットフォーム別等幅フォント
+    MONO_FONTS = {
+        "Darwin": ["SF Mono", "Menlo"],
+        "Windows": ["Cascadia Code", "Consolas"],
+        "Linux": ["Ubuntu Mono", "DejaVu Sans Mono"],
+    }
+
+    @staticmethod
+    def _get_monospace_font(size: int = 11) -> QFont:
+        """クロスプラットフォーム対応の等幅フォントを取得"""
+        system = platform.system()
+        font_names = MainWorkspace.MONO_FONTS.get(system, ["monospace"])
+
+        for font_name in font_names:
+            if QFontDatabase.hasFamily(font_name) and QFontDatabase.isFixedPitch(font_name):
+                return QFont(font_name, size)
+
+        # フォールバック: システムの等幅フォント
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(size)
+        return font
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state = ProjectState()
@@ -99,11 +124,18 @@ class MainWorkspace(QWidget):
         left_panel = self._create_left_panel()
         main_splitter.addWidget(left_panel)
 
-        # 右側パネル（動画プレビュー）
+        # 右側パネル（動画プレビュー）- 拡張可能
         right_panel = self._create_video_panel()
         main_splitter.addWidget(right_panel)
 
-        main_splitter.setSizes([600, 400])
+        # 初期サイズ設定（1440x900ウィンドウに最適化）
+        # 左: 500px, 右: 残り（約900px）
+        main_splitter.setSizes([500, 900])
+
+        # ストレッチファクター: 右側（動画）を優先的に拡張
+        main_splitter.setStretchFactor(0, 0)  # 左側は固定
+        main_splitter.setStretchFactor(1, 1)  # 右側は拡張
+
         layout.addWidget(main_splitter, stretch=1)
 
         # === 書出設定 ===
@@ -154,6 +186,8 @@ class MainWorkspace(QWidget):
                 border-radius: 8px;
             }
         """)
+        # 拡張可能に設定
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -164,10 +198,11 @@ class MainWorkspace(QWidget):
         title.setStyleSheet("color: #f0f0f0; font-weight: bold; font-size: 13px;")
         layout.addWidget(title)
 
-        # 動画表示エリア
+        # 動画表示エリア - 16:9比率を維持しつつ拡張
         self._video_widget = QVideoWidget()
         self._video_widget.setStyleSheet("background: #0f0f0f; border-radius: 4px;")
         self._video_widget.setMinimumSize(320, 180)
+        self._video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._video_widget, stretch=1)
 
         # メディアプレイヤー設定
@@ -184,7 +219,8 @@ class MainWorkspace(QWidget):
         # 時間表示
         time_layout = QHBoxLayout()
         self._time_label = QLabel("00:00:00 / 00:00:00")
-        self._time_label.setStyleSheet("color: #a0a0a0; font-family: monospace;")
+        self._time_label.setStyleSheet("color: #a0a0a0;")
+        self._time_label.setFont(self._get_monospace_font(12))
         time_layout.addWidget(self._time_label)
         time_layout.addStretch()
         layout.addLayout(time_layout)

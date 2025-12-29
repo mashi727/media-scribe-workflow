@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
     QPushButton, QComboBox, QLabel, QFrame, QApplication
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QTextCharFormat, QColor, QFont
+from PySide6.QtGui import QTextCharFormat, QColor, QFont, QFontDatabase
+
+import platform
 
 
 class LogLevel(IntEnum):
@@ -66,12 +68,34 @@ class LogPanel(QWidget):
         LogLevel.ERROR: "ERROR",
     }
 
+    # プラットフォーム別等幅フォント
+    MONO_FONTS = {
+        "Darwin": ["SF Mono", "Menlo"],
+        "Windows": ["Cascadia Code", "Consolas"],
+        "Linux": ["Ubuntu Mono", "DejaVu Sans Mono"],
+    }
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._entries: List[LogEntry] = []
         self._min_level = LogLevel.INFO  # デフォルト表示レベル
         self._is_collapsed = False
         self._setup_ui()
+
+    @staticmethod
+    def _get_monospace_font(size: int = 11) -> QFont:
+        """クロスプラットフォーム対応の等幅フォントを取得"""
+        system = platform.system()
+        font_names = LogPanel.MONO_FONTS.get(system, ["monospace"])
+
+        for font_name in font_names:
+            if QFontDatabase.hasFamily(font_name) and QFontDatabase.isFixedPitch(font_name):
+                return QFont(font_name, size)
+
+        # フォールバック: システムの等幅フォント
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        font.setPointSize(size)
+        return font
 
     def _setup_ui(self):
         """UI構築"""
@@ -182,7 +206,7 @@ class LogPanel(QWidget):
         # ログ表示エリア
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
-        self._log_view.setFont(QFont("Menlo", 11))
+        self._log_view.setFont(self._get_monospace_font(11))
         self._log_view.setStyleSheet("""
             QPlainTextEdit {
                 background: #0f0f0f;

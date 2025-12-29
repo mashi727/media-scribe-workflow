@@ -2,9 +2,11 @@
 app.py - アプリケーションメインウィンドウ
 
 次世代UIのエントリーポイント。
+クロスプラットフォーム対応（macOS / Windows）
 """
 
 import sys
+import platform
 from pathlib import Path
 from typing import Optional
 
@@ -13,10 +15,74 @@ from PySide6.QtWidgets import (
     QMenuBar, QMenu, QStatusBar
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont, QFontDatabase
 
 from .main_workspace import MainWorkspace
 from .log_panel import LogLevel
+
+
+# === クロスプラットフォーム設定 ===
+
+# 固定ウィンドウサイズ
+WINDOW_WIDTH = 1440
+WINDOW_HEIGHT = 900
+
+# プラットフォーム別フォント設定
+def get_system_fonts() -> dict:
+    """プラットフォーム別のフォント名を取得"""
+    system = platform.system()
+
+    if system == "Darwin":  # macOS
+        return {
+            "ui": "SF Pro Text",
+            "ui_fallback": "Helvetica Neue",
+            "mono": "SF Mono",
+            "mono_fallback": "Menlo",
+        }
+    elif system == "Windows":
+        return {
+            "ui": "Segoe UI",
+            "ui_fallback": "Arial",
+            "mono": "Cascadia Code",
+            "mono_fallback": "Consolas",
+        }
+    else:  # Linux
+        return {
+            "ui": "Ubuntu",
+            "ui_fallback": "DejaVu Sans",
+            "mono": "Ubuntu Mono",
+            "mono_fallback": "DejaVu Sans Mono",
+        }
+
+
+def get_monospace_font(size: int = 11) -> QFont:
+    """クロスプラットフォーム対応の等幅フォントを取得"""
+    fonts = get_system_fonts()
+
+    # 優先フォントを試行
+    for font_name in [fonts["mono"], fonts["mono_fallback"]]:
+        if QFontDatabase.hasFamily(font_name) and QFontDatabase.isFixedPitch(font_name):
+            return QFont(font_name, size)
+
+    # フォールバック: システムの等幅フォント
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setPointSize(size)
+    return font
+
+
+def get_ui_font(size: int = 13) -> QFont:
+    """クロスプラットフォーム対応のUIフォントを取得"""
+    fonts = get_system_fonts()
+
+    for font_name in [fonts["ui"], fonts["ui_fallback"]]:
+        font = QFont(font_name, size)
+        if font.exactMatch() or QFontDatabase.hasFamily(font_name):
+            return font
+
+    # フォールバック: システムフォント
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+    font.setPointSize(size)
+    return font
 
 
 class VideoChapterEditorNext(QMainWindow):
@@ -39,8 +105,14 @@ class VideoChapterEditorNext(QMainWindow):
     def _setup_window(self):
         """ウィンドウ設定"""
         self.setWindowTitle(f"Video Chapter Editor (Next) - {self.VERSION}")
-        self.setMinimumSize(1000, 700)
-        self.resize(1200, 800)
+
+        # 固定サイズ 1440x900
+        self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
+
+        # アプリケーション全体のUIフォント設定
+        app = QApplication.instance()
+        if app:
+            app.setFont(get_ui_font(13))
 
         # ダークテーマ
         self.setStyleSheet("""
@@ -155,7 +227,18 @@ class VideoChapterEditorNext(QMainWindow):
 
 def main():
     """エントリーポイント"""
+    # High DPI対応（QApplication作成前に設定）
+    # PySide6では自動的にHigh DPI対応されるが、明示的に設定
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
     app = QApplication(sys.argv)
+
+    # プラットフォーム情報をログ
+    system = platform.system()
+    print(f"Platform: {system}")
+    print(f"Window size: {WINDOW_WIDTH}x{WINDOW_HEIGHT}")
 
     # 作業ディレクトリ（コマンドライン引数から）
     work_dir = None
