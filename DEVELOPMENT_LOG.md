@@ -130,6 +130,101 @@ graph LR
 | UC4-A | 既存/チャプタなし | MP4 | - | - | - | 焼込+チャプタ |
 | UC4-B | 既存/チャプタ追加 | MP4 | - | - | - | 焼込+チャプタ |
 
+### 配管/陶器 分界マトリクス
+
+各処理ステップの担当を明確化。**境界線**はvideo-chapter-editorの入出力点。
+
+```
+凡例:
+  🔧 配管（CLI/外部ツール）
+  🏺 陶器（video-chapter-editor）
+  ─── 境界線
+```
+
+| ステップ | ツール | 分類 | 備考 |
+|----------|--------|------|------|
+| **入力取得** |||
+| YouTube DL | ytdl-claude | 🔧 | URL → MP4 + SRT |
+| ファイル転送 | Finder/手動 | 🔧 | iPhone → Mac |
+| **─── 境界線 ───** |||
+| **動画編集** |||
+| ソース選択 | video-chapter-editor | 🏺 | ダイアログ |
+| 結合（MP3） | video-chapter-editor | 🏺 | -c copy無劣化 |
+| トリム | video-chapter-editor | 🏺 | 波形+プレビュー |
+| カバー設定 | video-chapter-editor | 🏺 | ダイアログ |
+| チャプター編集 | video-chapter-editor | 🏺 | メイン機能 |
+| 書出 | video-chapter-editor | 🏺 | 焼込+エンコード |
+| **─── 境界線 ───** |||
+| **後続処理** |||
+| YouTubeアップロード | ブラウザ/手動 | 🔧 | 字幕生成待ち |
+| 字幕取得 | yt-srt | 🔧 | SRT出力 |
+| AI分析 | Claude Code | 🔧 | /rehearsal skill |
+| レポート生成 | rehearsal-finalize | 🔧 | PDF + chapters |
+
+**ユースケース別 責務分担:**
+
+| UC | 配管（前） | 陶器 | 配管（後） |
+|----|-----------|------|-----------|
+| UC1-A | - | 編集→書出 | YT→SRT→分析 |
+| UC1-B | - | トリム→編集→書出 | YT→SRT→分析 |
+| UC2-A1 | ytdl | 編集→書出 | 配布のみ |
+| UC2-A2 | ytdl | トリム→編集→書出 | YT→SRT→分析 |
+| UC2-B | ytdl | 閲覧のみ | - |
+| UC3-A1 | - | 結合→カバー→編集→書出 | YT→SRT→分析 |
+| UC3-A2 | - | カバー→編集→書出 | YT→SRT→分析 |
+| UC3-B1 | - | トリム→カバー→編集→書出 | YT→SRT→分析 |
+| UC4-A | - | 編集→書出 | 配布のみ |
+| UC4-B | - | 編集→書出 | 配布のみ |
+
+**視覚化:**
+
+```mermaid
+graph LR
+    subgraph "🔧 配管（前処理）"
+        P1[ytdl-claude]
+        P2[ファイル転送]
+    end
+
+    subgraph "🏺 陶器（video-chapter-editor）"
+        E1[ソース選択]
+        E2[結合/トリム]
+        E3[カバー設定]
+        E4[チャプター編集]
+        E5[書出]
+    end
+
+    subgraph "🔧 配管（後処理）"
+        P3[YouTube]
+        P4[yt-srt]
+        P5[Claude AI]
+        P6[rehearsal-finalize]
+    end
+
+    P1 --> E1
+    P2 --> E1
+    E1 --> E2 --> E3 --> E4 --> E5
+    E5 --> P3 --> P4 --> P5 --> P6
+
+    style E1 fill:#e3f2fd
+    style E2 fill:#e3f2fd
+    style E3 fill:#e3f2fd
+    style E4 fill:#e3f2fd
+    style E5 fill:#e3f2fd
+    style P1 fill:#fff3e0
+    style P2 fill:#fff3e0
+    style P3 fill:#fff3e0
+    style P4 fill:#fff3e0
+    style P5 fill:#fff3e0
+    style P6 fill:#fff3e0
+```
+
+**設計上の意味:**
+
+1. **video-chapter-editorの責務範囲が明確**: ソース選択〜書出まで
+2. **入出力インターフェースが2箇所**: 入力（ファイル）と出力（MP4）
+3. **後続処理は独立**: 字幕取得〜分析は別ワークフロー
+4. **UC2-Bは例外**: 陶器を通過するが書出せず（閲覧用途）
+
 ### 処理パス分類
 
 ```mermaid
