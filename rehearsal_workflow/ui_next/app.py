@@ -25,7 +25,7 @@ from .log_panel import LogLevel
 
 # 固定ウィンドウサイズ
 WINDOW_WIDTH = 1440
-WINDOW_HEIGHT = 900
+WINDOW_HEIGHT = 1080
 
 # プラットフォーム別フォント設定
 def get_system_fonts() -> dict:
