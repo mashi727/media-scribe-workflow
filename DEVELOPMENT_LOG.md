@@ -141,28 +141,30 @@ graph LR
   ─── 境界線
 ```
 
-| ステップ | ツール | ユーザー操作 | バックエンド | 分類 |
-|----------|--------|-------------|-------------|------|
-| **入力取得** |||||
-| YouTube DL | ytdl | URLコピペ → コマンド実行 | `ytdl <URL> -o <name>` | 🔧 |
-| YouTube DL（統合） | rehearsal-download | URLコピペ → コマンド実行 | `rehearsal-download <URL>` | 🔧 |
-| 字幕のみ取得 | yt-srt | URLコピペ → コマンド実行 | `yt-srt <URL> [-v]` | 🔧 |
-| ファイル転送 | Finder | iPhoneからAirDrop / D&D | - | 🔧 |
-| **─── 境界線（入力）───** |||||
-| **動画編集** |||||
-| ソース選択 | video-chapter-editor | ボタン押下 → ファイル選択 | ファイル読込 + 波形生成 | 🏺 |
-| 結合（MP3） | video-chapter-editor | 複数ファイル選択で自動実行 | `ffmpeg -i ... -c copy` | 🏺 |
-| トリム | video-chapter-editor | 波形クリック → `--`で始まる名前入力 | 除外区間リスト生成 | 🏺 |
-| カバー設定 | video-chapter-editor | ボタン押下 → 画像選択 → ドラッグでクロップ | 画像リサイズ + 保持 | 🏺 |
-| チャプター編集 | video-chapter-editor | 波形クリックで位置設定 → 名前入力 | チャプターリスト更新 | 🏺 |
-| 書出 | video-chapter-editor | ボタン押下 → 進捗表示を待機 | `ffmpeg -vf drawtext ...` | 🏺 |
-| **─── 境界線（出力）───** |||||
-| **後続処理** |||||
-| YouTubeアップロード | ブラウザ | ファイルD&D → タイトル入力 → 公開 | YouTube処理（数時間待機） | 🔧 |
-| 字幕取得 | yt-srt | 新URLコピペ → コマンド実行 | `yt-srt <URL>` → yt-dlp | 🔧 |
-| AI分析 | Claude Code | `/rehearsal` 入力 → 指示に従う | skill展開 → Claude API | 🔧 |
-| PDF生成 | rehearsal-finalize | .texファイル指定 → コマンド実行 | `luatex-pdf` → tex2chapters | 🔧 |
-| チャプター抽出 | （自動） | （PDF生成に含まれる） | `grep` + `sed` + `awk` | 🔧 |
+| ステップ | ツール | ユーザー操作 | プラットフォーム提供 | 要実装 | 分類 |
+|----------|--------|-------------|-------------------|--------|------|
+| **入力取得** ||||||
+| YouTube DL | ytdl | URLコピペ → コマンド実行 | yt-dlp | Zshラッパー | 🔧 |
+| YouTube DL（統合） | rehearsal-download | URLコピペ → コマンド実行 | yt-dlp, whisper-remote | Zshオーケストレーション | 🔧 |
+| 字幕のみ取得 | yt-srt | URLコピペ → コマンド実行 | yt-dlp | Zshラッパー | 🔧 |
+| ファイル転送 | Finder | iPhoneからAirDrop / D&D | macOS (AirDrop, Finder) | - | 🔧 |
+| **─── 境界線（入力）───** ||||||
+| **動画編集** ||||||
+| ソース選択 | video-chapter-editor | ボタン押下 → ファイル選択 | QFileDialog | ダイアログ呼出ロジック | 🏺 |
+| 波形生成 | video-chapter-editor | （自動） | numpy (FFT) | 波形描画Widget | 🏺 |
+| 結合（MP3） | video-chapter-editor | 複数ファイル選択で自動実行 | ffmpeg (-c copy) | コマンド構築 + subprocess | 🏺 |
+| トリム | video-chapter-editor | 波形クリック → `--`名前入力 | - | 除外区間ロジック + UI | 🏺 |
+| カバー設定 | video-chapter-editor | ボタン押下 → 画像選択 → クロップ | QFileDialog, QImage | クロップUI + リサイズ処理 | 🏺 |
+| チャプター編集 | video-chapter-editor | 波形クリック → 名前入力 | QTableWidget | テーブル⇔波形連携 | 🏺 |
+| プレビュー | video-chapter-editor | 再生ボタン / シーク | QMediaPlayer | 波形⇔再生位置同期 | 🏺 |
+| 書出 | video-chapter-editor | ボタン押下 → 進捗待機 | ffmpeg (drawtext, エンコード) | コマンド構築 + 進捗パース | 🏺 |
+| **─── 境界線（出力）───** ||||||
+| **後続処理** ||||||
+| YouTubeアップロード | ブラウザ | ファイルD&D → タイトル入力 → 公開 | YouTube (自動字幕生成) | - | 🔧 |
+| 字幕取得 | yt-srt | 新URLコピペ → コマンド実行 | yt-dlp | Zshラッパー | 🔧 |
+| AI分析 | Claude Code | `/rehearsal` 入力 → 指示に従う | Claude API | skill定義 (.md) | 🔧 |
+| PDF生成 | rehearsal-finalize | .texファイル指定 → コマンド実行 | luatex-pdf (Docker) | Zshオーケストレーション | 🔧 |
+| チャプター抽出 | tex2chapters | （PDF生成に含まれる） | grep, sed, awk | 正規表現 + 出力整形 | 🔧 |
 
 **コマンドリファレンス:**
 
