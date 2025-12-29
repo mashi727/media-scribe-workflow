@@ -126,9 +126,9 @@ class MainWorkspace(QWidget):
         # === メイン水平スプリッター（左: 編集, 右: プレビュー）===
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左側パネル（固定幅）
+        # 左側パネル（固定幅: 1.5:3比率 → 480px）
         left_panel = self._create_left_panel()
-        left_panel.setFixedWidth(360)
+        left_panel.setFixedWidth(480)
         main_splitter.addWidget(left_panel)
 
         # 右側パネル（動画プレビュー）- 残りのスペースを使用
