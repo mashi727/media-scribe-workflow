@@ -144,9 +144,9 @@ graph LR
 | ステップ | ツール | ユーザー操作 | プラットフォーム提供 | 要実装 | 分類 |
 |----------|--------|-------------|-------------------|--------|------|
 | **入力取得** ||||||
-| YouTube DL | ytdl | URLコピペ → コマンド実行 | yt-dlp | Zshラッパー | 🔧 |
-| YouTube DL（統合） | rehearsal-download | URLコピペ → コマンド実行 | yt-dlp, whisper-remote | Zshオーケストレーション | 🔧 |
-| 字幕のみ取得 | yt-srt | URLコピペ → コマンド実行 | yt-dlp | Zshラッパー | 🔧 |
+| YouTube DL | ytdl | URLコピペ → コマンド実行 | - | ytdl (yt-dlpラッパー) | 🔧 |
+| YouTube DL（統合） | rehearsal-download | URLコピペ → コマンド実行 | - | rehearsal-download + whisper-remote | 🔧 |
+| 字幕のみ取得 | yt-srt | URLコピペ → コマンド実行 | - | yt-srt (yt-dlpラッパー) | 🔧 |
 | ファイル転送 | Finder | iPhoneからAirDrop / D&D | macOS (AirDrop, Finder) | - | 🔧 |
 | **─── 境界線（入力）───** ||||||
 | **動画編集** ||||||
