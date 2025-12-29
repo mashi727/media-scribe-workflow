@@ -141,28 +141,28 @@ graph LR
   ─── 境界線
 ```
 
-| ステップ | ツール | UI操作 | バックエンド | 分類 |
-|----------|--------|--------|-------------|------|
+| ステップ | ツール | ユーザー操作 | バックエンド | 分類 |
+|----------|--------|-------------|-------------|------|
 | **入力取得** |||||
-| YouTube DL | ytdl | ターミナル | `ytdl <URL> -o <name>` | 🔧 |
-| YouTube DL（統合） | rehearsal-download | ターミナル | `rehearsal-download <URL>` | 🔧 |
-| 字幕のみ取得 | yt-srt | ターミナル | `yt-srt <URL> [-v]` | 🔧 |
-| ファイル転送 | Finder | D&D / AirDrop | - | 🔧 |
+| YouTube DL | ytdl | URLコピペ → コマンド実行 | `ytdl <URL> -o <name>` | 🔧 |
+| YouTube DL（統合） | rehearsal-download | URLコピペ → コマンド実行 | `rehearsal-download <URL>` | 🔧 |
+| 字幕のみ取得 | yt-srt | URLコピペ → コマンド実行 | `yt-srt <URL> [-v]` | 🔧 |
+| ファイル転送 | Finder | iPhoneからAirDrop / D&D | - | 🔧 |
 | **─── 境界線（入力）───** |||||
 | **動画編集** |||||
-| ソース選択 | video-chapter-editor | `[ソース選択]` ボタン | ファイル選択ダイアログ | 🏺 |
-| 結合（MP3） | video-chapter-editor | ダイアログ内で自動 | `ffmpeg -i ... -c copy` | 🏺 |
-| トリム | video-chapter-editor | 波形クリック + `--`入力 | 除外区間リスト生成 | 🏺 |
-| カバー設定 | video-chapter-editor | `[カバー画像]` ボタン | 画像読込 + クロップUI | 🏺 |
-| チャプター編集 | video-chapter-editor | テーブル編集 / 波形クリック | チャプターリスト更新 | 🏺 |
-| 書出 | video-chapter-editor | `[書出]` ボタン | `ffmpeg -vf drawtext ...` | 🏺 |
+| ソース選択 | video-chapter-editor | ボタン押下 → ファイル選択 | ファイル読込 + 波形生成 | 🏺 |
+| 結合（MP3） | video-chapter-editor | 複数ファイル選択で自動実行 | `ffmpeg -i ... -c copy` | 🏺 |
+| トリム | video-chapter-editor | 波形クリック → `--`で始まる名前入力 | 除外区間リスト生成 | 🏺 |
+| カバー設定 | video-chapter-editor | ボタン押下 → 画像選択 → ドラッグでクロップ | 画像リサイズ + 保持 | 🏺 |
+| チャプター編集 | video-chapter-editor | 波形クリックで位置設定 → 名前入力 | チャプターリスト更新 | 🏺 |
+| 書出 | video-chapter-editor | ボタン押下 → 進捗表示を待機 | `ffmpeg -vf drawtext ...` | 🏺 |
 | **─── 境界線（出力）───** |||||
 | **後続処理** |||||
-| YouTubeアップロード | ブラウザ | youtube.com/upload | YouTube API | 🔧 |
-| 字幕取得 | yt-srt | ターミナル | `yt-srt <URL>` → yt-dlp | 🔧 |
-| AI分析 | Claude Code | `/rehearsal` 入力 | skill展開 → Claude API | 🔧 |
-| PDF生成 | rehearsal-finalize | ターミナル | `luatex-pdf <file.tex>` | 🔧 |
-| チャプター抽出 | tex2chapters | ターミナル（自動） | `grep` + `sed` + `awk` | 🔧 |
+| YouTubeアップロード | ブラウザ | ファイルD&D → タイトル入力 → 公開 | YouTube処理（数時間待機） | 🔧 |
+| 字幕取得 | yt-srt | 新URLコピペ → コマンド実行 | `yt-srt <URL>` → yt-dlp | 🔧 |
+| AI分析 | Claude Code | `/rehearsal` 入力 → 指示に従う | skill展開 → Claude API | 🔧 |
+| PDF生成 | rehearsal-finalize | .texファイル指定 → コマンド実行 | `luatex-pdf` → tex2chapters | 🔧 |
+| チャプター抽出 | （自動） | （PDF生成に含まれる） | `grep` + `sed` + `awk` | 🔧 |
 
 **コマンドリファレンス:**
 
