@@ -51,6 +51,249 @@ import platform
 
 
 # ==============================================================================
+# モダンダーク UI カラーパレット
+# ==============================================================================
+
+class Theme:
+    """統一されたUIテーマ定義"""
+    # 背景色（暗い順）
+    BG_DARKEST = "#0f0f0f"      # 最も暗い背景
+    BG_DARK = "#1a1a1a"         # ダーク背景
+    BG_BASE = "#242424"         # ベース背景
+    BG_ELEVATED = "#2d2d2d"     # 浮いた要素
+    BG_HOVER = "#363636"        # ホバー時
+    BG_ACTIVE = "#404040"       # アクティブ時
+
+    # テキスト色
+    TEXT_PRIMARY = "#f0f0f0"    # メインテキスト
+    TEXT_SECONDARY = "#a0a0a0"  # セカンダリテキスト
+    TEXT_MUTED = "#666666"      # 控えめなテキスト
+
+    # アクセントカラー
+    ACCENT = "#3b82f6"          # メインアクセント（ブルー）
+    ACCENT_HOVER = "#2563eb"    # ホバー時
+    ACCENT_ACTIVE = "#1d4ed8"   # アクティブ時
+
+    # ステータスカラー
+    SUCCESS = "#22c55e"         # 成功（グリーン）
+    WARNING = "#f59e0b"         # 警告（オレンジ）
+    DANGER = "#ef4444"          # 危険（レッド）
+    DANGER_HOVER = "#dc2626"
+
+    # ボーダー
+    BORDER = "#3a3a3a"
+    BORDER_LIGHT = "#4a4a4a"
+
+    # その他
+    RADIUS = "8px"
+    RADIUS_SM = "4px"
+    SHADOW = "0 4px 12px rgba(0, 0, 0, 0.3)"
+
+    @classmethod
+    def button_primary(cls) -> str:
+        return f"""
+            QPushButton {{
+                background: {cls.ACCENT};
+                color: white;
+                border: none;
+                border-radius: {cls.RADIUS};
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{ background: {cls.ACCENT_HOVER}; }}
+            QPushButton:pressed {{ background: {cls.ACCENT_ACTIVE}; }}
+            QPushButton:disabled {{ background: {cls.BG_HOVER}; color: {cls.TEXT_MUTED}; }}
+        """
+
+    @classmethod
+    def button_secondary(cls) -> str:
+        return f"""
+            QPushButton {{
+                background: {cls.BG_ELEVATED};
+                color: {cls.TEXT_PRIMARY};
+                border: 1px solid {cls.BORDER};
+                border-radius: {cls.RADIUS};
+                padding: 10px 20px;
+                font-size: 14px;
+            }}
+            QPushButton:hover {{ background: {cls.BG_HOVER}; border-color: {cls.BORDER_LIGHT}; }}
+            QPushButton:pressed {{ background: {cls.BG_ACTIVE}; }}
+        """
+
+    @classmethod
+    def button_danger(cls) -> str:
+        return f"""
+            QPushButton {{
+                background: {cls.DANGER};
+                color: white;
+                border: none;
+                border-radius: {cls.RADIUS};
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{ background: {cls.DANGER_HOVER}; }}
+            QPushButton:pressed {{ background: #b91c1c; }}
+        """
+
+    @classmethod
+    def input_style(cls) -> str:
+        return f"""
+            QLineEdit, QSpinBox, QComboBox {{
+                background: {cls.BG_DARK};
+                color: {cls.TEXT_PRIMARY};
+                border: 1px solid {cls.BORDER};
+                border-radius: {cls.RADIUS_SM};
+                padding: 8px 12px;
+                font-size: 14px;
+            }}
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
+                border-color: {cls.ACCENT};
+            }}
+            QComboBox::drop-down {{ border: none; width: 20px; }}
+            QComboBox::down-arrow {{ image: none; }}
+        """
+
+    @classmethod
+    def main_window_style(cls) -> str:
+        return f"""
+            QMainWindow, QWidget {{
+                background: {cls.BG_BASE};
+                color: {cls.TEXT_PRIMARY};
+            }}
+            QLabel {{
+                color: {cls.TEXT_PRIMARY};
+            }}
+            QGroupBox {{
+                background: {cls.BG_ELEVATED};
+                border: 1px solid {cls.BORDER};
+                border-radius: {cls.RADIUS};
+                margin-top: 16px;
+                padding: 16px;
+                font-weight: 500;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 8px;
+                color: {cls.TEXT_PRIMARY};
+            }}
+            QTabWidget::pane {{
+                background: {cls.BG_ELEVATED};
+                border: 1px solid {cls.BORDER};
+                border-radius: {cls.RADIUS};
+            }}
+            QTabBar::tab {{
+                background: {cls.BG_DARK};
+                color: {cls.TEXT_SECONDARY};
+                padding: 10px 24px;
+                margin-right: 2px;
+                border-top-left-radius: {cls.RADIUS};
+                border-top-right-radius: {cls.RADIUS};
+            }}
+            QTabBar::tab:selected {{
+                background: {cls.BG_ELEVATED};
+                color: {cls.TEXT_PRIMARY};
+            }}
+            QTabBar::tab:hover:!selected {{
+                background: {cls.BG_HOVER};
+            }}
+            QScrollBar:vertical {{
+                background: {cls.BG_DARK};
+                width: 12px;
+                border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {cls.BG_HOVER};
+                border-radius: 6px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {cls.BG_ACTIVE};
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line {{
+                height: 0;
+            }}
+            QTableWidget {{
+                background: {cls.BG_DARK};
+                border: 1px solid {cls.BORDER};
+                border-radius: {cls.RADIUS_SM};
+                gridline-color: {cls.BORDER};
+            }}
+            QTableWidget::item {{
+                padding: 8px;
+            }}
+            QTableWidget::item:selected {{
+                background: {cls.ACCENT};
+            }}
+            QHeaderView::section {{
+                background: {cls.BG_ELEVATED};
+                color: {cls.TEXT_SECONDARY};
+                padding: 8px;
+                border: none;
+                border-bottom: 1px solid {cls.BORDER};
+            }}
+            QProgressBar {{
+                background: {cls.BG_DARK};
+                border: none;
+                border-radius: {cls.RADIUS_SM};
+                height: 8px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background: {cls.ACCENT};
+                border-radius: {cls.RADIUS_SM};
+            }}
+            QCheckBox {{
+                color: {cls.TEXT_PRIMARY};
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 2px solid {cls.BORDER};
+                background: {cls.BG_DARK};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {cls.ACCENT};
+                border-color: {cls.ACCENT};
+            }}
+            QSlider::groove:horizontal {{
+                background: {cls.BG_DARK};
+                height: 6px;
+                border-radius: 3px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {cls.ACCENT};
+                width: 16px;
+                height: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {cls.ACCENT_HOVER};
+            }}
+            QListWidget {{
+                background: {cls.BG_DARK};
+                border: 1px solid {cls.BORDER};
+                border-radius: {cls.RADIUS_SM};
+            }}
+            QListWidget::item {{
+                padding: 8px;
+                border-radius: {cls.RADIUS_SM};
+            }}
+            QListWidget::item:selected {{
+                background: {cls.ACCENT};
+            }}
+            QListWidget::item:hover:!selected {{
+                background: {cls.BG_HOVER};
+            }}
+        """
+
+
+# ==============================================================================
 # GPUエンコーダ検出
 # ==============================================================================
 
@@ -2023,50 +2266,33 @@ class MergeTab(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)
 
-        # 共通スタイル（16px統一・ゆったり）
-        label_header = "color: #888; font-size: 16px;"
-        input_style = "font-size: 16px; padding: 6px;"
-
         # ファイルリスト
         list_label = QLabel("MP3ファイル一覧（ドラッグで並べ替え）")
-        list_label.setStyleSheet(label_header)
+        list_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         left_layout.addWidget(list_label)
 
         self.file_list = QListWidget()
         self.file_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.file_list.setStyleSheet("font-size: 16px;")
         left_layout.addWidget(self.file_list, stretch=1)
 
-        # MP3ファイル操作ボタン（ファイルリストのすぐ下）
-        btn_small = """
-            QPushButton {
-                background: #3a3a3a;
-                color: #ccc;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 10px 16px;
-                font-size: 18px;
-            }
-            QPushButton:hover { background: #4a4a4a; border-color: #666; }
-            QPushButton:disabled { background: #2a2a2a; color: #555; }
-        """
+        # MP3ファイル操作ボタン
         mp3_btn_layout = QHBoxLayout()
-        mp3_btn_layout.setSpacing(10)
+        mp3_btn_layout.setSpacing(8)
 
-        add_btn = QPushButton("＋ 追加")
-        add_btn.setStyleSheet(btn_small)
+        add_btn = QPushButton("追加")
+        add_btn.setStyleSheet(Theme.button_secondary())
         add_btn.setToolTip("MP3ファイルを追加")
         add_btn.clicked.connect(self.add_files)
         mp3_btn_layout.addWidget(add_btn)
 
-        remove_btn = QPushButton("－ 削除")
-        remove_btn.setStyleSheet(btn_small)
+        remove_btn = QPushButton("削除")
+        remove_btn.setStyleSheet(Theme.button_secondary())
         remove_btn.setToolTip("選択したファイルを削除")
         remove_btn.clicked.connect(self.remove_selected)
         mp3_btn_layout.addWidget(remove_btn)
 
-        clear_btn = QPushButton("✕ 全削除")
-        clear_btn.setStyleSheet(btn_small)
+        clear_btn = QPushButton("全削除")
+        clear_btn.setStyleSheet(Theme.button_secondary())
         clear_btn.setToolTip("すべてのファイルを削除")
         clear_btn.clicked.connect(self.clear_files)
         mp3_btn_layout.addWidget(clear_btn)
@@ -2083,29 +2309,29 @@ class MergeTab(QWidget):
         # 出力ファイル名
         output_layout = QHBoxLayout()
         output_label = QLabel("出力名:")
-        output_label.setStyleSheet(label_header)
+        output_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         output_label.setFixedWidth(60)
         output_layout.addWidget(output_label)
         self.output_name = QLineEdit()
         self.output_name.setPlaceholderText("merged_audio")
-        self.output_name.setStyleSheet(input_style)
+        self.output_name.setStyleSheet(Theme.input_style())
         output_layout.addWidget(self.output_name)
         settings_layout.addLayout(output_layout)
 
         # 出力先ディレクトリ
         dir_layout = QHBoxLayout()
         dir_label = QLabel("出力先:")
-        dir_label.setStyleSheet(label_header)
+        dir_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         dir_label.setFixedWidth(60)
         dir_layout.addWidget(dir_label)
         self.output_dir = QLineEdit()
         self.output_dir.setPlaceholderText("（最初のファイルと同じ場所）")
         self.output_dir.setReadOnly(True)
-        self.output_dir.setStyleSheet("background: #333; color: #aaa; font-size: 16px; padding: 6px;")
+        self.output_dir.setStyleSheet(f"background: {Theme.BG_DARK}; color: {Theme.TEXT_MUTED}; border: 1px solid {Theme.BORDER}; border-radius: {Theme.RADIUS_SM}; padding: 8px;")
         dir_layout.addWidget(self.output_dir)
         dir_btn = QPushButton("...")
         dir_btn.setFixedWidth(40)
-        dir_btn.setStyleSheet("font-size: 16px; padding: 6px;")
+        dir_btn.setStyleSheet(Theme.button_secondary())
         dir_btn.setToolTip("出力先を変更")
         dir_btn.clicked.connect(self._select_output_dir)
         dir_layout.addWidget(dir_btn)
@@ -2115,72 +2341,31 @@ class MergeTab(QWidget):
 
         # ログ
         log_label = QLabel("ログ")
-        log_label.setStyleSheet(label_header)
+        log_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         left_layout.addWidget(log_label)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(100)
-        self.log.setStyleSheet("background: #2a2a2a; border: 1px solid #444; border-radius: 4px; font-size: 16px; padding: 6px;")
+        self.log.setStyleSheet(f"background: {Theme.BG_DARK}; border: 1px solid {Theme.BORDER}; border-radius: {Theme.RADIUS_SM}; padding: 8px;")
         left_layout.addWidget(self.log)
 
         # ========== ボタン群（ログの下）==========
-        btn_small = """
-            QPushButton {
-                background: #3a3a3a;
-                color: #ccc;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 10px 16px;
-                font-size: 18px;
-            }
-            QPushButton:hover { background: #4a4a4a; border-color: #666; }
-            QPushButton:disabled { background: #2a2a2a; color: #555; }
-        """
-        btn_action = """
-            QPushButton {
-                background: #66BB6A;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 20px;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #81C784; }
-            QPushButton:pressed { background: #4CAF50; }
-            QPushButton:disabled { background: #333; color: #666; }
-        """
-
-        # 結合実行ボタン
         action_btn_layout = QHBoxLayout()
         action_btn_layout.setSpacing(10)
         action_btn_layout.addStretch()
 
         # 結合実行（メインアクション）
-        self.merge_btn = QPushButton("▶ 結合実行")
-        self.merge_btn.setStyleSheet(btn_action)
+        self.merge_btn = QPushButton("結合実行")
+        self.merge_btn.setStyleSheet(Theme.button_primary())
         self.merge_btn.setMinimumWidth(120)
         self.merge_btn.setToolTip("MP3を結合してMP4を作成")
         self.merge_btn.clicked.connect(self.execute_merge)
         action_btn_layout.addWidget(self.merge_btn)
 
         # キャンセルボタン（エンコード中のみ表示）
-        btn_cancel = """
-            QPushButton {
-                background: #f44336;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #e53935; }
-            QPushButton:pressed { background: #c62828; }
-        """
-        self.cancel_btn = QPushButton("■ 中止")
-        self.cancel_btn.setStyleSheet(btn_cancel)
+        self.cancel_btn = QPushButton("中止")
+        self.cancel_btn.setStyleSheet(Theme.button_danger())
         self.cancel_btn.setMinimumWidth(80)
         self.cancel_btn.setToolTip("エンコードを中止")
         self.cancel_btn.clicked.connect(self.cancel_encoding)
@@ -2200,11 +2385,11 @@ class MergeTab(QWidget):
         # カバー画像ヘッダー
         cover_header = QHBoxLayout()
         cover_title = QLabel("カバー画像")
-        cover_title.setStyleSheet("color: #888; font-size: 16px;")
+        cover_title.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         cover_header.addWidget(cover_title)
 
         self.cover_label = QLabel("未選択")
-        self.cover_label.setStyleSheet("color: #aaa; font-size: 16px;")
+        self.cover_label.setStyleSheet(f"color: {Theme.TEXT_MUTED};")
         cover_header.addWidget(self.cover_label)
         cover_header.addStretch()
         right_layout.addLayout(cover_header)
@@ -2218,70 +2403,54 @@ class MergeTab(QWidget):
         cover_btn_layout = QHBoxLayout()
         cover_btn_layout.setSpacing(8)
 
-        cover_btn_style = """
-            QPushButton {
-                background: #3a3a3a;
-                color: #ddd;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 14px;
-            }
-            QPushButton:hover { background: #4a4a4a; border-color: #666; }
-        """
-        paste_btn_style = """
-            QPushButton {
-                background: #2196F3;
+        # トグルボタン用スタイル
+        toggle_btn_style = f"""
+            QPushButton {{
+                background: {Theme.BG_ELEVATED};
+                color: {Theme.TEXT_SECONDARY};
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                padding: 10px 20px;
+            }}
+            QPushButton:hover {{ background: {Theme.BG_HOVER}; }}
+            QPushButton:checked {{
+                background: {Theme.SUCCESS};
                 color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #42A5F5; }
-        """
-        toggle_btn_style = """
-            QPushButton {
-                background: #3a3a3a;
-                color: #aaa;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 14px;
-            }
-            QPushButton:hover { background: #4a4a4a; border-color: #666; }
-            QPushButton:checked {
-                background: #4CAF50;
-                color: white;
-                border-color: #4CAF50;
-            }
-            QPushButton:checked:hover { background: #66BB6A; }
+                border-color: {Theme.SUCCESS};
+            }}
+            QPushButton:checked:hover {{ background: #34d399; }}
         """
 
-        btn_width = 110  # ボタン幅を統一
+        btn_width = 110
 
-        self.cover_select_btn = QPushButton("📂 選択")
-        self.cover_select_btn.setStyleSheet(cover_btn_style)
+        self.cover_select_btn = QPushButton("選択")
+        self.cover_select_btn.setStyleSheet(Theme.button_secondary())
         self.cover_select_btn.setFixedWidth(btn_width)
         self.cover_select_btn.setToolTip("ファイルからカバー画像を選択")
         self.cover_select_btn.clicked.connect(self.select_cover)
         cover_btn_layout.addWidget(self.cover_select_btn)
 
-        self.cover_paste_btn = QPushButton("📋 貼り付け")
-        self.cover_paste_btn.setStyleSheet(paste_btn_style)
+        self.cover_paste_btn = QPushButton("貼り付け")
+        self.cover_paste_btn.setStyleSheet(Theme.button_secondary())
         self.cover_paste_btn.setFixedWidth(btn_width)
         self.cover_paste_btn.setToolTip("クリップボードから画像を貼り付け (Cmd+V)")
         self.cover_paste_btn.clicked.connect(self.paste_cover_from_clipboard)
         cover_btn_layout.addWidget(self.cover_paste_btn)
 
-        self.preview_btn = QPushButton("👁 プレビュー")
+        self.preview_btn = QPushButton("プレビュー")
         self.preview_btn.setStyleSheet(toggle_btn_style)
         self.preview_btn.setFixedWidth(btn_width)
         self.preview_btn.setCheckable(True)
         self.preview_btn.setToolTip("圧縮プレビュー表示 (左: 元画像 / 右: 圧縮後)")
         self.preview_btn.toggled.connect(self._on_preview_toggled)
         cover_btn_layout.addWidget(self.preview_btn)
+
+        save_btn = QPushButton("保存")
+        save_btn.setStyleSheet(Theme.button_secondary())
+        save_btn.setFixedWidth(btn_width)
+        save_btn.setToolTip("クロップした画像を保存")
+        save_btn.clicked.connect(self._save_cover)
+        cover_btn_layout.addWidget(save_btn)
 
         cover_btn_layout.addStretch()
         right_layout.addLayout(cover_btn_layout)
@@ -2292,7 +2461,7 @@ class MergeTab(QWidget):
 
         # 回転
         rotate_label = QLabel("回転:")
-        rotate_label.setStyleSheet("font-size: 16px;")
+        rotate_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         ctrl_layout.addWidget(rotate_label)
         self.rotation_slider = QSlider(Qt.Orientation.Horizontal)
         self.rotation_slider.setRange(0, 359)
@@ -2304,20 +2473,29 @@ class MergeTab(QWidget):
         self.rotation_spin.setRange(0, 359)
         self.rotation_spin.setSuffix("°")
         self.rotation_spin.setFixedWidth(65)
-        self.rotation_spin.setStyleSheet("font-size: 16px;")
         self.rotation_spin.valueChanged.connect(self._on_rotation_spin_changed)
         ctrl_layout.addWidget(self.rotation_spin)
 
-        ctrl_btn_style = "font-size: 16px; padding: 4px 8px;"
-        btn_90cw = QPushButton("90→")
+        # 回転ボタン（小型）
+        small_btn_style = f"""
+            QPushButton {{
+                background: {Theme.BG_ELEVATED};
+                color: {Theme.TEXT_SECONDARY};
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS_SM};
+                padding: 6px 10px;
+            }}
+            QPushButton:hover {{ background: {Theme.BG_HOVER}; }}
+        """
+        btn_90cw = QPushButton("+90")
         btn_90cw.setFixedWidth(50)
-        btn_90cw.setStyleSheet(ctrl_btn_style)
+        btn_90cw.setStyleSheet(small_btn_style)
         btn_90cw.clicked.connect(lambda: self._rotate_by(90))
         ctrl_layout.addWidget(btn_90cw)
 
-        btn_90ccw = QPushButton("←90")
+        btn_90ccw = QPushButton("-90")
         btn_90ccw.setFixedWidth(50)
-        btn_90ccw.setStyleSheet(ctrl_btn_style)
+        btn_90ccw.setStyleSheet(small_btn_style)
         btn_90ccw.clicked.connect(lambda: self._rotate_by(-90))
         ctrl_layout.addWidget(btn_90ccw)
 
@@ -2325,7 +2503,7 @@ class MergeTab(QWidget):
 
         # 品質
         quality_label = QLabel("品質:")
-        quality_label.setStyleSheet("font-size: 16px;")
+        quality_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         ctrl_layout.addWidget(quality_label)
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setRange(1, 100)
@@ -2339,7 +2517,6 @@ class MergeTab(QWidget):
         self.quality_spin.setValue(85)
         self.quality_spin.setSuffix("%")
         self.quality_spin.setFixedWidth(65)
-        self.quality_spin.setStyleSheet("font-size: 16px;")
         self.quality_spin.valueChanged.connect(self._on_quality_spin_changed)
         ctrl_layout.addWidget(self.quality_spin)
 
@@ -2347,24 +2524,8 @@ class MergeTab(QWidget):
 
         # サイズ表示
         self.size_label = QLabel("--")
-        self.size_label.setStyleSheet("color: #88ff88; font-size: 16px;")
+        self.size_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         ctrl_layout.addWidget(self.size_label)
-
-        # 保存ボタン
-        save_btn = QPushButton("💾 保存")
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 8px 16px;
-                font-size: 16px;
-            }
-            QPushButton:hover { background: #66BB6A; }
-        """)
-        save_btn.clicked.connect(self._save_cover)
-        ctrl_layout.addWidget(save_btn)
 
         right_layout.addLayout(ctrl_layout)
 
@@ -2774,10 +2935,11 @@ class EditTab(QWidget):
 
         # シークバー
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
-        self.seek_slider.setStyleSheet("""
-            QSlider::groove:horizontal { height: 4px; background: #444; }
-            QSlider::handle:horizontal { width: 12px; height: 12px; margin: -4px 0; background: #2196F3; }
-            QSlider::sub-page:horizontal { background: #1976D2; }
+        self.seek_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{ height: 6px; background: {Theme.BG_DARK}; border-radius: 3px; }}
+            QSlider::handle:horizontal {{ width: 16px; height: 16px; margin: -5px 0; background: {Theme.ACCENT}; border-radius: 8px; }}
+            QSlider::handle:horizontal:hover {{ background: {Theme.ACCENT_HOVER}; }}
+            QSlider::sub-page:horizontal {{ background: {Theme.ACCENT_ACTIVE}; border-radius: 3px; }}
         """)
         bottom_layout.addWidget(self.seek_slider)
 
@@ -2796,18 +2958,18 @@ class EditTab(QWidget):
         btn_container = QHBoxLayout()
         btn_container.setSpacing(8)
 
-        play_ctrl_style = """
-            QPushButton {
-                background-color: #66BB6A;
+        play_ctrl_style = f"""
+            QPushButton {{
+                background: {Theme.ACCENT};
                 color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 10px 18px;
-                font-size: 24px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #81C784; }
-            QPushButton:pressed { background-color: #4CAF50; }
+                border-radius: {Theme.RADIUS};
+                padding: 12px 20px;
+                font-size: 20px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Theme.ACCENT_HOVER}; }}
+            QPushButton:pressed {{ background: {Theme.ACCENT_ACTIVE}; }}
         """
 
         for text, delta in [("<<", -10000), ("<", -1000)]:
@@ -2816,7 +2978,7 @@ class EditTab(QWidget):
             btn.clicked.connect(lambda checked, d=delta: self.skip(d))
             btn_container.addWidget(btn)
 
-        self.play_btn = QPushButton("▶ Play")
+        self.play_btn = QPushButton("Play")
         self.play_btn.setStyleSheet(play_ctrl_style)
         self.play_btn.setFixedWidth(120)
         self.play_btn.clicked.connect(self.toggle_play)
@@ -2837,10 +2999,10 @@ class EditTab(QWidget):
         right_info.setSpacing(6)
 
         # 時間表示
-        time_style = """
+        time_style = f"""
             font-family: 'Inconsolata', 'Menlo', 'Courier', 'Monaco';
             font-size: 22px;
-            color: #4CAF50;
+            color: {Theme.SUCCESS};
         """
         self.time_label = QLabel("0:00:00.000 / 0:00:00.000")
         self.time_label.setStyleSheet(time_style)
@@ -2853,26 +3015,24 @@ class EditTab(QWidget):
         audio_row.setSpacing(8)
         audio_row.addStretch()
         output_label = QLabel("出力:")
-        output_label.setStyleSheet("font-size: 18px; color: #ccc;")
+        output_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         audio_row.addWidget(output_label)
         self.audio_device_combo = QComboBox()
-        self.audio_device_combo.setStyleSheet("""
-            QComboBox {
-                background: #444;
-                color: white;
-                border: none;
-                border-radius: 4px;
+        self.audio_device_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {Theme.BG_ELEVATED};
+                color: {Theme.TEXT_PRIMARY};
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS_SM};
                 padding: 6px 10px;
                 min-width: 140px;
-                font-size: 18px;
-            }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView {
-                background: #444;
-                color: white;
-                selection-background-color: #666;
-                font-size: 18px;
-            }
+            }}
+            QComboBox::drop-down {{ border: none; }}
+            QComboBox QAbstractItemView {{
+                background: {Theme.BG_ELEVATED};
+                color: {Theme.TEXT_PRIMARY};
+                selection-background-color: {Theme.ACCENT};
+            }}
         """)
         self._populate_audio_devices()
         self.audio_device_combo.currentIndexChanged.connect(self._on_audio_device_changed)
@@ -2906,64 +3066,28 @@ class EditTab(QWidget):
         right_layout.setContentsMargins(12, 0, 0, 0)
         right_layout.setSpacing(10)
 
-        # 共通スタイル（フォント大きめ・ゆったりレイアウト）
-        label_header = "color: #888; font-size: 16px;"
-        input_style = "background: #333; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 6px; font-size: 16px;"
-        btn_small = """
-            QPushButton {
-                background: #3a3a3a;
-                color: #ccc;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 10px 16px;
-                font-size: 18px;
-            }
-            QPushButton:hover { background: #4a4a4a; border-color: #666; }
-            QPushButton:disabled { background: #2a2a2a; color: #555; }
-        """
-        btn_action = """
-            QPushButton {
-                background: #66BB6A;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 16px;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #81C784; }
-            QPushButton:pressed { background: #4CAF50; }
-            QPushButton:disabled { background: #333; color: #666; }
-        """
-
         # ファイル情報
         file_label = QLabel("ファイル")
-        file_label.setStyleSheet(label_header)
+        file_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         right_layout.addWidget(file_label)
 
         self.media_label = QLabel("未選択")
-        self.media_label.setStyleSheet("color: #aaa; font-size: 16px;")
+        self.media_label.setStyleSheet(f"color: {Theme.TEXT_MUTED};")
         self.media_label.setWordWrap(True)
         right_layout.addWidget(self.media_label)
 
         # チャプターセクション
         chapter_header = QLabel("チャプター")
-        chapter_header.setStyleSheet(label_header)
+        chapter_header.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         right_layout.addWidget(chapter_header)
 
-        # チャプターテーブル
+        # チャプターテーブル（Themeのmain_window_styleで設定済み）
         self.chapter_table = QTableWidget()
         self.chapter_table.setColumnCount(2)
         self.chapter_table.setHorizontalHeaderLabels(["時間", "タイトル"])
         self.chapter_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.chapter_table.horizontalHeader().resizeSection(0, 90)
+        self.chapter_table.horizontalHeader().resizeSection(0, 110)
         self.chapter_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.chapter_table.setStyleSheet("""
-            QTableWidget { background-color: #2a2a2a; border: none; gridline-color: #444; font-size: 14px; }
-            QTableWidget::item { padding: 4px; }
-            QTableWidget::item:selected { background-color: #1976D2; }
-            QHeaderView::section { background-color: #333; color: #aaa; padding: 4px; border: none; font-size: 14px; }
-        """)
         self.chapter_table.verticalHeader().setVisible(False)
         self.chapter_table.doubleClicked.connect(self.jump_to_chapter)
         self.chapter_table.itemChanged.connect(self._on_chapter_table_changed)
@@ -2972,34 +3096,34 @@ class EditTab(QWidget):
         # チャプターボタン
         ch_btn_layout = QHBoxLayout()
         ch_btn_layout.setContentsMargins(0, 0, 0, 0)
-        ch_btn_layout.setSpacing(10)
+        ch_btn_layout.setSpacing(6)
 
-        add_ch_btn = QPushButton("＋")
-        add_ch_btn.setStyleSheet(btn_small)
+        add_ch_btn = QPushButton("+")
+        add_ch_btn.setStyleSheet(Theme.button_secondary())
         add_ch_btn.setToolTip("現在位置にチャプター追加")
         add_ch_btn.clicked.connect(self.add_chapter)
         ch_btn_layout.addWidget(add_ch_btn, stretch=1)
 
-        del_ch_btn = QPushButton("－")
-        del_ch_btn.setStyleSheet(btn_small)
+        del_ch_btn = QPushButton("-")
+        del_ch_btn.setStyleSheet(Theme.button_secondary())
         del_ch_btn.setToolTip("選択チャプターを削除")
         del_ch_btn.clicked.connect(self.delete_chapter)
         ch_btn_layout.addWidget(del_ch_btn, stretch=1)
 
-        load_ch_btn = QPushButton("📥")
-        load_ch_btn.setStyleSheet(btn_small)
+        load_ch_btn = QPushButton("読込")
+        load_ch_btn.setStyleSheet(Theme.button_secondary())
         load_ch_btn.setToolTip("チャプターファイルを読込")
         load_ch_btn.clicked.connect(self.load_chapters)
         ch_btn_layout.addWidget(load_ch_btn, stretch=1)
 
-        save_ch_btn = QPushButton("💾")
-        save_ch_btn.setStyleSheet(btn_small)
+        save_ch_btn = QPushButton("保存")
+        save_ch_btn.setStyleSheet(Theme.button_secondary())
         save_ch_btn.setToolTip("チャプターファイルを保存")
         save_ch_btn.clicked.connect(self.save_chapters)
         ch_btn_layout.addWidget(save_ch_btn, stretch=1)
 
-        copy_yt_btn = QPushButton("📋")
-        copy_yt_btn.setStyleSheet(btn_small)
+        copy_yt_btn = QPushButton("YT")
+        copy_yt_btn.setStyleSheet(Theme.button_secondary())
         copy_yt_btn.setToolTip("YouTube用チャプターをコピー")
         copy_yt_btn.clicked.connect(self.copy_youtube_chapters)
         ch_btn_layout.addWidget(copy_yt_btn, stretch=1)
@@ -3008,16 +3132,16 @@ class EditTab(QWidget):
 
         # ジャンプ・再生ボタン（別行）
         play_btn_layout = QHBoxLayout()
-        play_btn_layout.setSpacing(10)
+        play_btn_layout.setSpacing(8)
 
-        jump_btn = QPushButton("⏭ ジャンプ")
-        jump_btn.setStyleSheet(btn_action)
+        jump_btn = QPushButton("ジャンプ")
+        jump_btn.setStyleSheet(Theme.button_secondary())
         jump_btn.setToolTip("選択チャプターにジャンプ")
         jump_btn.clicked.connect(self.jump_to_selected_chapter)
         play_btn_layout.addWidget(jump_btn, stretch=1)
 
-        self.play_pause_btn = QPushButton("⏸ 一時停止")
-        self.play_pause_btn.setStyleSheet(btn_action)
+        self.play_pause_btn = QPushButton("一時停止")
+        self.play_pause_btn.setStyleSheet(Theme.button_secondary())
         self.play_pause_btn.setToolTip("再生/一時停止")
         self.play_pause_btn.clicked.connect(self.toggle_play)
         play_btn_layout.addWidget(self.play_pause_btn, stretch=1)
@@ -3028,19 +3152,19 @@ class EditTab(QWidget):
         right_layout.addSpacing(12)
 
         export_header = QLabel("書出")
-        export_header.setStyleSheet(label_header)
+        export_header.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         right_layout.addWidget(export_header)
 
         # ファイル名
         name_layout = QHBoxLayout()
         name_layout.setSpacing(4)
         name_label = QLabel("名前:")
-        name_label.setStyleSheet(label_header)
+        name_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         name_label.setFixedWidth(45)
         name_layout.addWidget(name_label)
         self.export_name = QLineEdit()
         self.export_name.setPlaceholderText("output")
-        self.export_name.setStyleSheet(input_style)
+        self.export_name.setStyleSheet(Theme.input_style())
         name_layout.addWidget(self.export_name)
         right_layout.addLayout(name_layout)
 
@@ -3048,31 +3172,29 @@ class EditTab(QWidget):
         dir_layout = QHBoxLayout()
         dir_layout.setSpacing(4)
         dir_label = QLabel("出力:")
-        dir_label.setStyleSheet(label_header)
+        dir_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         dir_label.setFixedWidth(45)
         dir_layout.addWidget(dir_label)
         self.export_dir = QLineEdit()
-        self.export_dir.setStyleSheet(input_style)
+        self.export_dir.setStyleSheet(Theme.input_style())
         self.export_dir.setPlaceholderText("出力先フォルダ")
         dir_layout.addWidget(self.export_dir)
         dir_btn = QPushButton("...")
         dir_btn.setFixedWidth(36)
-        dir_btn.setStyleSheet(btn_small)
+        dir_btn.setStyleSheet(Theme.button_secondary())
         dir_btn.clicked.connect(self._select_export_dir)
         dir_layout.addWidget(dir_btn)
         right_layout.addLayout(dir_layout)
 
-        # 埋め込みオプション
+        # 埋め込みオプション（Themeのmain_window_styleでチェックボックスは設定済み）
         embed_layout = QHBoxLayout()
         embed_layout.setSpacing(12)
 
         self.embed_chapters_check = QCheckBox("チャプター埋込")
-        self.embed_chapters_check.setStyleSheet("color: #aaa; font-size: 14px;")
         self.embed_chapters_check.setChecked(True)
         embed_layout.addWidget(self.embed_chapters_check)
 
         self.overlay_titles_check = QCheckBox("チャプター名表示")
-        self.overlay_titles_check.setStyleSheet("color: #aaa; font-size: 14px;")
         self.overlay_titles_check.setChecked(True)
         self.overlay_titles_check.setToolTip("各チャプター区間中、チャプター名を常時表示（再エンコード）")
         embed_layout.addWidget(self.overlay_titles_check)
@@ -3084,24 +3206,12 @@ class EditTab(QWidget):
         encoder_layout = QHBoxLayout()
         encoder_layout.setSpacing(4)
         encoder_label = QLabel("エンコーダ:")
-        encoder_label.setStyleSheet(label_header)
+        encoder_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         encoder_label.setFixedWidth(80)
         encoder_layout.addWidget(encoder_label)
 
         self.encoder_combo = QComboBox()
-        self.encoder_combo.setStyleSheet("""
-            QComboBox {
-                font-size: 14px;
-                padding: 4px 8px;
-                background: #3a3a3a;
-                color: #ddd;
-                border: 1px solid #555;
-                border-radius: 4px;
-            }
-            QComboBox:hover { border-color: #666; }
-            QComboBox::drop-down { border: none; }
-            QComboBox::down-arrow { image: none; border: none; }
-        """)
+        self.encoder_combo.setStyleSheet(Theme.input_style())
         # 利用可能なエンコーダを検出して追加
         self._available_encoders = detect_available_encoders()
         for encoder_id, display_name, description in self._available_encoders:
@@ -3117,24 +3227,12 @@ class EditTab(QWidget):
         quality_layout = QHBoxLayout()
         quality_layout.setSpacing(4)
         quality_label = QLabel("品質:")
-        quality_label.setStyleSheet(label_header)
+        quality_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY};")
         quality_label.setFixedWidth(80)
         quality_layout.addWidget(quality_label)
 
         self.quality_combo = QComboBox()
-        self.quality_combo.setStyleSheet("""
-            QComboBox {
-                font-size: 14px;
-                padding: 4px 8px;
-                background: #3a3a3a;
-                color: #ddd;
-                border: 1px solid #555;
-                border-radius: 4px;
-            }
-            QComboBox:hover { border-color: #666; }
-            QComboBox::drop-down { border: none; }
-            QComboBox::down-arrow { image: none; border: none; }
-        """)
+        self.quality_combo.setStyleSheet(Theme.input_style())
         # 品質オプション: (display_name, bitrate_kbps, crf)
         # bitrate_kbps=0 は「元と同じ」を意味する
         self._detected_bitrate_kbps: Optional[int] = None  # 検出したビットレート
@@ -3159,71 +3257,31 @@ class EditTab(QWidget):
         action_layout = QHBoxLayout()
         action_layout.setSpacing(6)
 
-        btn_blue = """
-            QPushButton {
-                background: #2196F3;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 16px;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #42A5F5; }
-            QPushButton:pressed { background: #1976D2; }
-        """
-        load_btn = QPushButton("📂 開く")
-        load_btn.setStyleSheet(btn_blue)
+        load_btn = QPushButton("開く")
+        load_btn.setStyleSheet(Theme.button_secondary())
         load_btn.setToolTip("動画/音声ファイルを開く")
         load_btn.clicked.connect(self.load_media)
         action_layout.addWidget(load_btn, stretch=1)
 
-        self.export_btn = QPushButton("💾 書出")
-        self.export_btn.setStyleSheet(btn_action)
+        self.export_btn = QPushButton("書出")
+        self.export_btn.setStyleSheet(Theme.button_primary())
         self.export_btn.setToolTip("編集した動画を書き出す")
         self.export_btn.clicked.connect(self._on_export_btn_clicked)
         action_layout.addWidget(self.export_btn, stretch=1)
 
         # ボタンスタイル保存（トグル用）
-        self._btn_style_action = btn_action
-        self._btn_style_cancel = """
-            QPushButton {
-                background: #f44336;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 10px 16px;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #e53935; }
-            QPushButton:pressed { background: #c62828; }
-        """
+        self._btn_style_action = Theme.button_primary()
+        self._btn_style_cancel = Theme.button_danger()
         self._is_exporting = False  # エクスポート中フラグ
 
         right_layout.addLayout(action_layout)
 
-        # 進捗バー
+        # 進捗バー（Themeのmain_window_styleで設定済み）
         self.export_progress = QProgressBar()
         self.export_progress.setRange(0, 100)
         self.export_progress.setValue(0)
         self.export_progress.setTextVisible(True)
-        self.export_progress.setFormat("%p% - %v")
-        self.export_progress.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #555;
-                border-radius: 4px;
-                background: #2a2a2a;
-                height: 20px;
-                text-align: center;
-                color: #fff;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #4CAF50, stop:1 #66BB6A);
-                border-radius: 3px;
-            }
-        """)
+        self.export_progress.setFormat("%p%")
         self.export_progress.hide()  # 初期状態では非表示
         right_layout.addWidget(self.export_progress)
 
@@ -3390,13 +3448,13 @@ class EditTab(QWidget):
     def _update_play_button(self, is_playing: bool):
         """再生/一時停止ボタンのテキストを更新"""
         if is_playing:
-            self.play_btn.setText("⏸ Pause")
+            self.play_btn.setText("Pause")
             if hasattr(self, 'play_pause_btn'):
-                self.play_pause_btn.setText("⏸ 一時停止")
+                self.play_pause_btn.setText("一時停止")
         else:
-            self.play_btn.setText("▶ Play")
+            self.play_btn.setText("Play")
             if hasattr(self, 'play_pause_btn'):
-                self.play_pause_btn.setText("▶ 再生")
+                self.play_pause_btn.setText("再生")
 
     def skip(self, delta_ms: int):
         """指定ミリ秒分スキップ"""
@@ -3707,7 +3765,7 @@ class EditTab(QWidget):
 
         # ボタンを中止モードに切り替え・進捗バー表示
         self._is_exporting = True
-        self.export_btn.setText("■ 中止")
+        self.export_btn.setText("中止")
         self.export_btn.setStyleSheet(self._btn_style_cancel)
         self.export_btn.setToolTip("エクスポートを中止")
         self.export_progress.setValue(0)
@@ -3768,7 +3826,7 @@ class EditTab(QWidget):
     def _on_export_completed(self, output_path: str):
         """書出完了"""
         self._is_exporting = False
-        self.export_btn.setText("💾 書出")
+        self.export_btn.setText("書出")
         self.export_btn.setStyleSheet(self._btn_style_action)
         self.export_btn.setToolTip("編集した動画を書き出す")
         self.export_progress.setValue(100)
@@ -3783,7 +3841,7 @@ class EditTab(QWidget):
     def _on_export_error(self, error_msg: str):
         """書出エラー"""
         self._is_exporting = False
-        self.export_btn.setText("💾 書出")
+        self.export_btn.setText("書出")
         self.export_btn.setStyleSheet(self._btn_style_action)
         self.export_btn.setToolTip("編集した動画を書き出す")
         self.export_progress.hide()
@@ -3844,16 +3902,8 @@ class PrepGUI(QMainWindow):
         # 起動時のウィンドウサイズ: 1680 x 675
         self.setGeometry(100, 100, 1680, 675)
 
-        # ツールチップスタイル（視認性重視）
-        self.setStyleSheet("""
-            QToolTip {
-                background-color: #ffffcc;
-                color: #000000;
-                border: 1px solid #333;
-                padding: 1px 2px;
-                font-size: 15px;
-            }
-        """)
+        # モダンダークテーマを適用
+        self.setStyleSheet(Theme.main_window_style())
 
         # メインウィジェット
         main_widget = QWidget()
