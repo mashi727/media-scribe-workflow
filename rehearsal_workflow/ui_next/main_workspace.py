@@ -5,6 +5,7 @@ main_workspace.py - メインワークスペース
 - ソース情報表示
 - 波形表示
 - チャプターテーブル
+- 動画プレビュー
 - 書出設定・実行
 - ログパネル
 """
@@ -17,9 +18,11 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
     QSplitter, QProgressBar, QComboBox, QLineEdit, QGroupBox,
-    QSizePolicy, QAbstractItemView
+    QSizePolicy, QAbstractItemView, QSlider, QFileDialog
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from .log_panel import LogPanel, LogLevel
 from .dialogs import SourceSelectionDialog, CoverImageDialog, SourceFile
@@ -49,6 +52,7 @@ class ProjectState:
     cover_image_path: Optional[Path] = None
     chapters: List[Chapter] = field(default_factory=list)
     output_path: Optional[Path] = None
+    video_path: Optional[Path] = None
 
 
 class MainWorkspace(QWidget):
@@ -56,18 +60,17 @@ class MainWorkspace(QWidget):
     メインワークスペース
 
     構成:
-    ┌─────────────────────────────────────────────┐
-    │ [ソース選択] [カバー画像]    ← ボタン行     │
-    │ ソース: audio.mp3 (14:20)   ← 情報表示     │
-    ├─────────────────────────────────────────────┤
-    │ [波形表示]                  ← WaveformWidget │
-    ├─────────────────────────────────────────────┤
-    │ [チャプターテーブル]                        │
-    ├─────────────────────────────────────────────┤
-    │ [書出設定] [書出ボタン]                     │
-    ├─────────────────────────────────────────────┤
-    │ [ログパネル]                                │
-    └─────────────────────────────────────────────┘
+    ┌────────────────────────────────┬──────────────────┐
+    │ [ソース選択] [カバー画像]      │                  │
+    ├────────────────────────────────┤  動画プレビュー  │
+    │ [波形表示]                     │                  │
+    ├────────────────────────────────┤  + 再生コントロール│
+    │ [チャプターテーブル]           │                  │
+    ├────────────────────────────────┴──────────────────┤
+    │ [書出設定] [書出ボタン]                           │
+    ├───────────────────────────────────────────────────┤
+    │ [ログパネル]                                      │
+    └───────────────────────────────────────────────────┘
     """
 
     # シグナル
@@ -79,6 +82,8 @@ class MainWorkspace(QWidget):
         super().__init__(parent)
         self._state = ProjectState()
         self._log_panel: Optional[LogPanel] = None
+        self._media_player: Optional[QMediaPlayer] = None
+        self._audio_output: Optional[QAudioOutput] = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -87,11 +92,43 @@ class MainWorkspace(QWidget):
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # === ヘッダー部（ソース・カバー選択）===
+        # === メイン水平スプリッター（左: 編集, 右: プレビュー）===
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # 左側パネル
+        left_panel = self._create_left_panel()
+        main_splitter.addWidget(left_panel)
+
+        # 右側パネル（動画プレビュー）
+        right_panel = self._create_video_panel()
+        main_splitter.addWidget(right_panel)
+
+        main_splitter.setSizes([600, 400])
+        layout.addWidget(main_splitter, stretch=1)
+
+        # === 書出設定 ===
+        export_section = self._create_export_section()
+        layout.addWidget(export_section)
+
+        # === ログパネル ===
+        self._log_panel = LogPanel()
+        layout.addWidget(self._log_panel)
+
+        # 初期ログ
+        self._log_panel.info("Workspace initialized", source="UI")
+
+    def _create_left_panel(self) -> QWidget:
+        """左側パネル（ヘッダー + 波形 + テーブル）"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # ヘッダー
         header = self._create_header()
         layout.addWidget(header)
 
-        # === メインコンテンツ（波形 + テーブル）===
+        # 垂直スプリッター
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         # 波形プレースホルダー
@@ -105,16 +142,134 @@ class MainWorkspace(QWidget):
         splitter.setSizes([200, 300])
         layout.addWidget(splitter, stretch=1)
 
-        # === 書出設定 ===
-        export_section = self._create_export_section()
-        layout.addWidget(export_section)
+        return widget
 
-        # === ログパネル ===
-        self._log_panel = LogPanel()
-        layout.addWidget(self._log_panel)
+    def _create_video_panel(self) -> QWidget:
+        """動画プレビューパネル"""
+        frame = QFrame()
+        frame.setStyleSheet("""
+            QFrame {
+                background: #1a1a1a;
+                border: 1px solid #3a3a3a;
+                border-radius: 8px;
+            }
+        """)
 
-        # 初期ログ
-        self._log_panel.info("Workspace initialized", source="UI")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # タイトル
+        title = QLabel("Video Preview")
+        title.setStyleSheet("color: #f0f0f0; font-weight: bold; font-size: 13px;")
+        layout.addWidget(title)
+
+        # 動画表示エリア
+        self._video_widget = QVideoWidget()
+        self._video_widget.setStyleSheet("background: #0f0f0f; border-radius: 4px;")
+        self._video_widget.setMinimumSize(320, 180)
+        layout.addWidget(self._video_widget, stretch=1)
+
+        # メディアプレイヤー設定
+        self._media_player = QMediaPlayer()
+        self._audio_output = QAudioOutput()
+        self._media_player.setAudioOutput(self._audio_output)
+        self._media_player.setVideoOutput(self._video_widget)
+
+        # シグナル接続
+        self._media_player.positionChanged.connect(self._on_position_changed)
+        self._media_player.durationChanged.connect(self._on_duration_changed)
+        self._media_player.errorOccurred.connect(self._on_media_error)
+
+        # 時間表示
+        time_layout = QHBoxLayout()
+        self._time_label = QLabel("00:00:00 / 00:00:00")
+        self._time_label.setStyleSheet("color: #a0a0a0; font-family: monospace;")
+        time_layout.addWidget(self._time_label)
+        time_layout.addStretch()
+        layout.addLayout(time_layout)
+
+        # シークバー
+        self._seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self._seek_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                background: #2d2d2d;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #3b82f6;
+                width: 14px;
+                height: 14px;
+                margin: -4px 0;
+                border-radius: 7px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #3b82f6;
+                border-radius: 3px;
+            }
+        """)
+        self._seek_slider.sliderMoved.connect(self._seek_video)
+        layout.addWidget(self._seek_slider)
+
+        # 再生コントロール
+        controls = QHBoxLayout()
+
+        # 読み込みボタン
+        load_btn = QPushButton("Load Video")
+        load_btn.setStyleSheet(self._button_style())
+        load_btn.clicked.connect(self._load_video)
+        controls.addWidget(load_btn)
+
+        controls.addStretch()
+
+        # 再生/一時停止
+        self._play_btn = QPushButton("Play")
+        self._play_btn.setStyleSheet(self._button_style(primary=True))
+        self._play_btn.clicked.connect(self._toggle_playback)
+        self._play_btn.setEnabled(False)
+        controls.addWidget(self._play_btn)
+
+        # 停止
+        stop_btn = QPushButton("Stop")
+        stop_btn.setStyleSheet(self._button_style())
+        stop_btn.clicked.connect(self._stop_video)
+        controls.addWidget(stop_btn)
+
+        controls.addStretch()
+
+        # 音量
+        volume_label = QLabel("Vol:")
+        volume_label.setStyleSheet("color: #a0a0a0;")
+        controls.addWidget(volume_label)
+
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider.setMaximum(100)
+        self._volume_slider.setValue(80)
+        self._volume_slider.setFixedWidth(80)
+        self._volume_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                background: #2d2d2d;
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #a0a0a0;
+                width: 10px;
+                height: 10px;
+                margin: -3px 0;
+                border-radius: 5px;
+            }
+        """)
+        self._volume_slider.valueChanged.connect(self._set_volume)
+        controls.addWidget(self._volume_slider)
+
+        layout.addLayout(controls)
+
+        # 初期音量設定
+        self._audio_output.setVolume(0.8)
+
+        return frame
 
     def _create_header(self) -> QWidget:
         """ヘッダー部（ソース・カバー選択）"""
@@ -375,6 +530,71 @@ class MainWorkspace(QWidget):
             }
         """
 
+    # === 動画操作 ===
+
+    def _load_video(self):
+        """動画ファイルを読み込み"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Video",
+            "",
+            "Video Files (*.mp4 *.mov *.avi *.mkv);;All Files (*)"
+        )
+        if file_path:
+            self._state.video_path = Path(file_path)
+            self._media_player.setSource(QUrl.fromLocalFile(file_path))
+            self._play_btn.setEnabled(True)
+            self._log_panel.info(f"Loaded: {Path(file_path).name}", source="Video")
+
+    def _toggle_playback(self):
+        """再生/一時停止切替"""
+        if self._media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._media_player.pause()
+            self._play_btn.setText("Play")
+        else:
+            self._media_player.play()
+            self._play_btn.setText("Pause")
+
+    def _stop_video(self):
+        """停止"""
+        self._media_player.stop()
+        self._play_btn.setText("Play")
+
+    def _seek_video(self, position: int):
+        """シーク"""
+        self._media_player.setPosition(position)
+
+    def _set_volume(self, value: int):
+        """音量設定"""
+        self._audio_output.setVolume(value / 100.0)
+
+    def _on_position_changed(self, position: int):
+        """再生位置変更"""
+        if not self._seek_slider.isSliderDown():
+            self._seek_slider.setValue(position)
+
+        # 時間表示更新
+        duration = self._media_player.duration()
+        self._time_label.setText(
+            f"{self._format_time(position)} / {self._format_time(duration)}"
+        )
+
+    def _on_duration_changed(self, duration: int):
+        """動画長さ変更"""
+        self._seek_slider.setMaximum(duration)
+        self._log_panel.debug(f"Duration: {self._format_time(duration)}", source="Video")
+
+    def _on_media_error(self, error):
+        """メディアエラー"""
+        self._log_panel.error(f"Media error: {error}", source="Video")
+
+    def _format_time(self, ms: int) -> str:
+        """ミリ秒を HH:MM:SS 形式に変換"""
+        total_sec = ms // 1000
+        h, rem = divmod(total_sec, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
     # === ダイアログ操作 ===
 
     def _open_source_dialog(self):
@@ -414,9 +634,13 @@ class MainWorkspace(QWidget):
 
     def _add_chapter(self):
         """チャプター追加"""
+        # 現在の再生位置をチャプター時間として使用
+        current_pos = self._media_player.position() if self._media_player else 0
+        time_str = self._format_time(current_pos)
+
         row = self._table.rowCount()
         self._table.insertRow(row)
-        self._table.setItem(row, 0, QTableWidgetItem("0:00:00.000"))
+        self._table.setItem(row, 0, QTableWidgetItem(time_str))
         self._table.setItem(row, 1, QTableWidgetItem("New Chapter"))
 
         del_btn = QPushButton("Del")
@@ -432,7 +656,7 @@ class MainWorkspace(QWidget):
         del_btn.clicked.connect(lambda: self._remove_row(row))
         self._table.setCellWidget(row, 2, del_btn)
 
-        self._log_panel.debug(f"Chapter added at row {row}", source="UI")
+        self._log_panel.debug(f"Chapter added at {time_str}", source="UI")
 
     def _remove_chapter(self):
         """選択チャプター削除"""
@@ -471,3 +695,10 @@ class MainWorkspace(QWidget):
     def get_state(self) -> ProjectState:
         """プロジェクト状態を取得"""
         return self._state
+
+    def load_video_file(self, path: Path):
+        """動画ファイルを読み込み（外部API）"""
+        self._state.video_path = path
+        self._media_player.setSource(QUrl.fromLocalFile(str(path)))
+        self._play_btn.setEnabled(True)
+        self._log_panel.info(f"Loaded: {path.name}", source="Video")
