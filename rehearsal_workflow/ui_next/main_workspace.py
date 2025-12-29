@@ -62,20 +62,24 @@ class MainWorkspace(QWidget):
     """
     メインワークスペース
 
+    操作系は左側、表示系は右側に配置。
+    操作順: ソース選択 → 再生操作 → チャプター編集 → 書出
+
     構成:
-    ┌─────────────────────┬─────────────────────────────────┐
-    │ [ソース選択]        │                                 │
-    │ [カバー画像]        │      動画プレビュー（最大化）   │
-    ├─────────────────────┤                                 │
-    │                     ├─────────────────────────────────┤
-    │ [チャプターテーブル]│  [波形表示]                     │
-    │                     ├─────────────────────────────────┤
-    │                     │  [再生コントロール]             │
-    ├─────────────────────┴─────────────────────────────────┤
-    │ [書出設定] [書出ボタン]                               │
-    ├───────────────────────────────────────────────────────┤
-    │ [ログパネル]                                          │
-    └───────────────────────────────────────────────────────┘
+    ┌─────────────────────────────┬───────────────────────────────┐
+    │ 1. [ソース選択]             │                               │
+    ├─────────────────────────────┤                               │
+    │ 2. [Load] [Play] [Stop]     │     動画プレビュー（最大化）  │
+    │    [シークバー] [Vol]       │                               │
+    │    00:00:00 / 00:00:00      │                               │
+    ├─────────────────────────────┤                               │
+    │ 3. [チャプターテーブル]     ├───────────────────────────────┤
+    │    [Add] [Remove] [Copy YT] │     [波形表示]                │
+    ├─────────────────────────────┴───────────────────────────────┤
+    │ 4. [カバー画像] [出力先] [品質] [Export]                    │
+    ├─────────────────────────────────────────────────────────────┤
+    │ [ログパネル]                                                │
+    └─────────────────────────────────────────────────────────────┘
     """
 
     # シグナル
@@ -152,92 +156,127 @@ class MainWorkspace(QWidget):
         self._log_panel.info("Workspace initialized", source="UI")
 
     def _create_left_panel(self) -> QWidget:
-        """左側パネル（ヘッダー + チャプターテーブル）"""
+        """左側パネル（操作系を操作順に配置）"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # ヘッダー
-        header = self._create_header()
-        layout.addWidget(header)
+        # === 1. ソース選択 ===
+        source_section = self._create_source_section()
+        layout.addWidget(source_section)
 
-        # チャプターテーブル（波形は右側に移動）
+        # === 2. 再生コントロール ===
+        playback_section = self._create_playback_section()
+        layout.addWidget(playback_section)
+
+        # === 3. チャプターテーブル ===
         self._chapter_table = self._create_chapter_table()
         layout.addWidget(self._chapter_table, stretch=1)
 
         return widget
 
-    def _create_video_panel(self) -> QWidget:
-        """動画プレビューパネル（Video + Waveform + Controls）"""
-        container = QWidget()
-        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-        main_layout = QVBoxLayout(container)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(8)
-
-        # === 動画プレビュー（最大化）===
-        video_frame = QFrame()
-        video_frame.setStyleSheet("""
+    def _create_source_section(self) -> QWidget:
+        """1. ソース選択セクション"""
+        frame = QFrame()
+        frame.setStyleSheet("""
             QFrame {
                 background: #1a1a1a;
                 border: 1px solid #3a3a3a;
                 border-radius: 8px;
             }
         """)
-        video_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        video_layout = QVBoxLayout(video_frame)
-        video_layout.setContentsMargins(8, 8, 8, 8)
-        video_layout.setSpacing(4)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(12, 8, 12, 8)
 
-        # 動画表示エリア - 最大化
-        self._video_widget = QVideoWidget()
-        self._video_widget.setStyleSheet("background: #0f0f0f; border-radius: 4px;")
-        self._video_widget.setMinimumSize(400, 300)
-        self._video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        video_layout.addWidget(self._video_widget, stretch=1)
+        # ソース選択ボタン
+        self._source_btn = QPushButton("Select Source")
+        self._source_btn.setStyleSheet(self._button_style())
+        self._source_btn.clicked.connect(self._open_source_dialog)
+        layout.addWidget(self._source_btn)
 
-        video_frame.setLayout(video_layout)
-        main_layout.addWidget(video_frame, stretch=3)  # 動画に多くのスペース
+        # ソース情報表示
+        self._source_info = QLabel("No source selected")
+        self._source_info.setStyleSheet("color: #a0a0a0;")
+        layout.addWidget(self._source_info, stretch=1)
 
-        # === 波形表示 ===
-        self._waveform_placeholder = self._create_waveform_placeholder()
-        main_layout.addWidget(self._waveform_placeholder, stretch=1)
+        return frame
 
-        # === 再生コントロール ===
-        controls_frame = QFrame()
-        controls_frame.setStyleSheet("""
+    def _create_playback_section(self) -> QWidget:
+        """2. 再生コントロールセクション"""
+        frame = QFrame()
+        frame.setStyleSheet("""
             QFrame {
                 background: #1a1a1a;
                 border: 1px solid #3a3a3a;
                 border-radius: 8px;
             }
         """)
-        controls_layout = QVBoxLayout(controls_frame)
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setSpacing(4)
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(6)
 
         # メディアプレイヤー設定
         self._media_player = QMediaPlayer()
         self._audio_output = QAudioOutput()
         self._media_player.setAudioOutput(self._audio_output)
-        self._media_player.setVideoOutput(self._video_widget)
+        self._audio_output.setVolume(0.8)
 
         # シグナル接続
         self._media_player.positionChanged.connect(self._on_position_changed)
         self._media_player.durationChanged.connect(self._on_duration_changed)
         self._media_player.errorOccurred.connect(self._on_media_error)
 
-        # 時間表示
-        time_layout = QHBoxLayout()
-        self._time_label = QLabel("00:00:00 / 00:00:00")
-        self._time_label.setStyleSheet("color: #a0a0a0;")
-        self._time_label.setFont(self._get_monospace_font(12))
-        time_layout.addWidget(self._time_label)
-        time_layout.addStretch()
-        controls_layout.addLayout(time_layout)
+        # ボタン行: Load, Play, Stop
+        btn_row = QHBoxLayout()
+
+        load_btn = QPushButton("Load Video")
+        load_btn.setStyleSheet(self._button_style())
+        load_btn.clicked.connect(self._load_video)
+        btn_row.addWidget(load_btn)
+
+        self._play_btn = QPushButton("Play")
+        self._play_btn.setStyleSheet(self._button_style(primary=True))
+        self._play_btn.clicked.connect(self._toggle_playback)
+        self._play_btn.setEnabled(False)
+        btn_row.addWidget(self._play_btn)
+
+        stop_btn = QPushButton("Stop")
+        stop_btn.setStyleSheet(self._button_style())
+        stop_btn.clicked.connect(self._stop_video)
+        btn_row.addWidget(stop_btn)
+
+        btn_row.addStretch()
+
+        # 音量
+        volume_label = QLabel("Vol:")
+        volume_label.setStyleSheet("color: #a0a0a0;")
+        btn_row.addWidget(volume_label)
+
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider.setMaximum(100)
+        self._volume_slider.setValue(80)
+        self._volume_slider.setFixedWidth(60)
+        self._volume_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                background: #2d2d2d;
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #a0a0a0;
+                width: 10px;
+                height: 10px;
+                margin: -3px 0;
+                border-radius: 5px;
+            }
+        """)
+        self._volume_slider.valueChanged.connect(self._set_volume)
+        btn_row.addWidget(self._volume_slider)
+
+        layout.addLayout(btn_row)
 
         # シークバー
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
@@ -260,109 +299,58 @@ class MainWorkspace(QWidget):
             }
         """)
         self._seek_slider.sliderMoved.connect(self._seek_video)
-        controls_layout.addWidget(self._seek_slider)
+        layout.addWidget(self._seek_slider)
 
-        # 再生コントロールボタン
-        btn_layout = QHBoxLayout()
+        # 時間表示
+        self._time_label = QLabel("00:00:00 / 00:00:00")
+        self._time_label.setStyleSheet("color: #a0a0a0;")
+        self._time_label.setFont(self._get_monospace_font(11))
+        layout.addWidget(self._time_label)
 
-        # 読み込みボタン
-        load_btn = QPushButton("Load Video")
-        load_btn.setStyleSheet(self._button_style())
-        load_btn.clicked.connect(self._load_video)
-        btn_layout.addWidget(load_btn)
+        return frame
 
-        btn_layout.addStretch()
+    def _create_video_panel(self) -> QWidget:
+        """右側パネル（表示のみ: Video + Waveform）"""
+        container = QWidget()
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        # 再生/一時停止
-        self._play_btn = QPushButton("Play")
-        self._play_btn.setStyleSheet(self._button_style(primary=True))
-        self._play_btn.clicked.connect(self._toggle_playback)
-        self._play_btn.setEnabled(False)
-        btn_layout.addWidget(self._play_btn)
+        main_layout = QVBoxLayout(container)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(8)
 
-        # 停止
-        stop_btn = QPushButton("Stop")
-        stop_btn.setStyleSheet(self._button_style())
-        stop_btn.clicked.connect(self._stop_video)
-        btn_layout.addWidget(stop_btn)
-
-        btn_layout.addStretch()
-
-        # 音量
-        volume_label = QLabel("Vol:")
-        volume_label.setStyleSheet("color: #a0a0a0;")
-        btn_layout.addWidget(volume_label)
-
-        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
-        self._volume_slider.setMaximum(100)
-        self._volume_slider.setValue(80)
-        self._volume_slider.setFixedWidth(80)
-        self._volume_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                background: #2d2d2d;
-                height: 4px;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #a0a0a0;
-                width: 10px;
-                height: 10px;
-                margin: -3px 0;
-                border-radius: 5px;
-            }
-        """)
-        self._volume_slider.valueChanged.connect(self._set_volume)
-        btn_layout.addWidget(self._volume_slider)
-
-        controls_layout.addLayout(btn_layout)
-        main_layout.addWidget(controls_frame)
-
-        # 初期音量設定
-        self._audio_output.setVolume(0.8)
-
-        return container
-
-    def _create_header(self) -> QWidget:
-        """ヘッダー部（ソース・カバー選択）"""
-        frame = QFrame()
-        frame.setStyleSheet("""
+        # === 動画プレビュー（最大化）===
+        video_frame = QFrame()
+        video_frame.setStyleSheet("""
             QFrame {
                 background: #1a1a1a;
                 border: 1px solid #3a3a3a;
                 border-radius: 8px;
             }
         """)
+        video_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(12, 8, 12, 8)
+        video_layout = QVBoxLayout(video_frame)
+        video_layout.setContentsMargins(4, 4, 4, 4)
+        video_layout.setSpacing(0)
 
-        # ソース選択ボタン
-        self._source_btn = QPushButton("Select Source")
-        self._source_btn.setStyleSheet(self._button_style())
-        self._source_btn.clicked.connect(self._open_source_dialog)
-        layout.addWidget(self._source_btn)
+        # 動画表示エリア - 最大化
+        self._video_widget = QVideoWidget()
+        self._video_widget.setStyleSheet("background: #0f0f0f; border-radius: 4px;")
+        self._video_widget.setMinimumSize(400, 300)
+        self._video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        video_layout.addWidget(self._video_widget, stretch=1)
 
-        # カバー画像ボタン
-        self._cover_btn = QPushButton("Cover Image")
-        self._cover_btn.setStyleSheet(self._button_style())
-        self._cover_btn.clicked.connect(self._open_cover_dialog)
-        layout.addWidget(self._cover_btn)
+        # メディアプレイヤーの出力先を設定
+        self._media_player.setVideoOutput(self._video_widget)
 
-        layout.addSpacing(20)
+        video_frame.setLayout(video_layout)
+        main_layout.addWidget(video_frame, stretch=4)  # 動画に多くのスペース
 
-        # ソース情報表示
-        self._source_info = QLabel("No source selected")
-        self._source_info.setStyleSheet("color: #a0a0a0;")
-        layout.addWidget(self._source_info)
+        # === 波形表示 ===
+        self._waveform_placeholder = self._create_waveform_placeholder()
+        main_layout.addWidget(self._waveform_placeholder, stretch=1)
 
-        layout.addStretch()
-
-        # カバー情報表示
-        self._cover_info = QLabel("")
-        self._cover_info.setStyleSheet("color: #666666;")
-        layout.addWidget(self._cover_info)
-
-        return frame
+        return container
 
     def _create_waveform_placeholder(self) -> QWidget:
         """波形表示プレースホルダー"""
@@ -469,7 +457,7 @@ class MainWorkspace(QWidget):
         return group
 
     def _create_export_section(self) -> QWidget:
-        """書出設定セクション"""
+        """4. 書出設定セクション（カバー画像 + 出力設定 + Export）"""
         frame = QFrame()
         frame.setStyleSheet("""
             QFrame {
@@ -481,6 +469,19 @@ class MainWorkspace(QWidget):
 
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(12, 8, 12, 8)
+
+        # カバー画像ボタン
+        self._cover_btn = QPushButton("Cover Image")
+        self._cover_btn.setStyleSheet(self._button_style())
+        self._cover_btn.clicked.connect(self._open_cover_dialog)
+        layout.addWidget(self._cover_btn)
+
+        # カバー情報表示
+        self._cover_info = QLabel("")
+        self._cover_info.setStyleSheet("color: #666666;")
+        layout.addWidget(self._cover_info)
+
+        layout.addSpacing(20)
 
         # 出力先
         layout.addWidget(QLabel("Output:"))
