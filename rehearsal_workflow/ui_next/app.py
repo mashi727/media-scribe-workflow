@@ -33,25 +33,26 @@ def get_system_fonts() -> dict:
     system = platform.system()
 
     if system == "Darwin":  # macOS
+        # SF Pro/SF Monoは別途インストールが必要なため、標準フォントを優先
         return {
-            "ui": "SF Pro Text",
-            "ui_fallback": "Helvetica Neue",
-            "mono": "SF Mono",
-            "mono_fallback": "Menlo",
+            "ui": "Helvetica Neue",
+            "ui_fallback": "Helvetica",
+            "mono": "Menlo",
+            "mono_fallback": "Monaco",
         }
     elif system == "Windows":
         return {
             "ui": "Segoe UI",
             "ui_fallback": "Arial",
-            "mono": "Cascadia Code",
-            "mono_fallback": "Consolas",
+            "mono": "Consolas",
+            "mono_fallback": "Courier New",
         }
     else:  # Linux
         return {
-            "ui": "Ubuntu",
-            "ui_fallback": "DejaVu Sans",
-            "mono": "Ubuntu Mono",
-            "mono_fallback": "DejaVu Sans Mono",
+            "ui": "DejaVu Sans",
+            "ui_fallback": "Liberation Sans",
+            "mono": "DejaVu Sans Mono",
+            "mono_fallback": "Liberation Mono",
         }
 
 

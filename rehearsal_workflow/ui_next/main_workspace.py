@@ -69,15 +69,15 @@ class MainWorkspace(QWidget):
     ┌─────────────────────────────┬───────────────────────────────┐
     │ 1. [ソース選択]             │                               │
     ├─────────────────────────────┤                               │
-    │ 2. [Load] [Play] [Stop]     │     動画プレビュー（最大化）  │
-    │    [シークバー] [Vol]       │                               │
+    │ 2. [Load] [Play] [Stop]     │                               │
+    │    [シークバー] [Vol]       │     動画プレビュー（最大化）  │
     │    00:00:00 / 00:00:00      │                               │
     ├─────────────────────────────┤                               │
-    │ 3. [チャプターテーブル]     ├───────────────────────────────┤
-    │    [Add] [Remove] [Copy YT] │     [波形表示]                │
+    │ 3. [チャプターテーブル]     │                               │
+    │    [Add] [Remove] [Copy YT] ├───────────────────────────────┤
+    ├─────────────────────────────┤     [波形表示]                │
+    │ 4. [Cover] [Output] [Export]│                               │
     ├─────────────────────────────┴───────────────────────────────┤
-    │ 4. [カバー画像] [出力先] [品質] [Export]                    │
-    ├─────────────────────────────────────────────────────────────┤
     │ [ログパネル]                                                │
     └─────────────────────────────────────────────────────────────┘
     """
@@ -144,10 +144,6 @@ class MainWorkspace(QWidget):
 
         layout.addWidget(main_splitter, stretch=1)
 
-        # === 書出設定 ===
-        export_section = self._create_export_section()
-        layout.addWidget(export_section)
-
         # === ログパネル ===
         self._log_panel = LogPanel()
         layout.addWidget(self._log_panel)
@@ -173,6 +169,10 @@ class MainWorkspace(QWidget):
         # === 3. チャプターテーブル ===
         self._chapter_table = self._create_chapter_table()
         layout.addWidget(self._chapter_table, stretch=1)
+
+        # === 4. 書出設定 ===
+        export_section = self._create_export_section()
+        layout.addWidget(export_section)
 
         return widget
 
