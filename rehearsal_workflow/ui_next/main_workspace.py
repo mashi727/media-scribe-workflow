@@ -62,8 +62,8 @@ class MainWorkspace(QWidget):
     """
     メインワークスペース
 
-    操作系は左側、表示系は右側に配置。
-    操作順: ソース選択 → 再生操作 → チャプター編集 → 書出
+    左側: 操作系（操作順に配置）
+    右側: 表示系のみ（Video + Waveform）
 
     構成:
     ┌─────────────────────────────┬───────────────────────────────┐
@@ -74,12 +74,12 @@ class MainWorkspace(QWidget):
     │    00:00:00 / 00:00:00      │                               │
     ├─────────────────────────────┤                               │
     │ 3. [チャプターテーブル]     │                               │
-    │    [Add] [Remove] [Copy YT] ├───────────────────────────────┤
-    ├─────────────────────────────┤     [波形表示]                │
-    │ 4. [Cover] [Output] [Export]│                               │
-    ├─────────────────────────────┴───────────────────────────────┤
-    │ [ログパネル]                                                │
-    └─────────────────────────────────────────────────────────────┘
+    │    [Add] [Remove] [Copy YT] │                               │
+    ├─────────────────────────────┼───────────────────────────────┤
+    │ 4. [Cover] [Output] [Export]│     [波形表示]                │
+    ├─────────────────────────────┤                               │
+    │ 5. [ログパネル]             │                               │
+    └─────────────────────────────┴───────────────────────────────┘
     """
 
     # シグナル
@@ -144,13 +144,6 @@ class MainWorkspace(QWidget):
 
         layout.addWidget(main_splitter, stretch=1)
 
-        # === ログパネル ===
-        self._log_panel = LogPanel()
-        layout.addWidget(self._log_panel)
-
-        # 初期ログ
-        self._log_panel.info("Workspace initialized", source="UI")
-
     def _create_left_panel(self) -> QWidget:
         """左側パネル（操作系を操作順に配置）"""
         widget = QWidget()
@@ -173,6 +166,13 @@ class MainWorkspace(QWidget):
         # === 4. 書出設定 ===
         export_section = self._create_export_section()
         layout.addWidget(export_section)
+
+        # === 5. ログパネル ===
+        self._log_panel = LogPanel()
+        layout.addWidget(self._log_panel)
+
+        # 初期ログ
+        self._log_panel.info("Workspace initialized", source="UI")
 
         return widget
 
