@@ -45,7 +45,7 @@ from .models import (
 )
 from .workers import WaveformWorker, SpectrogramWorker, ExportWorker
 from .widgets import WaveformWidget, CenteredFileDialog
-from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, extract_chapters_with_ffmpeg
+from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, extract_chapters_with_ffmpeg, get_subprocess_kwargs
 
 
 # ファイル拡張子定義
@@ -1738,15 +1738,14 @@ class MainWorkspace(QWidget):
                     str(file_path)
                 ]
 
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
+                kwargs = get_subprocess_kwargs(timeout=30)
+                result = subprocess.run(cmd, **kwargs)
 
                 if result.returncode != 0:
                     self._log_panel.debug(f"ffprobe failed (code {result.returncode}), trying ffmpeg", source="Chapter")
+                    use_ffprobe = False
+                elif not result.stdout or not result.stdout.strip():
+                    self._log_panel.debug("ffprobe returned empty output, trying ffmpeg", source="Chapter")
                     use_ffprobe = False
                 else:
                     data = json.loads(result.stdout)

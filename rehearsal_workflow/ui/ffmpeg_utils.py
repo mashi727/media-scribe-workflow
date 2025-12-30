@@ -7,8 +7,9 @@ imageio-ffmpegまたはシステムのffmpegを自動検出する。
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # キャッシュ
 _ffmpeg_path: Optional[str] = None
@@ -112,6 +113,38 @@ def get_ffprobe_path() -> str:
     )
 
 
+def get_subprocess_kwargs(timeout: int = 30, capture_output: bool = True) -> Dict[str, Any]:
+    """
+    クロスプラットフォーム対応のsubprocess kwargs を取得
+
+    Windowsでは:
+    - コンソールウィンドウを非表示 (CREATE_NO_WINDOW)
+    - UTF-8エンコーディングを明示的に指定
+    - エンコーディングエラーを置換
+
+    Args:
+        timeout: タイムアウト秒数
+        capture_output: 出力をキャプチャするかどうか
+
+    Returns:
+        subprocess.run() に渡すkwargs
+    """
+    kwargs: Dict[str, Any] = {
+        'text': True,
+        'timeout': timeout,
+        'encoding': 'utf-8',
+        'errors': 'replace',
+    }
+    if capture_output:
+        kwargs['capture_output'] = True
+
+    # Windowsではコンソールウィンドウを非表示
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+
+    return kwargs
+
+
 def extract_chapters_with_ffmpeg(file_path: str) -> list:
     """
     ffmpegの出力からチャプター情報を抽出（ffprobeの代替）
@@ -129,14 +162,11 @@ def extract_chapters_with_ffmpeg(file_path: str) -> list:
 
     try:
         ffmpeg = get_ffmpeg_path()
-        result = subprocess.run(
-            [ffmpeg, '-i', file_path],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        kwargs = get_subprocess_kwargs(timeout=30)
+
+        result = subprocess.run([ffmpeg, '-i', file_path], **kwargs)
         # ffmpegは入力のみの場合、returncode=1で終了するがstderrに情報が出力される
-        output = result.stderr
+        output = result.stderr if result.stderr else ""
 
         chapters = []
         # Chapter #0:0: start 0.000000, end 180.000000
@@ -197,14 +227,13 @@ def get_ffmpeg_version() -> Optional[str]:
     """FFmpegのバージョンを取得"""
     try:
         ffmpeg = get_ffmpeg_path()
-        result = subprocess.run(
-            [ffmpeg, "-version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+        kwargs = get_subprocess_kwargs(timeout=5)
+
+        result = subprocess.run([ffmpeg, "-version"], **kwargs)
         # 最初の行からバージョンを抽出
-        first_line = result.stdout.split('\n')[0]
-        return first_line
+        if result.stdout:
+            first_line = result.stdout.split('\n')[0]
+            return first_line
+        return None
     except Exception:
         return None
