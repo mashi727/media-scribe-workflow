@@ -206,7 +206,7 @@ class LogPanel(QWidget):
         # ログ表示エリア
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
-        self._log_view.setFont(self._get_monospace_font(11))
+        self._log_view.setFont(self._get_monospace_font(16))
         self._log_view.setStyleSheet("""
             QPlainTextEdit {
                 background: #0f0f0f;

@@ -1,7 +1,7 @@
 """
 app.py - アプリケーションメインウィンドウ
 
-次世代UIのエントリーポイント。
+Video Chapter Editor v2.0 エントリーポイント。
 クロスプラットフォーム対応（macOS / Windows）
 """
 
@@ -11,10 +11,10 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout,
-    QMenuBar, QMenu, QStatusBar
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QMenuBar, QMenu, QStatusBar, QLabel, QProgressBar
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QFontDatabase
 
 from .main_workspace import MainWorkspace
@@ -23,9 +23,16 @@ from .log_panel import LogLevel
 
 # === クロスプラットフォーム設定 ===
 
-# 固定ウィンドウサイズ
-WINDOW_WIDTH = 1440
-WINDOW_HEIGHT = 900
+# デフォルトウィンドウサイズ
+WINDOW_WIDTH = 1680
+WINDOW_HEIGHT = 1050
+
+# 最小ウィンドウサイズ
+MIN_WINDOW_WIDTH = 1120
+MIN_WINDOW_HEIGHT = 700
+
+# アスペクト比 (8:5)
+ASPECT_RATIO = WINDOW_WIDTH / WINDOW_HEIGHT
 
 # プラットフォーム別フォント設定
 def get_system_fonts() -> dict:
@@ -86,14 +93,14 @@ def get_ui_font(size: int = 13) -> QFont:
     return font
 
 
-class VideoChapterEditorNext(QMainWindow):
+class VideoChapterEditor(QMainWindow):
     """
-    Video Chapter Editor (Next Generation)
+    Video Chapter Editor v2.0
 
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.0.0-alpha"
+    VERSION = "2.0.0"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()
@@ -105,15 +112,18 @@ class VideoChapterEditorNext(QMainWindow):
 
     def _setup_window(self):
         """ウィンドウ設定"""
-        self.setWindowTitle(f"Video Chapter Editor (Next) - {self.VERSION}")
+        self.setWindowTitle(f"Video Chapter Editor - {self.VERSION}")
 
-        # 固定サイズ 1440x900
-        self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        # リサイズ可能（アスペクト比維持）
+        self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        self._aspect_ratio = ASPECT_RATIO
+        self._resizing = False  # リサイズ中フラグ（再帰防止）
 
         # アプリケーション全体のUIフォント設定
         app = QApplication.instance()
         if app:
-            app.setFont(get_ui_font(13))
+            app.setFont(get_ui_font(16))
 
         # ダークテーマ
         self.setStyleSheet("""
@@ -140,6 +150,8 @@ class VideoChapterEditorNext(QMainWindow):
                 background: #1a1a1a;
                 color: #a0a0a0;
                 border-top: 1px solid #3a3a3a;
+                padding: 8px 12px;
+                min-height: 28px;
             }
         """)
 
@@ -187,8 +199,12 @@ class VideoChapterEditorNext(QMainWindow):
 
     def _setup_ui(self):
         """メインUI設定"""
-        self._workspace = MainWorkspace()
+        self._workspace = MainWorkspace(work_dir=self._work_dir)
         self.setCentralWidget(self._workspace)
+
+        # エクスポート進捗シグナル接続
+        self._workspace.export_progress.connect(self._on_export_progress)
+        self._workspace.export_finished.connect(self._on_export_finished)
 
         # ログパネルにアクセス
         log = self._workspace.get_log_panel()
@@ -198,7 +214,44 @@ class VideoChapterEditorNext(QMainWindow):
     def _setup_statusbar(self):
         """ステータスバー設定"""
         self._statusbar = self.statusBar()
-        self._statusbar.showMessage("Ready")
+
+        # Working Directory表示（左側）
+        self._workdir_label = QLabel(f"Working Directory: {self._work_dir}")
+        self._workdir_label.setStyleSheet("color: #a0a0a0; font-size: 18px;")
+        self._statusbar.addWidget(self._workdir_label)
+
+        # 右側: プログレスバー + 状態表示を統合
+        right_widget = QWidget()
+        right_layout = QHBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+
+        # プログレスバー（通常は非表示）
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedWidth(150)
+        self._progress_bar.setFixedHeight(16)
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: #2a2a2a;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background: #3b82f6;
+                border-radius: 3px;
+            }
+        """)
+        right_layout.addWidget(self._progress_bar)
+
+        # 状態表示ラベル
+        self._status_label = QLabel("Ready")
+        self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+        self._status_label.setMinimumWidth(200)
+        right_layout.addWidget(self._status_label)
+
+        self._statusbar.addPermanentWidget(right_widget)
 
     # === メニューアクション ===
 
@@ -225,6 +278,79 @@ class VideoChapterEditorNext(QMainWindow):
         log.info(f"Video Chapter Editor {self.VERSION}", source="App")
         log.info("Next generation UI with single workspace + dialogs", source="App")
 
+    # === エクスポート進捗ハンドラ ===
+
+    def _on_export_progress(self, percent: int, status: str):
+        """エクスポート進捗表示"""
+        # プログレスバーを表示・更新
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setValue(percent)
+
+        # ステータステキスト（青字）
+        self._status_label.setText(status)
+        self._status_label.setStyleSheet("color: #3b82f6; font-weight: bold; font-size: 18px;")
+
+    def _on_export_finished(self, success: bool, message: str):
+        """エクスポート完了表示"""
+        if success:
+            # 完了時は100%表示してから非表示
+            self._progress_bar.setValue(100)
+            self._status_label.setText(f"Completed: {message}")
+            self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+            # 3秒後にプログレスバーを非表示、Readyに戻す
+            QTimer.singleShot(3000, self._reset_status)
+        else:
+            self._progress_bar.setVisible(False)
+            self._status_label.setText(f"Failed: {message}")
+            self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
+            # 5秒後にReadyに戻す
+            QTimer.singleShot(5000, self._reset_status)
+
+    def _reset_status(self):
+        """ステータスを初期状態に戻す"""
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setValue(0)
+        self._status_label.setText("Ready")
+        self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+
+    def resizeEvent(self, event):
+        """リサイズ時にアスペクト比を維持"""
+        if self._resizing:
+            return super().resizeEvent(event)
+
+        self._resizing = True
+
+        new_size = event.size()
+        old_size = event.oldSize()
+
+        # 幅と高さのどちらが変更されたかを判定
+        width_changed = new_size.width() != old_size.width()
+        height_changed = new_size.height() != old_size.height()
+
+        if width_changed and height_changed:
+            # 両方変更された場合は幅を基準にする
+            new_width = new_size.width()
+            new_height = int(new_width / self._aspect_ratio)
+        elif width_changed:
+            # 幅が変更された場合
+            new_width = new_size.width()
+            new_height = int(new_width / self._aspect_ratio)
+        else:
+            # 高さが変更された場合
+            new_height = new_size.height()
+            new_width = int(new_height * self._aspect_ratio)
+
+        # 最小サイズを確保
+        new_width = max(new_width, MIN_WINDOW_WIDTH)
+        new_height = max(new_height, MIN_WINDOW_HEIGHT)
+
+        # サイズが変更された場合のみリサイズ
+        if new_width != new_size.width() or new_height != new_size.height():
+            self.resize(new_width, new_height)
+
+        self._resizing = False
+        super().resizeEvent(event)
+
 
 def main():
     """エントリーポイント"""
@@ -248,7 +374,7 @@ def main():
         if not work_dir.is_dir():
             work_dir = None
 
-    window = VideoChapterEditorNext(work_dir)
+    window = VideoChapterEditor(work_dir)
     window.show()
 
     sys.exit(app.exec())
