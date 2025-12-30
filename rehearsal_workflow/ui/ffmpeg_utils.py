@@ -112,6 +112,69 @@ def get_ffprobe_path() -> str:
     )
 
 
+def extract_chapters_with_ffmpeg(file_path: str) -> list:
+    """
+    ffmpegの出力からチャプター情報を抽出（ffprobeの代替）
+
+    ffmpegの -i オプションの出力をパースしてチャプター情報を取得。
+    imageio-ffmpegにはffprobeが含まれないため、このフォールバックを使用。
+
+    Args:
+        file_path: メディアファイルパス
+
+    Returns:
+        チャプター情報のリスト [{"start_time": float, "title": str}, ...]
+    """
+    import re
+
+    try:
+        ffmpeg = get_ffmpeg_path()
+        result = subprocess.run(
+            [ffmpeg, '-i', file_path],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        # ffmpegは入力のみの場合、returncode=1で終了するがstderrに情報が出力される
+        output = result.stderr
+
+        chapters = []
+        # Chapter #0:0: start 0.000000, end 180.000000
+        #   Metadata:
+        #     title           : Chapter Title
+        chapter_pattern = re.compile(
+            r'Chapter #\d+:\d+: start (\d+\.?\d*), end (\d+\.?\d*)'
+        )
+        title_pattern = re.compile(r'^\s+title\s*:\s*(.+)$', re.MULTILINE)
+
+        lines = output.split('\n')
+        i = 0
+        while i < len(lines):
+            match = chapter_pattern.search(lines[i])
+            if match:
+                start_time = float(match.group(1))
+                # 次の行からタイトルを探す
+                title = f"Chapter {len(chapters) + 1}"
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    title_match = title_pattern.match(lines[j])
+                    if title_match:
+                        title = title_match.group(1).strip()
+                        break
+                    # 次のChapterが始まったら終了
+                    if 'Chapter #' in lines[j]:
+                        break
+                chapters.append({
+                    "start_time": start_time,
+                    "title": title
+                })
+            i += 1
+
+        return chapters
+
+    except Exception:
+        return []
+
+
 def check_ffmpeg_available() -> bool:
     """FFmpegが利用可能かチェック"""
     try:

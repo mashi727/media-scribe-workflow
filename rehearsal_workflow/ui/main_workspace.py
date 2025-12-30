@@ -45,7 +45,7 @@ from .models import (
 )
 from .workers import WaveformWorker, SpectrogramWorker, ExportWorker
 from .widgets import WaveformWidget, CenteredFileDialog
-from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
+from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, extract_chapters_with_ffmpeg
 
 
 # ファイル拡張子定義
@@ -1719,56 +1719,87 @@ class MainWorkspace(QWidget):
         """
         import json
 
+        # ffprobeを試行、なければffmpegフォールバック
+        use_ffprobe = True
         try:
-            cmd = [
-                get_ffprobe_path(),
-                '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_chapters',
-                str(file_path)
-            ]
+            ffprobe_path = get_ffprobe_path()
+            self._log_panel.debug(f"Using ffprobe: {ffprobe_path}", source="Chapter")
+        except RuntimeError:
+            use_ffprobe = False
+            self._log_panel.debug("ffprobe not available, using ffmpeg fallback", source="Chapter")
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+        if use_ffprobe:
+            try:
+                cmd = [
+                    ffprobe_path,
+                    '-v', 'quiet',
+                    '-print_format', 'json',
+                    '-show_chapters',
+                    str(file_path)
+                ]
 
-            if result.returncode != 0:
-                self._log_panel.debug(f"ffprobe failed: {result.stderr}", source="Chapter")
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+
+                if result.returncode != 0:
+                    self._log_panel.debug(f"ffprobe failed (code {result.returncode}), trying ffmpeg", source="Chapter")
+                    use_ffprobe = False
+                else:
+                    data = json.loads(result.stdout)
+                    chapters_data = data.get('chapters', [])
+
+                    if chapters_data:
+                        chapters = []
+                        for ch in chapters_data:
+                            start_time = float(ch.get('start_time', 0))
+                            time_ms = int(start_time * 1000)
+                            tags = ch.get('tags', {})
+                            title = tags.get('title', f'Chapter {len(chapters) + 1}')
+                            chapter = ChapterInfo(time_ms=time_ms, title=title)
+                            chapters.append(chapter)
+
+                        self._log_panel.info(f"Loaded {len(chapters)} chapters from media", source="Chapter")
+                        return chapters
+                    else:
+                        self._log_panel.debug("No chapters found via ffprobe", source="Chapter")
+                        return []
+
+            except subprocess.TimeoutExpired:
+                self._log_panel.warning("ffprobe timeout", source="Chapter")
+                use_ffprobe = False
+            except json.JSONDecodeError as e:
+                self._log_panel.debug(f"ffprobe JSON parse error: {e}, trying ffmpeg", source="Chapter")
+                use_ffprobe = False
+            except Exception as e:
+                self._log_panel.debug(f"ffprobe failed: {e}, trying ffmpeg", source="Chapter")
+                use_ffprobe = False
+
+        # ffmpegフォールバック（imageio-ffmpegにはffprobeが含まれない）
+        if not use_ffprobe:
+            try:
+                chapters_data = extract_chapters_with_ffmpeg(str(file_path))
+                if chapters_data:
+                    chapters = []
+                    for ch in chapters_data:
+                        time_ms = int(ch['start_time'] * 1000)
+                        title = ch['title']
+                        chapter = ChapterInfo(time_ms=time_ms, title=title)
+                        chapters.append(chapter)
+
+                    self._log_panel.info(f"Loaded {len(chapters)} chapters from media (via ffmpeg)", source="Chapter")
+                    return chapters
+                else:
+                    self._log_panel.debug("No chapters found in media file", source="Chapter")
+                    return []
+            except Exception as e:
+                self._log_panel.warning(f"Chapter extraction failed: {e}", source="Chapter")
                 return []
 
-            data = json.loads(result.stdout)
-            chapters_data = data.get('chapters', [])
-
-            if not chapters_data:
-                return []
-
-            chapters = []
-            for ch in chapters_data:
-                # start_timeは秒単位（float）
-                start_time = float(ch.get('start_time', 0))
-                time_ms = int(start_time * 1000)
-
-                # タイトルはtags内のtitleフィールド
-                tags = ch.get('tags', {})
-                title = tags.get('title', f'Chapter {len(chapters) + 1}')
-
-                chapter = ChapterInfo(time_ms=time_ms, title=title)
-                chapters.append(chapter)
-
-            return chapters
-
-        except subprocess.TimeoutExpired:
-            self._log_panel.warning("ffprobe timeout", source="Chapter")
-            return []
-        except json.JSONDecodeError as e:
-            self._log_panel.debug(f"ffprobe JSON parse error: {e}", source="Chapter")
-            return []
-        except Exception as e:
-            self._log_panel.debug(f"Chapter extraction failed: {e}", source="Chapter")
-            return []
+        return []
 
     def _load_embedded_chapters(self, file_path: Path):
         """埋め込みチャプターを読み込んでテーブルに追加
