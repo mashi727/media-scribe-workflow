@@ -94,6 +94,37 @@ class ColorspaceInfo:
         return args
 
 
+@dataclass
+class SourceFile:
+    """ソースファイル情報"""
+    path: Path
+    duration_ms: int = 0  # ミリ秒
+    file_type: str = ""   # "mp3", "mp4", etc.
+
+    @property
+    def duration_str(self) -> str:
+        """HH:MM:SS形式"""
+        total_sec = self.duration_ms // 1000
+        h, rem = divmod(total_sec, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+
+@dataclass
+class ProjectState:
+    """プロジェクト状態"""
+    work_dir: Path = field(default_factory=Path.cwd)
+    sources: List['SourceFile'] = field(default_factory=list)
+    cover_image_path: Optional[Path] = None
+    chapters: List[ChapterInfo] = field(default_factory=list)
+    output_path: Optional[Path] = None
+    video_path: Optional[Path] = None
+    video_duration_ms: int = 0
+    colorspace: Optional[ColorspaceInfo] = None
+
+
 def detect_video_colorspace(file_path: str) -> ColorspaceInfo:
     """
     動画の色空間情報を取得

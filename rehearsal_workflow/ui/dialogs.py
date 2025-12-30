@@ -7,9 +7,8 @@ dialogs.py - モーダルダイアログ群
 
 from pathlib import Path
 from typing import Optional, List, Tuple
-from dataclasses import dataclass
 
-from .models import detect_video_duration
+from .models import detect_video_duration, SourceFile
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -19,24 +18,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QBuffer, QIODevice
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QBrush, QColor, QTransform
-
-
-@dataclass
-class SourceFile:
-    """ソースファイル情報"""
-    path: Path
-    duration_ms: int = 0  # ミリ秒
-    file_type: str = ""   # "mp3", "mp4", etc.
-
-    @property
-    def duration_str(self) -> str:
-        """HH:MM:SS形式"""
-        total_sec = self.duration_ms // 1000
-        h, rem = divmod(total_sec, 3600)
-        m, s = divmod(rem, 60)
-        if h > 0:
-            return f"{h}:{m:02d}:{s:02d}"
-        return f"{m}:{s:02d}"
 
 
 class ImageCropWidget(QWidget):
