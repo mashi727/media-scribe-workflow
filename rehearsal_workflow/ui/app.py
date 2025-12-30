@@ -100,7 +100,7 @@ class VideoChapterEditor(QMainWindow):
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.1.7"
+    VERSION = "2.1.8"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()
@@ -158,6 +158,9 @@ class VideoChapterEditor(QMainWindow):
     def _setup_menu(self):
         """メニューバー設定"""
         menubar = self.menuBar()
+
+        # macOSでもウィンドウ内にメニューバーを表示（Windows/macOS統一UI）
+        menubar.setNativeMenuBar(False)
 
         # File メニュー
         file_menu = menubar.addMenu("File")
