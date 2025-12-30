@@ -1,0 +1,70 @@
+# video-chapter-editor-workflow.spd
+# 動画前処理ワークフロー（VideoChapterEditor GUI）
+
+:terminal 開始
+
+:comment ソースファイル読み込み
+:switch 入力タイプ
+:case 動画ファイル（MP4等）
+	ドラッグ＆ドロップ or ファイル選択
+	映像 + 音声トラック読み込み
+:case 音声ファイル（MP3/WAV等）
+	音声のみ読み込み
+	→ 静止画と合成して動画生成
+
+:comment 波形/スペクトログラム表示
+:if 複数ファイルあり
+	自動結合
+	結合順序の確認
+:else
+	単一ファイル表示
+
+:comment トリミング設定
+:while 不要部分あり
+	:switch トリム方法
+	:case 波形クリック
+		開始/終了点をクリックで指定
+	:case スライダー
+		プレビュー領域で範囲指定
+	:case 直接入力
+		時間値を数値入力
+	トリム領域をリストに追加
+
+:comment チャプター設定
+:while チャプター追加
+	:switch 設定方法
+	:case 現在位置
+		再生位置にチャプター追加
+	:case 時間指定
+		任意の時間にチャプター追加
+	チャプター名を入力
+	:if --プレフィックス
+		除外チャプターとしてマーク
+
+:comment カバー画像設定（音声入力時）
+:if 音声入力のみ
+	:switch 画像設定
+	:case 画像選択
+		PNG/JPGファイルを選択
+	:case 画像クロップ
+		表示範囲を調整
+	:case なし
+		デフォルト黒背景
+
+:comment エンコード設定
+:switch エンコーダ
+:case GPU（VideoToolbox/NVENC）
+	ビットレート指定
+	高速エンコード
+:case CPU（x264）
+	CRF品質指定
+	高画質エンコード
+
+:comment 出力
+:call FFmpeg
+	トリム適用
+	チャプター埋め込み
+	色空間保持
+	→ 出力MP4
+
+:terminal 終了
