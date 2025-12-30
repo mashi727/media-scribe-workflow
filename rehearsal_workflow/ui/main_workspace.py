@@ -45,6 +45,7 @@ from .models import (
 )
 from .workers import WaveformWorker, SpectrogramWorker, ExportWorker
 from .widgets import WaveformWidget, CenteredFileDialog
+from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
 
 
 # ファイル拡張子定義
@@ -1029,7 +1030,7 @@ class MainWorkspace(QWidget):
 
             # ffmpegで結合
             cmd = [
-                'ffmpeg', '-y',
+                get_ffmpeg_path(), '-y',
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', str(list_file),
@@ -1720,7 +1721,7 @@ class MainWorkspace(QWidget):
 
         try:
             cmd = [
-                'ffprobe',
+                get_ffprobe_path(),
                 '-v', 'quiet',
                 '-print_format', 'json',
                 '-show_chapters',

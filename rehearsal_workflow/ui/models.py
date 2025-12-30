@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 from dataclasses import dataclass, field
 
+from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
+
 
 @dataclass
 class ChapterInfo:
@@ -139,7 +141,7 @@ def detect_video_colorspace(file_path: str) -> ColorspaceInfo:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
+                get_ffprobe_path(), "-v", "quiet",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=color_space,color_primaries,color_transfer",
                 "-of", "default=noprint_wrappers=1",
@@ -180,7 +182,7 @@ def detect_video_bitrate(file_path: str) -> Optional[int]:
         # まず動画ストリームのビットレートを試行
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
+                get_ffprobe_path(), "-v", "quiet",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=bit_rate",
                 "-of", "default=noprint_wrappers=1:nokey=1",
@@ -199,7 +201,7 @@ def detect_video_bitrate(file_path: str) -> Optional[int]:
         # 動画ストリームで取得できない場合、format全体のビットレートを使用
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
+                get_ffprobe_path(), "-v", "quiet",
                 "-show_entries", "format=bit_rate",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 file_path
@@ -233,7 +235,7 @@ def detect_video_duration(file_path: str) -> Optional[int]:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
+                get_ffprobe_path(), "-v", "quiet",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 file_path
@@ -288,7 +290,7 @@ def detect_available_encoders() -> List[Tuple[str, str, str]]:
     # ffmpegでエンコーダの利用可否を確認
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [get_ffmpeg_path(), "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             timeout=5

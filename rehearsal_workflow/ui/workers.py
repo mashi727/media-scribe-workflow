@@ -19,6 +19,7 @@ from .models import (
     get_encoder_args,
     detect_system_font,
 )
+from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
 
 
 class MergeWorker(QThread):
@@ -70,7 +71,7 @@ class MergeWorker(QThread):
                 # ffprobeで長さを取得
                 try:
                     result = subprocess.run(
-                        ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                        [get_ffprobe_path(), '-v', 'quiet', '-show_entries', 'format=duration',
                          '-of', 'default=noprint_wrappers=1:nokey=1', f],
                         capture_output=True, text=True
                     )
@@ -93,7 +94,7 @@ class MergeWorker(QThread):
 
             self.log_message.emit(f"結合方式: {strategy_desc}")
             self.log_message.emit("音声ファイルを結合中...")
-            concat_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+            concat_cmd = [get_ffmpeg_path(), '-y', '-f', 'concat', '-safe', '0',
                           '-i', concat_file] + codec_args + [temp_audio]
             self.log_message.emit(f"コマンド: {' '.join(concat_cmd)}")
 
@@ -444,7 +445,7 @@ class ExportWorker(QThread):
             # 黒背景の一時画像を生成
             black_image = os.path.join(tempfile.gettempdir(), "black_cover.jpg")
             black_cmd = [
-                'ffmpeg', '-y',
+                get_ffmpeg_path(), '-y',
                 '-f', 'lavfi', '-i', 'color=c=black:s=1280x720:d=1',
                 '-frames:v', '1',
                 black_image
@@ -484,7 +485,7 @@ class ExportWorker(QThread):
         # ffmpegコマンドを構築
         # -loop 1: 画像をループ
         cmd = [
-            'ffmpeg', '-y',
+            get_ffmpeg_path(), '-y',
             '-loop', '1',
             '-i', self.cover_image,
             '-i', self.input_file,
@@ -700,7 +701,7 @@ class ExportWorker(QThread):
                 self.progress_update.emit(f"メタデータファイル生成: {metadata_file}")
 
             # ffmpegコマンドを構築
-            cmd = ['ffmpeg', '-y', '-i', self.input_file]
+            cmd = [get_ffmpeg_path(), '-y', '-i', self.input_file]
 
             # メタデータファイルがある場合は追加
             if metadata_file:
@@ -887,7 +888,7 @@ class WaveformWorker(QObject):
 
             # FFmpegからパイプで直接読み込み（ディスクI/O回避）
             process = subprocess.Popen([
-                'ffmpeg', '-i', str(self._file_path),
+                get_ffmpeg_path(), '-i', str(self._file_path),
                 '-ac', '1',        # モノラル
                 '-ar', '4000',     # 4kHz（高速化）
                 '-f', 's16le',     # 生のPCMデータ
@@ -968,6 +969,8 @@ class WaveformWorker(QObject):
 
         except subprocess.TimeoutExpired:
             self.error.emit("Waveform generation timed out")
+        except RuntimeError as e:
+            self.error.emit(str(e))
         except FileNotFoundError:
             self.error.emit("ffmpeg not found")
         except Exception as e:
@@ -989,7 +992,7 @@ class WaveformWorker(QObject):
 
             try:
                 cmd = [
-                    'ffmpeg', '-y', '-i', str(self._file_path),
+                    get_ffmpeg_path(), '-y', '-i', str(self._file_path),
                     '-ac', '1',
                     '-ar', '4000',
                     '-f', 's16le',
@@ -1047,6 +1050,8 @@ class WaveformWorker(QObject):
 
         except subprocess.TimeoutExpired:
             self.error.emit("Waveform generation timed out")
+        except RuntimeError as e:
+            self.error.emit(str(e))
         except FileNotFoundError:
             self.error.emit("ffmpeg not found")
         except Exception as e:
@@ -1148,7 +1153,7 @@ class SpectrogramWorker(QObject):
             # FFmpegで音声を抽出（22.05kHz モノラル - 音声解析に適した周波数）
             sample_rate = 22050
             process = subprocess.Popen([
-                'ffmpeg', '-i', str(self._file_path),
+                get_ffmpeg_path(), '-i', str(self._file_path),
                 '-ac', '1',
                 '-ar', str(sample_rate),
                 '-f', 's16le',
@@ -1282,6 +1287,8 @@ class SpectrogramWorker(QObject):
 
         except subprocess.TimeoutExpired:
             self.error.emit("Spectrogram generation timed out")
+        except RuntimeError as e:
+            self.error.emit(str(e))
         except FileNotFoundError:
             self.error.emit("ffmpeg not found")
         except Exception as e:
