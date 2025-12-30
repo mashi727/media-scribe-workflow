@@ -607,7 +607,7 @@ class MainWorkspace(QWidget):
         self._table.setHorizontalHeaderLabels(["Time", "Title"])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self._table.setColumnWidth(0, 100)
+        self._table.setColumnWidth(0, 140)  # H:MM:SS.mmm形式に十分な幅
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)  # セル単位選択
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)  # 単一選択
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)  # Enterキーのみで編集
