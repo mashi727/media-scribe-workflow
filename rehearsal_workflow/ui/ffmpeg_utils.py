@@ -115,7 +115,7 @@ def get_ffprobe_path() -> str:
 
 def get_subprocess_kwargs(timeout: int = 30, capture_output: bool = True) -> Dict[str, Any]:
     """
-    クロスプラットフォーム対応のsubprocess kwargs を取得
+    クロスプラットフォーム対応のsubprocess.run() kwargs を取得
 
     Windowsでは:
     - コンソールウィンドウを非表示 (CREATE_NO_WINDOW)
@@ -137,6 +137,24 @@ def get_subprocess_kwargs(timeout: int = 30, capture_output: bool = True) -> Dic
     }
     if capture_output:
         kwargs['capture_output'] = True
+
+    # Windowsではコンソールウィンドウを非表示
+    if sys.platform == 'win32':
+        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+
+    return kwargs
+
+
+def get_popen_kwargs() -> Dict[str, Any]:
+    """
+    クロスプラットフォーム対応のsubprocess.Popen() kwargs を取得
+
+    Windowsではコンソールウィンドウを非表示にする。
+
+    Returns:
+        subprocess.Popen() に渡すkwargs (creationflagsのみ)
+    """
+    kwargs: Dict[str, Any] = {}
 
     # Windowsではコンソールウィンドウを非表示
     if sys.platform == 'win32':

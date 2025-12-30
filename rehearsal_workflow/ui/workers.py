@@ -19,7 +19,7 @@ from .models import (
     get_encoder_args,
     detect_system_font,
 )
-from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
+from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, get_subprocess_kwargs, get_popen_kwargs
 
 
 class MergeWorker(QThread):
@@ -70,10 +70,11 @@ class MergeWorker(QThread):
                 self.chapters.append(ChapterInfo(time_ms=current_time_ms, title=title))
                 # ffprobeで長さを取得
                 try:
+                    kwargs = get_subprocess_kwargs(timeout=30)
                     result = subprocess.run(
                         [get_ffprobe_path(), '-v', 'quiet', '-show_entries', 'format=duration',
                          '-of', 'default=noprint_wrappers=1:nokey=1', f],
-                        capture_output=True, text=True
+                        **kwargs
                     )
                     duration_sec = float(result.stdout.strip())
                     current_time_ms += int(duration_sec * 1000)
@@ -98,7 +99,9 @@ class MergeWorker(QThread):
                           '-i', concat_file] + codec_args + [temp_audio]
             self.log_message.emit(f"コマンド: {' '.join(concat_cmd)}")
 
-            result = subprocess.run(concat_cmd, capture_output=True, text=True)
+            # タイムアウトなし（長時間処理の可能性）
+            popen_kwargs = get_popen_kwargs()
+            result = subprocess.run(concat_cmd, capture_output=True, text=True, **popen_kwargs)
             if result.stdout:
                 self.log_message.emit(f"[stdout]\n{result.stdout}")
             if result.stderr:
@@ -450,7 +453,7 @@ class ExportWorker(QThread):
                 '-frames:v', '1',
                 black_image
             ]
-            subprocess.run(black_cmd, capture_output=True)
+            subprocess.run(black_cmd, capture_output=True, **get_popen_kwargs())
             self.cover_image = black_image
             self._temp_files.append(black_image)
 
@@ -607,7 +610,8 @@ class ExportWorker(QThread):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            universal_newlines=True,
+            **get_popen_kwargs()
         )
 
         # stderrから進捗を読み取る（調整後の長さを使用）
@@ -778,7 +782,8 @@ class ExportWorker(QThread):
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                universal_newlines=True
+                universal_newlines=True,
+                **get_popen_kwargs()
             )
 
             # stderrから進捗を読み取る（調整後の動画長を使用）
@@ -895,7 +900,7 @@ class WaveformWorker(QObject):
                 '-acodec', 'pcm_s16le',
                 '-v', 'quiet',     # 出力抑制
                 '-'
-            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **get_popen_kwargs())
 
             # データを少しずつ読み込んで進捗を更新
             chunks = []
@@ -1000,7 +1005,7 @@ class WaveformWorker(QObject):
                     tmp_path
                 ]
 
-                result = subprocess.run(cmd, capture_output=True, timeout=120)
+                result = subprocess.run(cmd, capture_output=True, timeout=120, **get_popen_kwargs())
 
                 if self._cancelled:
                     return
@@ -1160,7 +1165,7 @@ class SpectrogramWorker(QObject):
                 '-acodec', 'pcm_s16le',
                 '-v', 'quiet',
                 '-'
-            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **get_popen_kwargs())
 
             # データ読み込み
             chunks = []
