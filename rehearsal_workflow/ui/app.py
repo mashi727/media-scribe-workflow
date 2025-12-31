@@ -14,11 +14,15 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QLabel, QProgressBar, QMessageBox
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread
 from PySide6.QtGui import QAction, QFont, QFontDatabase
 
 from .main_workspace import MainWorkspace
 from .log_panel import LogLevel
+from .updater import (
+    UpdateChecker, UpdateDownloader,
+    open_in_file_manager, mount_and_open_dmg
+)
 
 
 # === クロスプラットフォーム設定 ===
@@ -100,15 +104,27 @@ class VideoChapterEditor(QMainWindow):
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.1.21"
+    VERSION = "2.1.22"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()
         self._work_dir = work_dir or Path.cwd()
+
+        # アップデート関連
+        self._update_thread: Optional[QThread] = None
+        self._update_checker: Optional[UpdateChecker] = None
+        self._download_thread: Optional[QThread] = None
+        self._downloader: Optional[UpdateDownloader] = None
+        self._pending_update_url: Optional[str] = None
+        self._pending_update_version: Optional[str] = None
+
         self._setup_window()
         self._setup_menu()
         self._setup_ui()
         self._setup_statusbar()
+
+        # 起動後3秒でアップデートチェック
+        QTimer.singleShot(3000, self._check_for_updates)
 
     def _setup_window(self):
         """ウィンドウ設定"""
@@ -382,6 +398,169 @@ class VideoChapterEditor(QMainWindow):
         """作業ディレクトリ変更時"""
         self._work_dir = new_dir
         self._workdir_label.setText(f"Working Directory: {new_dir}")
+
+    # === アップデート機能 ===
+
+    def _check_for_updates(self):
+        """バックグラウンドでアップデートをチェック"""
+        self._update_thread = QThread()
+        self._update_checker = UpdateChecker(self.VERSION)
+        self._update_checker.moveToThread(self._update_thread)
+
+        self._update_thread.started.connect(self._update_checker.run)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.check_finished.connect(self._cleanup_update_check)
+        self._update_checker.error.connect(self._on_update_check_error)
+
+        self._update_thread.start()
+
+    def _cleanup_update_check(self):
+        """アップデートチェックスレッドをクリーンアップ"""
+        if self._update_thread:
+            self._update_thread.quit()
+            self._update_thread.wait(1000)
+            self._update_thread = None
+            self._update_checker = None
+
+    def _on_update_check_error(self, error: str):
+        """アップデートチェックエラー（静かに無視）"""
+        self._cleanup_update_check()
+        # ログにのみ記録
+        log = self._workspace.get_log_panel()
+        log.debug(f"Update check failed: {error}", source="Updater")
+
+    def _on_update_available(self, version: str, url: str, notes: str):
+        """新バージョンが利用可能"""
+        self._cleanup_update_check()
+
+        self._pending_update_version = version
+        self._pending_update_url = url
+
+        # ステータスバーに通知を表示
+        self._status_label.setText(f"🔄 v{version} available")
+        self._status_label.setStyleSheet(
+            "color: #f59e0b; font-weight: bold; font-size: 18px; cursor: pointer;"
+        )
+        self._status_label.setToolTip(f"Click to update to v{version}")
+
+        # クリックでダウンロード開始
+        self._status_label.mousePressEvent = lambda e: self._confirm_update()
+
+        # ログにも記録
+        log = self._workspace.get_log_panel()
+        log.info(f"New version v{version} available", source="Updater")
+
+    def _confirm_update(self):
+        """アップデート確認ダイアログ"""
+        if not self._pending_update_url:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Update Available",
+            f"Version {self._pending_update_version} is available.\n\n"
+            "Download and install the update?\n\n"
+            "(The app will open the download location in Finder/Explorer)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self._start_download()
+
+    def _start_download(self):
+        """アップデートのダウンロードを開始"""
+        if not self._pending_update_url:
+            return
+
+        # ファイル名を抽出
+        filename = self._pending_update_url.split("/")[-1]
+
+        self._download_thread = QThread()
+        self._downloader = UpdateDownloader(self._pending_update_url, filename)
+        self._downloader.moveToThread(self._download_thread)
+
+        self._download_thread.started.connect(self._downloader.run)
+        self._downloader.progress.connect(self._on_download_progress)
+        self._downloader.finished.connect(self._on_download_finished)
+        self._downloader.error.connect(self._on_download_error)
+
+        # UI更新
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setValue(0)
+        self._status_label.setText("Downloading update...")
+        self._status_label.setStyleSheet("color: #3b82f6; font-weight: bold; font-size: 18px;")
+
+        self._download_thread.start()
+
+    def _on_download_progress(self, percent: int):
+        """ダウンロード進捗"""
+        self._progress_bar.setValue(percent)
+        self._status_label.setText(f"Downloading... {percent}%")
+
+    def _on_download_finished(self, file_path: str):
+        """ダウンロード完了"""
+        self._cleanup_download()
+
+        self._progress_bar.setVisible(False)
+        self._status_label.setText("Download complete!")
+        self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+
+        log = self._workspace.get_log_panel()
+        log.info(f"Update downloaded: {file_path}", source="Updater")
+
+        # macOSでDMGの場合はマウントして開く
+        if file_path.endswith(".dmg"):
+            if mount_and_open_dmg(file_path):
+                log.info("DMG mounted - drag app to Applications folder", source="Updater")
+                QMessageBox.information(
+                    self,
+                    "Update Ready",
+                    "The update has been downloaded and mounted.\n\n"
+                    "Please drag the new app to your Applications folder\n"
+                    "to complete the update."
+                )
+            else:
+                open_in_file_manager(file_path)
+        else:
+            # ZIPの場合はExplorerで開く
+            open_in_file_manager(file_path)
+            QMessageBox.information(
+                self,
+                "Update Ready",
+                f"The update has been downloaded to:\n{file_path}\n\n"
+                "Please extract and run the new version."
+            )
+
+        # ステータスをリセット
+        QTimer.singleShot(5000, self._reset_status)
+
+    def _on_download_error(self, error: str):
+        """ダウンロードエラー"""
+        self._cleanup_download()
+
+        self._progress_bar.setVisible(False)
+        self._status_label.setText("Download failed")
+        self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
+
+        log = self._workspace.get_log_panel()
+        log.error(f"Download failed: {error}", source="Updater")
+
+        QMessageBox.warning(
+            self,
+            "Download Failed",
+            f"Failed to download update:\n{error}"
+        )
+
+        QTimer.singleShot(5000, self._reset_status)
+
+    def _cleanup_download(self):
+        """ダウンロードスレッドをクリーンアップ"""
+        if self._download_thread:
+            self._download_thread.quit()
+            self._download_thread.wait(1000)
+            self._download_thread = None
+            self._downloader = None
 
     def resizeEvent(self, event):
         """リサイズ時にアスペクト比を維持"""
