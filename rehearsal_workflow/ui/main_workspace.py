@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QAbstractItemView, QSlider, QFileDialog, QDialog,
     QCheckBox, QSpinBox, QApplication
 )
-from PySide6.QtCore import Qt, Signal, QUrl, QThread, QObject, QTimer, QEvent
+from PySide6.QtCore import Qt, Signal, QUrl, QThread, QObject, QTimer, QEvent, QMimeData
 from PySide6.QtGui import QFont, QFontDatabase, QPainter, QColor, QPen, QBrush
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -51,6 +51,106 @@ from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, extract_chapters_wi
 # ファイル拡張子定義
 AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.flac'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
+
+
+class DropVideoFrame(QFrame):
+    """
+    ドラッグ＆ドロップ対応の動画プレビューフレーム
+
+    対応:
+    - 動画/音声ファイル: ドロップで読み込み
+    - フォルダ: 作業ディレクトリとして設定
+    """
+
+    files_dropped = Signal(list)  # ファイルパスのリスト
+    folder_dropped = Signal(str)  # フォルダパス
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._drag_active = False
+
+    def dragEnterEvent(self, event):
+        """ドラッグ進入時: 有効なファイル/フォルダか確認"""
+        mime_data = event.mimeData()
+        if mime_data.hasUrls():
+            urls = mime_data.urls()
+            if urls:
+                # 少なくとも1つの有効なファイル/フォルダがあるか確認
+                for url in urls:
+                    if url.isLocalFile():
+                        path = Path(url.toLocalFile())
+                        if path.is_dir():
+                            event.acceptProposedAction()
+                            self._drag_active = True
+                            self._update_drag_style(True)
+                            return
+                        ext = path.suffix.lower()
+                        if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                            event.acceptProposedAction()
+                            self._drag_active = True
+                            self._update_drag_style(True)
+                            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        """ドラッグ離脱時: スタイルを戻す"""
+        self._drag_active = False
+        self._update_drag_style(False)
+        event.accept()
+
+    def dropEvent(self, event):
+        """ドロップ時: ファイル/フォルダを処理"""
+        self._drag_active = False
+        self._update_drag_style(False)
+
+        mime_data = event.mimeData()
+        if not mime_data.hasUrls():
+            event.ignore()
+            return
+
+        urls = mime_data.urls()
+        files = []
+        folder = None
+
+        for url in urls:
+            if url.isLocalFile():
+                path = Path(url.toLocalFile())
+                if path.is_dir():
+                    # 最初のフォルダを作業ディレクトリとして使用
+                    if folder is None:
+                        folder = str(path)
+                else:
+                    ext = path.suffix.lower()
+                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                        files.append(str(path))
+
+        # フォルダが優先（フォルダがあればファイルは無視）
+        if folder:
+            self.folder_dropped.emit(folder)
+        elif files:
+            self.files_dropped.emit(files)
+
+        event.acceptProposedAction()
+
+    def _update_drag_style(self, active: bool):
+        """ドラッグ中のスタイル更新"""
+        if active:
+            self.setStyleSheet("""
+                QFrame {
+                    background: #1a1a1a;
+                    border: 2px solid #3b82f6;
+                    border-radius: 8px;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame {
+                    background: #1a1a1a;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 8px;
+                }
+            """)
 
 
 class MainWorkspace(QWidget):
@@ -519,15 +619,12 @@ class MainWorkspace(QWidget):
         main_layout.setSpacing(8)
 
         # === 動画プレビュー（最大化）===
-        video_frame = QFrame()
-        video_frame.setStyleSheet("""
-            QFrame {
-                background: #1a1a1a;
-                border: 1px solid #3a3a3a;
-                border-radius: 8px;
-            }
-        """)
+        video_frame = DropVideoFrame()
         video_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        # ドロップシグナル接続
+        video_frame.files_dropped.connect(self._on_files_dropped)
+        video_frame.folder_dropped.connect(self._on_folder_dropped)
 
         video_layout = QVBoxLayout(video_frame)
         video_layout.setContentsMargins(4, 4, 4, 4)
@@ -2128,6 +2225,78 @@ class MainWorkspace(QWidget):
 
         # 波形生成を開始（別スレッド）
         self._start_waveform_generation(path)
+
+    # === ドラッグ＆ドロップハンドラ ===
+
+    def _on_files_dropped(self, file_paths: list):
+        """ファイルドロップ時の処理
+
+        - 動画: 最初の1つのみ読み込み
+        - 音声: 複数の場合は結合リストとして処理
+        """
+        if not file_paths:
+            return
+
+        videos = []
+        audios = []
+
+        for path_str in file_paths:
+            path = Path(path_str)
+            ext = path.suffix.lower()
+            if ext in VIDEO_EXTENSIONS:
+                videos.append(path)
+            elif ext in AUDIO_EXTENSIONS:
+                audios.append(path)
+
+        # 動画を優先（最初の1つのみ）
+        if videos:
+            video_path = videos[0]
+            # ソースをクリアして新しい動画を設定
+            self._state.sources = [SourceFile(path=video_path)]
+            self._on_source_changed()
+            self._log_panel.info(f"Dropped video: {video_path.name}", source="Drop")
+        elif audios:
+            # 音声ファイル: ソースとして設定
+            self._state.sources = [SourceFile(path=p) for p in audios]
+            self._on_source_changed()
+            if len(audios) == 1:
+                self._log_panel.info(f"Dropped audio: {audios[0].name}", source="Drop")
+            else:
+                self._log_panel.info(f"Dropped {len(audios)} audio files", source="Drop")
+
+    def _on_folder_dropped(self, folder_path: str):
+        """フォルダドロップ時の処理: 作業ディレクトリとして設定"""
+        path = Path(folder_path)
+        if not path.is_dir():
+            return
+
+        self._state.work_dir = path
+        self._log_panel.info(f"Working directory changed: {path}", source="Drop")
+
+        # フォルダ内のメディアファイルをスキャン
+        media_files = []
+        for ext in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
+            media_files.extend(path.glob(f"*{ext}"))
+            media_files.extend(path.glob(f"*{ext.upper()}"))
+
+        # 重複を除去してソート
+        media_files = sorted(set(media_files), key=lambda p: p.name.lower())
+
+        if media_files:
+            # 最初の動画、または音声ファイルをソースとして設定
+            videos = [f for f in media_files if f.suffix.lower() in VIDEO_EXTENSIONS]
+            if videos:
+                self._state.sources = [SourceFile(path=videos[0])]
+                self._on_source_changed()
+                self._log_panel.info(f"Found {len(videos)} video(s), loaded: {videos[0].name}", source="Drop")
+            else:
+                # 音声のみの場合は全て読み込み
+                audios = [f for f in media_files if f.suffix.lower() in AUDIO_EXTENSIONS]
+                self._state.sources = [SourceFile(path=p) for p in audios]
+                self._on_source_changed()
+                self._log_panel.info(f"Found {len(audios)} audio file(s)", source="Drop")
+        else:
+            self._log_panel.info("No media files found in folder", source="Drop")
 
     def cleanup(self):
         """リソースクリーンアップ"""
