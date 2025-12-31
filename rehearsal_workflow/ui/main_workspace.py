@@ -2336,12 +2336,12 @@ class MainWorkspace(QWidget):
             video_path = videos[0]
             # ソースをクリアして新しい動画を設定
             self._state.sources = [SourceFile(path=video_path)]
-            self._on_source_changed()
+            self._load_source_media()
             self._log_panel.info(f"Dropped video: {video_path.name}", source="Drop")
         elif audios:
             # 音声ファイル: ソースとして設定
             self._state.sources = [SourceFile(path=p) for p in audios]
-            self._on_source_changed()
+            self._load_source_media()
             if len(audios) == 1:
                 self._log_panel.info(f"Dropped audio: {audios[0].name}", source="Drop")
             else:
@@ -2370,13 +2370,13 @@ class MainWorkspace(QWidget):
             videos = [f for f in media_files if f.suffix.lower() in VIDEO_EXTENSIONS]
             if videos:
                 self._state.sources = [SourceFile(path=videos[0])]
-                self._on_source_changed()
+                self._load_source_media()
                 self._log_panel.info(f"Found {len(videos)} video(s), loaded: {videos[0].name}", source="Drop")
             else:
                 # 音声のみの場合は全て読み込み
                 audios = [f for f in media_files if f.suffix.lower() in AUDIO_EXTENSIONS]
                 self._state.sources = [SourceFile(path=p) for p in audios]
-                self._on_source_changed()
+                self._load_source_media()
                 self._log_panel.info(f"Found {len(audios)} audio file(s)", source="Drop")
         else:
             self._log_panel.info("No media files found in folder", source="Drop")
