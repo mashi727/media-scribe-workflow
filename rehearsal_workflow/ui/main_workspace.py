@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
     QSplitter, QComboBox, QLineEdit, QGroupBox,
     QSizePolicy, QAbstractItemView, QSlider, QFileDialog, QDialog,
-    QCheckBox, QSpinBox, QApplication
+    QCheckBox, QSpinBox, QApplication, QStackedLayout
 )
 from PySide6.QtCore import Qt, Signal, QUrl, QThread, QObject, QTimer, QEvent, QMimeData
 from PySide6.QtGui import QFont, QFontDatabase, QPainter, QColor, QPen, QBrush
@@ -54,6 +54,109 @@ AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.flac'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
 
 
+class DropOverlay(QWidget):
+    """
+    動画ウィジェットの上に配置する透明なドロップオーバーレイ
+
+    QVideoWidgetは内部に複雑なウィジェット構造を持つため、
+    親フレームでのドロップイベント受信が困難。
+    このオーバーレイを動画の上に配置してドロップを受け取る。
+    """
+
+    files_dropped = Signal(list)
+    folder_dropped = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._drag_active = False
+        # 透明にしてマウスイベントはドロップのみ受け取る
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent;")
+
+    def dragEnterEvent(self, event):
+        mime_data = event.mimeData()
+        if mime_data.hasUrls():
+            for url in mime_data.urls():
+                if url.isLocalFile():
+                    path = Path(url.toLocalFile())
+                    if path.is_dir():
+                        event.acceptProposedAction()
+                        self._drag_active = True
+                        self._update_style(True)
+                        return
+                    ext = path.suffix.lower()
+                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                        event.acceptProposedAction()
+                        self._drag_active = True
+                        self._update_style(True)
+                        return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        # ドラッグ中も受け入れ続ける
+        if self._drag_active:
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._drag_active = False
+        self._update_style(False)
+        event.accept()
+
+    def dropEvent(self, event):
+        self._drag_active = False
+        self._update_style(False)
+
+        mime_data = event.mimeData()
+        if not mime_data.hasUrls():
+            event.ignore()
+            return
+
+        files = []
+        folder = None
+
+        for url in mime_data.urls():
+            if url.isLocalFile():
+                path = Path(url.toLocalFile())
+                if path.is_dir():
+                    if folder is None:
+                        folder = str(path)
+                else:
+                    ext = path.suffix.lower()
+                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                        files.append(str(path))
+
+        if folder:
+            self.folder_dropped.emit(folder)
+        elif files:
+            self.files_dropped.emit(files)
+
+        event.acceptProposedAction()
+
+    def _update_style(self, active: bool):
+        if active:
+            self.setStyleSheet("""
+                background: rgba(59, 130, 246, 0.2);
+                border: 2px solid #3b82f6;
+                border-radius: 4px;
+            """)
+        else:
+            self.setStyleSheet("background: transparent;")
+
+    def mousePressEvent(self, event):
+        # マウスクリックは下のウィジェットに透過
+        event.ignore()
+
+    def mouseReleaseEvent(self, event):
+        event.ignore()
+
+    def mouseMoveEvent(self, event):
+        event.ignore()
+
+    def mouseDoubleClickEvent(self, event):
+        event.ignore()
+
+
 class DropVideoFrame(QFrame):
     """
     ドラッグ＆ドロップ対応の動画プレビューフレーム
@@ -70,31 +173,6 @@ class DropVideoFrame(QFrame):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._drag_active = False
-        self._child_widgets = []  # イベントフィルター対象の子ウィジェット
-
-    def add_child_for_drop(self, widget):
-        """子ウィジェットをドロップイベント転送対象として追加"""
-        widget.setAcceptDrops(False)
-        widget.installEventFilter(self)
-        self._child_widgets.append(widget)
-
-    def eventFilter(self, obj, event):
-        """子ウィジェットのドラッグイベントを親で処理"""
-        if obj in self._child_widgets:
-            if event.type() == QEvent.Type.DragEnter:
-                self.dragEnterEvent(event)
-                return True
-            elif event.type() == QEvent.Type.DragMove:
-                # DragMoveも受け入れる（一部プラットフォームで必要）
-                event.acceptProposedAction()
-                return True
-            elif event.type() == QEvent.Type.DragLeave:
-                self.dragLeaveEvent(event)
-                return True
-            elif event.type() == QEvent.Type.Drop:
-                self.dropEvent(event)
-                return True
-        return super().eventFilter(obj, event)
 
     def dragEnterEvent(self, event):
         """ドラッグ進入時: 有効なファイル/フォルダか確認"""
@@ -645,27 +723,45 @@ class MainWorkspace(QWidget):
         main_layout.setSpacing(8)
 
         # === 動画プレビュー（最大化）===
-        video_frame = DropVideoFrame()
+        # 外枠フレーム
+        video_frame = QFrame()
+        video_frame.setStyleSheet("""
+            QFrame {
+                background: #1a1a1a;
+                border: 1px solid #3a3a3a;
+                border-radius: 8px;
+            }
+        """)
         video_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        # ドロップシグナル接続
-        video_frame.files_dropped.connect(self._on_files_dropped)
-        video_frame.folder_dropped.connect(self._on_folder_dropped)
+        video_outer_layout = QVBoxLayout(video_frame)
+        video_outer_layout.setContentsMargins(4, 4, 4, 4)
+        video_outer_layout.setSpacing(0)
 
-        video_layout = QVBoxLayout(video_frame)
-        video_layout.setContentsMargins(4, 4, 4, 4)
-        video_layout.setSpacing(0)
+        # 動画とオーバーレイを重ねるコンテナ
+        video_container = QWidget()
+        video_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        stacked_layout = QStackedLayout(video_container)
+        stacked_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        stacked_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 動画表示エリア - 最大化
+        # 動画ウィジェット（下層）
         self._video_widget = QVideoWidget()
         self._video_widget.setStyleSheet("background: #0f0f0f; border-radius: 4px;")
         self._video_widget.setMinimumSize(400, 300)
         self._video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._video_widget.setAcceptDrops(False)  # 親フレームでドロップを受け取るため
-        video_frame.add_child_for_drop(self._video_widget)  # イベントフィルターで親に転送
-        video_layout.addWidget(self._video_widget, stretch=1)
+        stacked_layout.addWidget(self._video_widget)
 
-        video_frame.setLayout(video_layout)
+        # ドロップオーバーレイ（上層）
+        self._drop_overlay = DropOverlay()
+        self._drop_overlay.files_dropped.connect(self._on_files_dropped)
+        self._drop_overlay.folder_dropped.connect(self._on_folder_dropped)
+        stacked_layout.addWidget(self._drop_overlay)
+
+        # オーバーレイを最前面に
+        stacked_layout.setCurrentWidget(self._drop_overlay)
+
+        video_outer_layout.addWidget(video_container, stretch=1)
         main_layout.addWidget(video_frame, stretch=4)  # 動画に多くのスペース
 
         # === 波形表示 ===
