@@ -2143,10 +2143,12 @@ class MainWorkspace(QWidget):
 
     def eventFilter(self, obj, event):
         """イベントフィルター: テーブルのEnter/ダブルクリック処理"""
-        # テーブル本体: Enterキーで編集開始
+        # テーブル本体: Enterキーで編集開始、編集中の上下矢印処理
         if obj == self._table:
             if event.type() == QEvent.Type.KeyPress:
-                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                key = event.key()
+
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                     # 編集中の場合はデフォルト処理（編集確定）に任せる
                     if self._table.state() == QAbstractItemView.State.EditingState:
                         return False  # デフォルト処理に委譲
@@ -2159,6 +2161,22 @@ class MainWorkspace(QWidget):
                         # 編集開始後すぐにトリガーを無効に戻す（編集中の状態は維持される）
                         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
                         return True
+
+                # 編集中の上下矢印: カーソル移動（セル移動ではなく）
+                if self._table.state() == QAbstractItemView.State.EditingState:
+                    if key == Qt.Key.Key_Up:
+                        # 上矢印: カーソルを先頭へ
+                        editor = self._table.findChild(QLineEdit)
+                        if editor:
+                            editor.setCursorPosition(0)
+                            return True
+                    elif key == Qt.Key.Key_Down:
+                        # 下矢印: カーソルを末尾へ
+                        editor = self._table.findChild(QLineEdit)
+                        if editor:
+                            editor.setCursorPosition(len(editor.text()))
+                            return True
+
         # ビューポート: ダブルクリックでシーク
         elif obj == self._table.viewport():
             if event.type() == QEvent.Type.MouseButtonDblClick:
