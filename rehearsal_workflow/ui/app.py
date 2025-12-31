@@ -100,7 +100,7 @@ class VideoChapterEditor(QMainWindow):
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.1.20"
+    VERSION = "2.1.21"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()
@@ -213,9 +213,10 @@ class VideoChapterEditor(QMainWindow):
         self._workspace = MainWorkspace(work_dir=self._work_dir)
         self.setCentralWidget(self._workspace)
 
-        # エクスポート進捗シグナル接続
+        # シグナル接続
         self._workspace.export_progress.connect(self._on_export_progress)
         self._workspace.export_finished.connect(self._on_export_finished)
+        self._workspace.work_dir_changed.connect(self._on_work_dir_changed)
 
         # ログパネルにアクセス
         log = self._workspace.get_log_panel()
@@ -376,6 +377,11 @@ class VideoChapterEditor(QMainWindow):
         self._progress_bar.setValue(0)
         self._status_label.setText("Ready")
         self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+
+    def _on_work_dir_changed(self, new_dir):
+        """作業ディレクトリ変更時"""
+        self._work_dir = new_dir
+        self._workdir_label.setText(f"Working Directory: {new_dir}")
 
     def resizeEvent(self, event):
         """リサイズ時にアスペクト比を維持"""

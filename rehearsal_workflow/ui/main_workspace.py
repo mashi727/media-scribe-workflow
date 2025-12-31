@@ -283,6 +283,7 @@ class MainWorkspace(QWidget):
     export_finished = Signal(bool, str)  # (success, message) エクスポート完了
     source_changed = Signal(list)  # List[SourceFile]
     chapter_changed = Signal(list)  # List[Chapter]
+    work_dir_changed = Signal(object)  # Path - 作業ディレクトリ変更
 
     # プラットフォーム別等幅フォント
     MONO_FONTS = {
@@ -2467,6 +2468,7 @@ class MainWorkspace(QWidget):
             video_path = videos[0]
             # 作業ディレクトリをファイルの親フォルダに設定
             self._state.work_dir = video_path.parent
+            self.work_dir_changed.emit(self._state.work_dir)
             self._log_panel.info(f"Working directory: {video_path.parent}", source="Drop")
             # ソースをクリアして新しい動画を設定
             self._state.sources = [SourceFile(path=video_path)]
@@ -2476,6 +2478,7 @@ class MainWorkspace(QWidget):
         elif audios:
             # 作業ディレクトリを最初のファイルの親フォルダに設定
             self._state.work_dir = audios[0].parent
+            self.work_dir_changed.emit(self._state.work_dir)
             self._log_panel.info(f"Working directory: {audios[0].parent}", source="Drop")
             # 音声ファイル: ソースとして設定
             self._state.sources = [SourceFile(path=p) for p in audios]
@@ -2496,6 +2499,7 @@ class MainWorkspace(QWidget):
             return
 
         self._state.work_dir = path
+        self.work_dir_changed.emit(self._state.work_dir)
         self._log_panel.info(f"Working directory changed: {path}", source="Drop")
 
         # フォルダ内のメディアファイルをスキャン
