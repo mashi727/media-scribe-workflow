@@ -2334,11 +2334,17 @@ class MainWorkspace(QWidget):
         # 動画を優先（最初の1つのみ）
         if videos:
             video_path = videos[0]
+            # 作業ディレクトリをファイルの親フォルダに設定
+            self._state.work_dir = video_path.parent
+            self._log_panel.info(f"Working directory: {video_path.parent}", source="Drop")
             # ソースをクリアして新しい動画を設定
             self._state.sources = [SourceFile(path=video_path)]
             self._load_source_media()
             self._log_panel.info(f"Dropped video: {video_path.name}", source="Drop")
         elif audios:
+            # 作業ディレクトリを最初のファイルの親フォルダに設定
+            self._state.work_dir = audios[0].parent
+            self._log_panel.info(f"Working directory: {audios[0].parent}", source="Drop")
             # 音声ファイル: ソースとして設定
             self._state.sources = [SourceFile(path=p) for p in audios]
             self._load_source_media()
