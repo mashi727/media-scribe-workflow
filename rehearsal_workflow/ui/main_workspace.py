@@ -1502,31 +1502,39 @@ class MainWorkspace(QWidget):
 
     # === ダイアログ操作 ===
 
+    def _prepare_for_new_source(self):
+        """新しいソース読み込み前の準備処理
+
+        チャプター、スペクトログラム、UI状態をリセット。
+        Select Source / ドロップ共通処理。
+        """
+        self._update_source_info()
+        self.source_changed.emit(self._state.sources)
+
+        # 埋め込みチャプターフラグをリセット（新しいソースを読み込むので）
+        self._has_embedded_chapters = False
+        self._chapter_title_label.setText("Chapters")
+        self._chapter_title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._table.setRowCount(0)  # チャプターリストをクリア
+        self._current_chapter_row = -1  # ハイライトもリセット
+
+        # スペクトログラム関連をリセット
+        self._spectrogram_generated = False
+        self._waveform_widget.set_spectrogram(None)  # スペクトログラムデータをクリア
+        self._waveform_widget.set_display_mode(WaveformWidget.MODE_WAVEFORM)  # 振幅モードに戻す
+        self._display_mode_combo.setCurrentIndex(0)  # コンボボックスも振幅に
+        self._display_mode_combo.setEnabled(False)  # 波形生成完了まで無効化
+
     def _open_source_dialog(self):
         """ソース選択ダイアログを開く"""
         dialog = SourceSelectionDialog(self, self._state.sources, work_dir=self._state.work_dir)
         if dialog.exec():
             self._state.sources = dialog.get_sources()
-            self._update_source_info()
             self._log_panel.info(
                 f"Sources updated: {len(self._state.sources)} files",
                 source="UI"
             )
-            self.source_changed.emit(self._state.sources)
-
-            # 埋め込みチャプターフラグをリセット（新しいソースを読み込むので）
-            self._has_embedded_chapters = False
-            self._chapter_title_label.setText("Chapters")
-            self._chapter_title_label.setTextFormat(Qt.TextFormat.PlainText)
-            self._table.setRowCount(0)  # チャプターリストをクリア
-            self._current_chapter_row = -1  # ハイライトもリセット
-
-            # スペクトログラム関連をリセット
-            self._spectrogram_generated = False
-            self._waveform_widget.set_spectrogram(None)  # スペクトログラムデータをクリア
-            self._waveform_widget.set_display_mode(WaveformWidget.MODE_WAVEFORM)  # 振幅モードに戻す
-            self._display_mode_combo.setCurrentIndex(0)  # コンボボックスも振幅に
-            self._display_mode_combo.setEnabled(False)  # 波形生成完了まで無効化
+            self._prepare_for_new_source()
 
             # 複数MP3の場合、チャプターを自動生成
             if len(self._state.sources) > 1:
@@ -2339,6 +2347,7 @@ class MainWorkspace(QWidget):
             self._log_panel.info(f"Working directory: {video_path.parent}", source="Drop")
             # ソースをクリアして新しい動画を設定
             self._state.sources = [SourceFile(path=video_path)]
+            self._prepare_for_new_source()
             self._load_source_media()
             self._log_panel.info(f"Dropped video: {video_path.name}", source="Drop")
         elif audios:
@@ -2347,6 +2356,10 @@ class MainWorkspace(QWidget):
             self._log_panel.info(f"Working directory: {audios[0].parent}", source="Drop")
             # 音声ファイル: ソースとして設定
             self._state.sources = [SourceFile(path=p) for p in audios]
+            self._prepare_for_new_source()
+            # 複数MP3の場合、チャプターを自動生成
+            if len(audios) > 1:
+                self._generate_chapters_from_sources()
             self._load_source_media()
             if len(audios) == 1:
                 self._log_panel.info(f"Dropped audio: {audios[0].name}", source="Drop")
@@ -2376,12 +2389,17 @@ class MainWorkspace(QWidget):
             videos = [f for f in media_files if f.suffix.lower() in VIDEO_EXTENSIONS]
             if videos:
                 self._state.sources = [SourceFile(path=videos[0])]
+                self._prepare_for_new_source()
                 self._load_source_media()
                 self._log_panel.info(f"Found {len(videos)} video(s), loaded: {videos[0].name}", source="Drop")
             else:
                 # 音声のみの場合は全て読み込み
                 audios = [f for f in media_files if f.suffix.lower() in AUDIO_EXTENSIONS]
                 self._state.sources = [SourceFile(path=p) for p in audios]
+                self._prepare_for_new_source()
+                # 複数MP3の場合、チャプターを自動生成
+                if len(audios) > 1:
+                    self._generate_chapters_from_sources()
                 self._load_source_media()
                 self._log_panel.info(f"Found {len(audios)} audio file(s)", source="Drop")
         else:
