@@ -1910,6 +1910,12 @@ class MainWorkspace(QWidget):
             self._log_panel.debug("No embedded chapters found", source="Chapter")
             return
 
+        # 先頭チャプター（0:00:00.000）がなければ追加
+        if chapters[0].time_ms != 0:
+            first_chapter = ChapterInfo(time_ms=0, title=chapters[0].title)
+            chapters.insert(0, first_chapter)
+            self._log_panel.info("Added chapter at 0:00:00.000", source="Chapter")
+
         # テーブルをクリアして新しいチャプターを追加（シグナルをブロック）
         self._table.blockSignals(True)
         self._table.setRowCount(0)
