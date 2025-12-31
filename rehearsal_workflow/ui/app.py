@@ -12,7 +12,7 @@ from typing import Optional
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QMenuBar, QMenu, QStatusBar, QLabel, QProgressBar
+    QMenuBar, QMenu, QStatusBar, QLabel, QProgressBar, QMessageBox
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QFontDatabase
@@ -100,7 +100,7 @@ class VideoChapterEditor(QMainWindow):
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.1.17"
+    VERSION = "2.1.18"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()
@@ -198,6 +198,12 @@ class VideoChapterEditor(QMainWindow):
         # Help メニュー
         help_menu = menubar.addMenu("Help")
 
+        shortcuts_action = QAction("Keyboard Shortcuts", self)
+        shortcuts_action.triggered.connect(self._show_shortcuts)
+        help_menu.addAction(shortcuts_action)
+
+        help_menu.addSeparator()
+
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -275,11 +281,66 @@ class VideoChapterEditor(QMainWindow):
         log._level_combo.setCurrentIndex(level)
         log.info(f"Log level set to {log.LEVEL_NAMES[level]}", source="App")
 
+    def _show_shortcuts(self):
+        """キーボードショートカット表示"""
+        shortcuts = """
+<h3>キーボードショートカット</h3>
+
+<table>
+<tr><td><b>Space</b></td><td>再生 / 一時停止</td></tr>
+<tr><td><b>←/→</b></td><td>5秒戻る / 5秒進む</td></tr>
+<tr><td><b>Shift+←/→</b></td><td>1秒戻る / 1秒進む</td></tr>
+<tr><td><b>↑/↓</b></td><td>前/次のチャプターへジャンプ</td></tr>
+</table>
+
+<h4>チャプター編集</h4>
+<table>
+<tr><td><b>Enter</b></td><td>セルを編集モードに</td></tr>
+<tr><td><b>↑ (編集中)</b></td><td>カーソルを行頭へ</td></tr>
+<tr><td><b>↓ (編集中)</b></td><td>カーソルを行末へ</td></tr>
+<tr><td><b>Cmd+V / Ctrl+V</b></td><td>チャプターをペースト</td></tr>
+</table>
+
+<h4>ドラッグ＆ドロップ</h4>
+<table>
+<tr><td><b>動画ファイル</b></td><td>読み込み（複数の場合は最初のみ）</td></tr>
+<tr><td><b>音声ファイル</b></td><td>読み込み（複数はチャプター自動生成）</td></tr>
+<tr><td><b>フォルダ</b></td><td>作業ディレクトリとして設定</td></tr>
+</table>
+"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Keyboard Shortcuts")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(shortcuts)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.exec()
+
     def _show_about(self):
         """About表示"""
-        log = self._workspace.get_log_panel()
-        log.info(f"Video Chapter Editor {self.VERSION}", source="App")
-        log.info("Next generation UI with single workspace + dialogs", source="App")
+        about_text = f"""
+<h2>Video Chapter Editor</h2>
+<p><b>Version {self.VERSION}</b></p>
+<p>動画チャプター編集・書出ツール</p>
+
+<h4>機能</h4>
+<ul>
+<li>動画プレビュー + 波形表示</li>
+<li>チャプター編集（追加/削除/編集）</li>
+<li>除外チャプター（カット区間）</li>
+<li>YouTubeチャプター コピー＆ペースト</li>
+<li>ffmpegによる動画書き出し</li>
+<li>GPUハードウェアエンコード対応</li>
+</ul>
+
+<p>© 2024 mashi727</p>
+<p><a href="https://github.com/mashi727/rehearsal-workflow">GitHub</a></p>
+"""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("About Video Chapter Editor")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(about_text)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.exec()
 
     # === エクスポート進捗ハンドラ ===
 
