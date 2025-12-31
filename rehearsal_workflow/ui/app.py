@@ -100,7 +100,7 @@ class VideoChapterEditor(QMainWindow):
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.1.12"
+    VERSION = "2.1.13"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()

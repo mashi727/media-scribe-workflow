@@ -2032,6 +2032,13 @@ class MainWorkspace(QWidget):
             self._log_panel.warning("No valid chapters found in clipboard", source="Paste")
             return
 
+        # 先頭チャプター（0:00:00.000）がなければ追加
+        if chapters[0].time_ms != 0:
+            # 最初のチャプターのタイトルを使用して先頭に追加
+            first_chapter = ChapterInfo(time_ms=0, title=chapters[0].title)
+            chapters.insert(0, first_chapter)
+            self._log_panel.info("Added chapter at 0:00:00.000", source="Paste")
+
         # 既存のチャプターをクリア
         self._table.setRowCount(0)
 
