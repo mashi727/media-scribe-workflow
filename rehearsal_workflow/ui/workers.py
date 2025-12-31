@@ -1298,3 +1298,215 @@ class SpectrogramWorker(QObject):
             self.error.emit("ffmpeg not found")
         except Exception as e:
             self.error.emit(f"Error: {str(e)}")
+
+
+def sanitize_filename(name: str) -> str:
+    """ファイル名に使用できない文字を除去・置換"""
+    # ファイル名に使えない文字を置換
+    invalid_chars = r'[<>:"/\\|?*]'
+    sanitized = re.sub(invalid_chars, '_', name)
+    # 連続するアンダースコアを単一に
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # 先頭・末尾の空白とアンダースコアを除去
+    sanitized = sanitized.strip(' _')
+    # 空になった場合はデフォルト名
+    return sanitized if sanitized else "chapter"
+
+
+class SplitExportWorker(QThread):
+    """チャプターごとに分割エクスポートするワーカー"""
+
+    progress_update = Signal(str)  # 進捗メッセージ
+    progress_percent = Signal(int, str)  # 進捗率(0-100), ステータス
+    chapter_completed = Signal(int, str)  # チャプター番号, 出力ファイルパス
+    export_completed = Signal(int)  # 成功したファイル数
+    error_occurred = Signal(str)
+
+    EXCLUDE_PREFIX = "--"
+    FONT_SIZE_RATIO = 0.054  # 動画高さに対するフォントサイズ比率
+
+    def __init__(self, input_file: str, output_dir: str, output_base: str,
+                 chapters: List[ChapterInfo],
+                 total_duration_ms: int = 0,
+                 encoder_id: str = "libx264",
+                 bitrate_kbps: int = 4000,
+                 crf: int = 23,
+                 colorspace: Optional[ColorspaceInfo] = None,
+                 is_audio_only: bool = False,
+                 overlay_title: bool = False,
+                 parent=None):
+        super().__init__(parent)
+        self.input_file = input_file
+        self.output_dir = output_dir
+        self.output_base = output_base
+        self.chapters = chapters or []
+        self.total_duration_ms = total_duration_ms
+        self.encoder_id = encoder_id
+        self.bitrate_kbps = bitrate_kbps
+        self.crf = crf
+        self.colorspace = colorspace or ColorspaceInfo()
+        self.is_audio_only = is_audio_only
+        self.overlay_title = overlay_title
+        self._cancelled = False
+        self._process: Optional[subprocess.Popen] = None
+        self._temp_files: List[str] = []
+        self.font_path = detect_system_font()
+
+    def cancel(self):
+        """エクスポートをキャンセル"""
+        self._cancelled = True
+        if self._process and self._process.poll() is None:
+            self._process.kill()
+
+    def _get_chapter_segments(self) -> List[Tuple[int, int, int, str]]:
+        """
+        有効なチャプターセグメントのリストを返す
+        Returns: List of (index, start_ms, end_ms, title)
+        """
+        segments = []
+        valid_index = 0
+
+        for i, chapter in enumerate(self.chapters):
+            # 除外チャプターはスキップ
+            if chapter.title.startswith(self.EXCLUDE_PREFIX):
+                continue
+
+            start_ms = chapter.time_ms
+            # 次のチャプターの開始時間、または動画終了時間
+            if i + 1 < len(self.chapters):
+                end_ms = self.chapters[i + 1].time_ms
+            else:
+                end_ms = self.total_duration_ms
+
+            # 有効な長さがある場合のみ追加
+            if end_ms > start_ms:
+                segments.append((valid_index, start_ms, end_ms, chapter.title))
+                valid_index += 1
+
+        return segments
+
+    def _create_title_textfile(self, title: str) -> str:
+        """タイトル用の一時テキストファイルを作成"""
+        fd, tmpfile = tempfile.mkstemp(suffix='.txt', prefix='chapter_title_')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(title)
+        self._temp_files.append(tmpfile)
+        return tmpfile
+
+    def _create_title_overlay_filter(self, title: str, duration_sec: float) -> str:
+        """チャプタータイトル焼き込み用のフィルターを生成"""
+        textfile = self._create_title_textfile(title)
+        # セグメント全体にタイトル表示
+        drawtext = (
+            f"drawtext=fontfile='{self.font_path}'"
+            f":textfile='{textfile}'"
+            f":fontsize=h*{self.FONT_SIZE_RATIO}"
+            f":fontcolor=white"
+            f":borderw=2:bordercolor=black"
+            f":box=1:boxcolor=black@0.6:boxborderw=15"
+            f":x=(w-text_w)/2:y=h*0.325-th/2"
+            f":enable='between(t,0,{duration_sec:.3f})'"
+        )
+        # パディング追加（偶数サイズ保証）
+        return f"{drawtext},pad=ceil(iw/2)*2:ceil(ih/2)*2"
+
+    def _cleanup_temp_files(self):
+        """一時ファイルを削除"""
+        for f in self._temp_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception:
+                pass
+        self._temp_files.clear()
+
+    def run(self):
+        """チャプターごとに分割エクスポート"""
+        try:
+            segments = self._get_chapter_segments()
+            if not segments:
+                self.error_occurred.emit("No valid chapters to export")
+                return
+
+            total_segments = len(segments)
+            completed = 0
+
+            for idx, start_ms, end_ms, title in segments:
+                if self._cancelled:
+                    self.progress_update.emit("Export cancelled")
+                    return
+
+                # ファイル名生成
+                safe_title = sanitize_filename(title)
+                ext = ".mp3" if self.is_audio_only else ".mp4"
+                output_name = f"{self.output_base}_{idx + 1:02d}_{safe_title}{ext}"
+                output_path = str(Path(self.output_dir) / output_name)
+
+                self.progress_update.emit(f"Exporting {idx + 1}/{total_segments}: {title}")
+
+                # ffmpegコマンド構築
+                start_sec = start_ms / 1000.0
+                duration_sec = (end_ms - start_ms) / 1000.0
+
+                cmd = [get_ffmpeg_path(), '-y']
+                # 入力オプション（-ss を入力前に置くとシーク高速化）
+                cmd += ['-ss', str(start_sec)]
+                cmd += ['-i', self.input_file]
+                cmd += ['-t', str(duration_sec)]
+
+                if self.is_audio_only:
+                    # 音声のみ: コピーまたは再エンコード
+                    cmd += ['-vn', '-c:a', 'copy']
+                else:
+                    # 動画: エンコード設定
+                    encoder_args = get_encoder_args(
+                        self.encoder_id,
+                        self.bitrate_kbps,
+                        self.crf
+                    )
+                    colorspace_args = self.colorspace.get_ffmpeg_args()
+
+                    # タイトル焼き込み
+                    if self.overlay_title:
+                        vf = self._create_title_overlay_filter(title, duration_sec)
+                        cmd += ['-vf', vf]
+
+                    cmd += encoder_args + colorspace_args
+                    cmd += ['-c:a', 'aac', '-b:a', '192k']
+
+                cmd.append(output_path)
+
+                self.progress_update.emit(f"ffmpeg: {' '.join(cmd)}")
+
+                # ffmpeg実行
+                popen_kwargs = get_popen_kwargs()
+                self._process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    **popen_kwargs
+                )
+                _, stderr = self._process.communicate()
+
+                if self._cancelled:
+                    return
+
+                if self._process.returncode != 0:
+                    self.progress_update.emit(f"Error in chapter {idx + 1}: {stderr[:200]}")
+                    # エラーでも続行
+                else:
+                    completed += 1
+                    self.chapter_completed.emit(idx + 1, output_path)
+
+                # 進捗更新
+                percent = int((idx + 1) / total_segments * 100)
+                self.progress_percent.emit(percent, f"Chapter {idx + 1}/{total_segments}")
+
+            self.export_completed.emit(completed)
+
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+        finally:
+            # 一時ファイルをクリーンアップ
+            self._cleanup_temp_files()

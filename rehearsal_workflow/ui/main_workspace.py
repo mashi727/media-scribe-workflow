@@ -44,7 +44,7 @@ from .models import (
     detect_video_bitrate,
     detect_available_encoders,
 )
-from .workers import WaveformWorker, SpectrogramWorker, ExportWorker
+from .workers import WaveformWorker, SpectrogramWorker, ExportWorker, SplitExportWorker
 from .widgets import WaveformWidget, CenteredFileDialog
 from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, extract_chapters_with_ffmpeg, get_subprocess_kwargs
 
@@ -1071,6 +1071,15 @@ class MainWorkspace(QWidget):
         self._cut_excluded_cb.setStyleSheet(checkbox_style)
         self._cut_excluded_cb.setToolTip("--で始まるチャプターの区間を切り取り")
         bottom_layout.addWidget(self._cut_excluded_cb)
+
+        bottom_layout.addSpacing(20)
+
+        # チャプターごとに分割
+        self._split_chapters_cb = QCheckBox("Split Chapters")
+        self._split_chapters_cb.setChecked(False)
+        self._split_chapters_cb.setStyleSheet(checkbox_style)
+        self._split_chapters_cb.setToolTip("チャプターごとに個別ファイルとして出力")
+        bottom_layout.addWidget(self._split_chapters_cb)
 
         bottom_layout.addStretch()
 
@@ -2268,6 +2277,7 @@ class MainWorkspace(QWidget):
         bitrate, crf = self._quality_combo.currentData()
         embed_chapters = self._embed_chapters_cb.isChecked()
         cut_excluded = self._cut_excluded_cb.isChecked()
+        split_chapters = self._split_chapters_cb.isChecked()
 
         # 「元と同じ」が選択されている場合の処理
         if bitrate == 0:
@@ -2305,6 +2315,37 @@ class MainWorkspace(QWidget):
         else:
             duration_ms = self._media_player.duration() if self._media_player else 0
 
+        # Split Chapters モードの場合
+        if split_chapters:
+            self._log_panel.info(f"Split export started: {len(chapters)} chapters", source="Export")
+
+            # SplitExportWorkerを作成して開始
+            self._export_worker = SplitExportWorker(
+                input_file=str(input_path),
+                output_dir=str(self._state.work_dir),
+                output_base=Path(output_base).name,
+                chapters=chapters,
+                total_duration_ms=duration_ms,
+                encoder_id=encoder_id,
+                bitrate_kbps=bitrate,
+                crf=crf,
+                colorspace=colorspace,
+                is_audio_only=input_path.suffix.lower() in AUDIO_EXTENSIONS,
+                overlay_title=embed_chapters  # Embed Chapがチェックされている場合、タイトル焼き込み
+            )
+
+            # シグナル接続
+            self._export_worker.progress_update.connect(self._on_export_progress)
+            self._export_worker.progress_percent.connect(self._on_export_percent)
+            self._export_worker.chapter_completed.connect(self._on_chapter_completed)
+            self._export_worker.export_completed.connect(self._on_split_export_completed)
+            self._export_worker.error_occurred.connect(self._on_export_error)
+
+            self._export_worker.start()
+            self.export_requested.emit()
+            return
+
+        # 通常エクスポート（単一ファイル）
         # カバー画像を取得
         cover_image_path = None
         if hasattr(self, '_cover_image') and self._cover_image is not None:
@@ -2396,6 +2437,18 @@ class MainWorkspace(QWidget):
         self._reset_export_btn()
         # ステータスバー用シグナル
         self.export_finished.emit(False, error[:50])
+
+    def _on_chapter_completed(self, chapter_num: int, output_path: str):
+        """チャプター分割エクスポート: 個別チャプター完了"""
+        self._log_panel.info(f"Chapter {chapter_num} exported: {Path(output_path).name}", source="Export")
+
+    def _on_split_export_completed(self, count: int):
+        """チャプター分割エクスポート完了"""
+        self._log_panel.info(f"Split export completed: {count} files", source="Export")
+        # ボタンをExportモードに戻す
+        self._reset_export_btn()
+        # ステータスバー用シグナル
+        self.export_finished.emit(True, f"{count} chapters exported")
 
     def _on_export_btn_clicked(self):
         """Export/Cancelボタンクリック"""
