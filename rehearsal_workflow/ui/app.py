@@ -100,7 +100,7 @@ class VideoChapterEditor(QMainWindow):
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.1.9"
+    VERSION = "2.1.10"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()
@@ -134,6 +134,7 @@ class VideoChapterEditor(QMainWindow):
                 background: #1a1a1a;
                 color: #f0f0f0;
                 border-bottom: 1px solid #3a3a3a;
+                font-size: 16px;
             }
             QMenuBar::item:selected {
                 background: #3b82f6;
@@ -142,6 +143,7 @@ class VideoChapterEditor(QMainWindow):
                 background: #1a1a1a;
                 color: #f0f0f0;
                 border: 1px solid #3a3a3a;
+                font-size: 16px;
             }
             QMenu::item:selected {
                 background: #3b82f6;
