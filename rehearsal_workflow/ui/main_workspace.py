@@ -70,6 +70,31 @@ class DropVideoFrame(QFrame):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._drag_active = False
+        self._child_widgets = []  # イベントフィルター対象の子ウィジェット
+
+    def add_child_for_drop(self, widget):
+        """子ウィジェットをドロップイベント転送対象として追加"""
+        widget.setAcceptDrops(False)
+        widget.installEventFilter(self)
+        self._child_widgets.append(widget)
+
+    def eventFilter(self, obj, event):
+        """子ウィジェットのドラッグイベントを親で処理"""
+        if obj in self._child_widgets:
+            if event.type() == QEvent.Type.DragEnter:
+                self.dragEnterEvent(event)
+                return True
+            elif event.type() == QEvent.Type.DragMove:
+                # DragMoveも受け入れる（一部プラットフォームで必要）
+                event.acceptProposedAction()
+                return True
+            elif event.type() == QEvent.Type.DragLeave:
+                self.dragLeaveEvent(event)
+                return True
+            elif event.type() == QEvent.Type.Drop:
+                self.dropEvent(event)
+                return True
+        return super().eventFilter(obj, event)
 
     def dragEnterEvent(self, event):
         """ドラッグ進入時: 有効なファイル/フォルダか確認"""
@@ -636,6 +661,8 @@ class MainWorkspace(QWidget):
         self._video_widget.setStyleSheet("background: #0f0f0f; border-radius: 4px;")
         self._video_widget.setMinimumSize(400, 300)
         self._video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._video_widget.setAcceptDrops(False)  # 親フレームでドロップを受け取るため
+        video_frame.add_child_for_drop(self._video_widget)  # イベントフィルターで親に転送
         video_layout.addWidget(self._video_widget, stretch=1)
 
         video_frame.setLayout(video_layout)
