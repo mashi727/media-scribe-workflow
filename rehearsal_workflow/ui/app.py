@@ -100,7 +100,7 @@ class VideoChapterEditor(QMainWindow):
     単一画面 + ダイアログパターンのメインウィンドウ。
     """
 
-    VERSION = "2.1.11"
+    VERSION = "2.1.12"
 
     def __init__(self, work_dir: Optional[Path] = None):
         super().__init__()
@@ -267,9 +267,7 @@ class VideoChapterEditor(QMainWindow):
 
     def _paste_chapters(self):
         """チャプターをペースト"""
-        # TODO: 実装
-        log = self._workspace.get_log_panel()
-        log.info("Paste chapters triggered", source="App")
+        self._workspace.paste_chapters()
 
     def _set_log_level(self, level: LogLevel):
         """ログレベル設定"""

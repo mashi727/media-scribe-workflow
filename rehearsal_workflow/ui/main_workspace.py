@@ -27,6 +27,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
 import platform
+import re
 import subprocess
 import tempfile
 import os
@@ -1983,6 +1984,75 @@ class MainWorkspace(QWidget):
         clipboard.setText(youtube_text)
 
         self._log_panel.info(f"Copied {len(chapters)} chapters to clipboard (YouTube format)", source="UI")
+
+    def paste_chapters(self):
+        """クリップボードからチャプターをペースト
+
+        サポートする形式:
+        - YouTube形式: HH:MM:SS タイトル or MM:SS タイトル
+        - 詳細形式: HH:MM:SS.mmm タイトル or MM:SS.mmm タイトル
+
+        YouTube形式（ミリ秒なし）の場合は.000でパディング。
+        """
+        clipboard = QApplication.clipboard()
+        text = clipboard.text()
+
+        if not text or not text.strip():
+            self._log_panel.warning("Clipboard is empty", source="Paste")
+            return
+
+        lines = text.strip().split('\n')
+        chapters = []
+
+        # 時間パターン: HH:MM:SS.mmm, HH:MM:SS, MM:SS.mmm, MM:SS
+        time_pattern = re.compile(r'^(\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?|\d{1,2}:\d{2}(?:\.\d{1,3})?)\s+(.+)$')
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            match = time_pattern.match(line)
+            if match:
+                time_str = match.group(1)
+                title = match.group(2).strip()
+
+                # ChapterInfo.from_time_str は自動でミリ秒なしを0パディング
+                try:
+                    chapter = ChapterInfo.from_time_str(time_str, title)
+                    chapters.append(chapter)
+                except Exception as e:
+                    self._log_panel.warning(f"Parse error: {line} ({e})", source="Paste")
+            else:
+                # マッチしない行はスキップ（空行やコメント行）
+                if line and not line.startswith('#'):
+                    self._log_panel.debug(f"Skipped: {line}", source="Paste")
+
+        if not chapters:
+            self._log_panel.warning("No valid chapters found in clipboard", source="Paste")
+            return
+
+        # 既存のチャプターをクリア
+        self._table.setRowCount(0)
+
+        # 新しいチャプターを追加
+        default_color = QColor("#f0f0f0")
+        for ch in chapters:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+
+            time_item = QTableWidgetItem(ch.time_str)
+            title_item = QTableWidgetItem(ch.title)
+
+            time_item.setData(Qt.ItemDataRole.UserRole, default_color)
+            title_item.setData(Qt.ItemDataRole.UserRole, default_color)
+
+            self._table.setItem(row, 0, time_item)
+            self._table.setItem(row, 1, title_item)
+
+        self._state.chapters = chapters
+        self._update_waveform_chapters()
+        self._log_panel.info(f"Pasted {len(chapters)} chapters from clipboard", source="Paste")
 
     # === エクスポート ===
 
