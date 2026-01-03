@@ -6,6 +6,18 @@
 
 ---
 
+## PAD図
+
+### スキーマ構造図
+
+![スキーマ構造](../pad/transcription-schema.png)
+
+### 処理フロー図
+
+![処理フロー](../pad/transcription-workflow.png)
+
+---
+
 ## 1. 設計の背景と目的
 
 ### 1.1 既存の課題
