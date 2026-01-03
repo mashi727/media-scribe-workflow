@@ -467,18 +467,88 @@ flowchart LR
     S7 --> M_WHISPER
 ```
 
+### YAMLライフサイクル
+
+YAMLファイルは**プロジェクトマニフェスト**として、全ワークフローの開始前に作成する。
+
+```mermaid
+flowchart TB
+    subgraph YAML_STRUCTURE["YAMLの構成"]
+        direction TB
+        STATIC["静的セクション<br>（ユーザーが最初に記入）"]
+        DYNAMIC["動的セクション<br>（処理中に自動更新）"]
+    end
+
+    subgraph STATIC_DETAIL["静的セクション"]
+        direction LR
+        S1["schema_version, profile"]
+        S2["source.type, path, working_dir"]
+        S3["fields（title, date...）"]
+        S4["transcription.method"]
+        S5["output（basename, format）"]
+    end
+
+    subgraph DYNAMIC_DETAIL["動的セクション"]
+        direction LR
+        D1["source.state"]
+        D2["source.files"]
+    end
+
+    STATIC --> STATIC_DETAIL
+    DYNAMIC --> DYNAMIC_DETAIL
+```
+
+### ワークフロー順序（YAML中心）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as ユーザー
+    participant YAML as YAML
+    participant PRE as 前処理
+    participant TRANS as 文字起こし
+
+    rect rgb(240, 248, 255)
+        Note over U,YAML: Phase 0: YAML作成
+        U->>YAML: プロファイル選択
+        U->>YAML: ソース情報入力
+        U->>YAML: フィールド入力
+        Note over YAML: 静的セクション確定
+    end
+
+    rect rgb(255, 250, 240)
+        Note over PRE,YAML: 前処理フェーズ
+        PRE->>YAML: source.path 読込
+        PRE->>PRE: トリミング・チャプター
+        PRE->>YAML: source.state 更新
+    end
+
+    rect rgb(240, 255, 240)
+        Note over TRANS,YAML: 文字起こしフェーズ
+        TRANS->>YAML: source.state 確認
+        TRANS->>TRANS: SRT取得（必要に応じて）
+        TRANS->>TRANS: AI処理 → 出力
+    end
+```
+
 ### ワークフロー境界の定義
 
 ```mermaid
 flowchart TB
+    subgraph PHASE0["Phase 0: YAML作成（ユーザー）"]
+        YAML_CREATE["YAML作成"]
+        YAML_EDIT["静的セクション入力"]
+        YAML_CREATE --> YAML_EDIT
+    end
+
     subgraph BOUNDARY["ワークフロー境界"]
         direction LR
         PRE["前処理<br>Video Chapter Editor"]
-        INTERFACE[/"SRTファイル<br>（作業ディレクトリに存在）"/]
+        INTERFACE[/"YAML<br>source.state で状態共有"/]
         TRANS["文字起こし<br>Transcription Workflow"]
 
-        PRE -->|"責務: SRT存在を保証"| INTERFACE
-        INTERFACE -->|"責務: SRT読込→AI→出力"| TRANS
+        PRE -->|"責務: YAML読込→編集→state更新"| INTERFACE
+        INTERFACE -->|"責務: state確認→SRT取得→AI→出力"| TRANS
     end
 
     subgraph STANDALONE["単独起動時"]
@@ -486,6 +556,8 @@ flowchart TB
         SRT_ACQ["SRT取得も実行可能"]
         TRANS2 --> SRT_ACQ
     end
+
+    PHASE0 --> BOUNDARY
 ```
 
 ---
@@ -597,10 +669,23 @@ graph LR
 
 ```mermaid
 flowchart LR
+    subgraph P0["Phase 0"]
+        direction TB
+        P0A["YAML作成"]
+        P0B["ユーザー入力"]
+    end
+
+    subgraph PRE["前処理"]
+        direction TB
+        PRE_A["トリミング"]
+        PRE_B["チャプター"]
+        PRE_C["state更新"]
+    end
+
     subgraph P1["Phase 1"]
         direction TB
         P1A["初期化"]
-        P1B["設定読込/新規作成"]
+        P1B["YAML読込"]
     end
 
     subgraph P2["Phase 2"]
@@ -611,35 +696,41 @@ flowchart LR
 
     subgraph P3["Phase 3"]
         direction TB
-        P3A["ソース処理"]
-        P3B["SRT取得/読込"]
+        P3A["入力状態判定"]
+        P3B["7状態のいずれか"]
     end
 
     subgraph P4["Phase 4"]
         direction TB
-        P4A["文字起こし"]
-        P4B["SRT統合"]
+        P4A["ソース処理"]
+        P4B["url_only→ytdl"]
     end
 
     subgraph P5["Phase 5"]
         direction TB
-        P5A["プロンプト生成"]
-        P5B["変数展開"]
+        P5A["文字起こし"]
+        P5B["SRT統合"]
     end
 
     subgraph P6["Phase 6"]
         direction TB
-        P6A["AI処理"]
-        P6B["(外部)"]
+        P6A["プロンプト生成"]
+        P6B["変数展開"]
     end
 
     subgraph P7["Phase 7"]
         direction TB
-        P7A["出力生成"]
-        P7B["PDF/MD/DOCX"]
+        P7A["AI処理"]
+        P7B["(外部)"]
     end
 
-    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
+    subgraph P8["Phase 8"]
+        direction TB
+        P8A["出力生成"]
+        P8B["PDF/MD/DOCX"]
+    end
+
+    P0 --> PRE --> P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
 ```
 
 ### プロファイル検索順序

@@ -95,29 +95,74 @@ YouTube経由の場合、`yt-dlp` で動画と字幕が同時に取得される�
 | ローカル動画をWhisper | 状態4（WP字幕あり） |
 | ローカル動画のみ編集 | 状態2 or 7（字幕なし） |
 
-### 3.5 ワークフロー境界の定義
+### 3.5 YAMLライフサイクル
+
+YAMLファイルは**プロジェクトマニフェスト**として、全ワークフローの開始前に作成する。
+これはTeX/LaTeXで`.tex`ファイルを先に書いてからコンパイルするのと同じ思想である。
+
+```
+YAMLの構成:
+├── 静的セクション（ユーザーが最初に記入）
+│   ├── schema_version, profile
+│   ├── source.type, source.path, source.working_dir
+│   ├── fields（title, date, key_person, organization）
+│   ├── transcription.method, transcription.language
+│   └── output（basename, format）
+│
+└── 動的セクション（処理中に自動更新）
+    ├── source.state（video, youtube_srt, whisper_srt, manual_srt）
+    └── source.files（実ファイルパス）
+```
+
+**ワークフロー順序:**
+
+```
+1. YAML作成（ユーザー）
+   ├── プロファイル選択
+   ├── ソース情報入力（path, working_dir）
+   └── フィールド入力（title, date...）
+       ↓
+2. 前処理（Video Chapter Editor）
+   ├── YAML読込 → source.path 取得
+   ├── トリミング・チャプター作成
+   └── YAML更新 → source.state 反映
+       ↓
+3. 文字起こし（Transcription Workflow）
+   ├── YAML読込 → 現在の state 確認
+   ├── SRT取得（必要に応じて）
+   └── AI処理 → 出力生成
+```
+
+### 3.6 ワークフロー境界の定義
 
 ```
 前処理の責務:
-  「SRTファイルが作業ディレクトリに存在する状態」を保証
+  - YAML の source.path から動画を読み込む
+  - トリミング・チャプター編集を行う
+  - 結果を source.state に反映する
+  - 「SRTファイルが作業ディレクトリに存在する状態」を保証
 
 文字起こしの責務:
-  SRTファイルを読み込み、AI処理→出力
-  （ただし単独起動時はSRT取得も可能）
+  - YAML の source.state を確認する
+  - 必要に応じてSRT取得を行う
+  - AI処理→出力生成
 ```
 
 ソースタイプ別の責務分担：
 
 ```
 [YouTube経由]
-前処理: ytdl → 動画 + SRT（両方取得）
+YAML作成: source.type = "youtube", source.path = URL
+前処理: ytdl → 動画 + SRT（両方取得）→ state 更新
 文字起こし: method = "skip"（SRT既存）
 
 [ローカル動画]
-前処理: video-trim → チャプター → 最終動画
+YAML作成: source.type = "local", source.path = ファイルパス
+前処理: video-trim → チャプター → 最終動画 → state 更新
 文字起こし: method = "whisper" or "manual"（SRT取得）
 
 [YouTubeから直接（前処理スキップ）]
+YAML作成: source.type = "youtube", transcription.method = "youtube"
 文字起こし単独起動: method = "youtube"（ytdl実行）
 ```
 
@@ -288,30 +333,61 @@ glossary: "music_terms.yaml"
 
 ## 7. 処理フロー
 
-### Phase 1: 初期化
-- 設定ファイル読込 or 新規作成
+### 全体フロー
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Phase 0: YAML作成（ユーザー）                                │
+│   プロファイル選択 → フィールド入力 → YAML保存              │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 前処理ワークフロー（Video Chapter Editor）                   │
+│   YAML読込 → トリミング → チャプター → state更新            │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 文字起こしワークフロー（Transcription Workflow）             │
+│   YAML読込 → SRT取得 → AI処理 → 出力生成                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Phase 0: YAML作成（ユーザー）
+- プロファイル選択（orchestral_rehearsal, horn_lesson, meeting_report...）
+- ソース情報入力（type, path, working_dir）
+- フィールド入力（title, date, key_person...）
+- transcription.method 選択（auto, youtube, whisper, manual, skip）
+- output設定（basename, format）
+
+### Phase 1: 初期化（文字起こしワークフロー）
+- 設定ファイル（YAML）読込
+- source.state の現在値を確認
 
 ### Phase 2: プロファイル解決
 - 検索順序: 作業ディレクトリ → ユーザー設定 → ビルトイン
 - リソース読込: template, macros, prompt, glossary
 
-### Phase 3: ソース処理
-- local: ファイル存在確認、SRT読込
-- youtube: yt-srt実行、SRT保存
+### Phase 3: 入力状態判定
+- source.state に基づき7状態のいずれかを判定
+- 必要な処理を決定
 
-### Phase 4: 文字起こし
+### Phase 4: ソース処理
+- url_only: ytdl実行 → 動画+SRT取得
+- ready: ファイル存在確認
+
+### Phase 5: 文字起こし（SRT取得）
 - youtube / whisper / manual / skip
 - 複数SRTの統合（相補的マージ）
 
-### Phase 5: プロンプト生成
+### Phase 6: プロンプト生成
 - テンプレート変数展開
 - 参加者情報展開（hierarchical/flat）
 - 字幕データ埋め込み
 
-### Phase 6: AI処理（外部）
+### Phase 7: AI処理（外部）
 - Claude / ChatGPT / ローカルLLM
 
-### Phase 7: 出力生成
+### Phase 8: 出力生成
 - markdown / latex / docx
 - 追加ファイル（チャプター等）
 - 状態保存

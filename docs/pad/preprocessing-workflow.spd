@@ -4,13 +4,26 @@
 :terminal 開始
 
 :comment ============================================
+:comment Phase 0: YAML読込
+:comment ============================================
+
+:call YAML読込
+	transcription_workflow.yaml 読込
+	source.path 取得
+	source.working_dir 取得
+	現在の source.state 確認
+
+:comment ============================================
 :comment Phase 1: 動画読込
 :comment ============================================
 
 :call 動画ファイル読込
-	ファイルパス取得
+	source.path からファイル取得
 	メディア情報解析（duration, codec, resolution）
 	サムネイル生成
+
+:call YAML更新
+	source.state.video = "ready"
 
 :comment ============================================
 :comment Phase 2: 不要部分削除（video-trim）
@@ -79,23 +92,38 @@
 	最終動画出力
 
 :comment ============================================
-:comment Phase 5: 字幕取得準備
+:comment Phase 5: 字幕取得準備・実行
 :comment ============================================
 
 :switch 字幕取得方式
 :case YouTube経由
-	:call YouTube アップロード情報入力
-		動画URL 入力待ち
-		yt-srt 実行準備
+	:call YouTube 字幕取得
+		動画URL 入力（または YAML から）
+		yt-srt 実行
+		SRT ファイル保存
+	:call YAML更新
+		source.state.youtube_srt = "exists"
+		source.files.youtube_srt = ファイルパス
 :case ローカル Whisper
-	:call Whisper 設定確認
+	:call Whisper 文字起こし
 		whisper-remote 接続確認
 		言語設定
+		Whisper 実行
+		SRT ファイル保存
+	:call YAML更新
+		source.state.whisper_srt = "exists"
+		source.files.whisper_srt = ファイルパス
 :case 手動
-	既存SRTファイル指定
+	:call 手動SRT指定
+		既存SRTファイル選択
+	:call YAML更新
+		source.state.manual_srt = "exists"
+		source.files.manual_srt = ファイルパス
+:case スキップ
+	字幕取得は文字起こしフェーズで実行
 
-:call 作業ディレクトリ設定
-	出力先確認
-	ファイル命名規則設定
+:call YAML保存
+	source.state 最終状態を保存
+	updated_at 更新
 
-:terminal 終了（次フェーズへ）
+:terminal 終了（文字起こしフェーズへ）
