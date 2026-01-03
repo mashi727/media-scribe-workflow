@@ -378,6 +378,118 @@ stateDiagram-v2
 
 ---
 
+## 入力状態の場合分けと遷移
+
+### 入力状態の列挙
+
+| # | 動画 | YT字幕 | Whisper | 手動SRT | 必要な処理 |
+|---|------|--------|---------|---------|-----------|
+| 1 | YouTube URL | - | - | - | ytdl（動画+YT字幕）、任意でWhisper |
+| 2 | ローカル動画のみ | - | - | - | Whisperまたは手動SRT |
+| 3 | ローカル動画 | ✓ | - | - | 任意でWhisper追加 |
+| 4 | ローカル動画 | - | ✓ | - | 処理可能 |
+| 5 | ローカル動画 | ✓ | ✓ | - | 処理可能（統合） |
+| 6 | ローカル動画 | - | - | ✓ | 処理可能 |
+| 7 | YouTube DL済み | - | - | - | yt-srt or Whisper |
+
+### 入力状態遷移図
+
+```mermaid
+stateDiagram-v2
+    [*] --> 入力確認
+
+    state 入力確認 {
+        [*] --> 状態判定
+        状態判定 --> S1_YouTube_URL: URLのみ
+        状態判定 --> S2_ローカル動画のみ: 動画ファイルのみ
+        状態判定 --> S3_動画_YT字幕あり: 動画 + *_yt.srt
+        状態判定 --> S4_動画_WP字幕あり: 動画 + *_wp.srt
+        状態判定 --> S5_動画_両方あり: 動画 + 両SRT
+        状態判定 --> S6_動画_手動SRTあり: 動画 + 手動.srt
+        状態判定 --> S7_YouTube_DL済み_字幕なし: DL済み動画のみ
+    }
+
+    S1_YouTube_URL --> S3_動画_YT字幕あり: ytdl実行
+    S2_ローカル動画のみ --> S4_動画_WP字幕あり: Whisper実行
+    S2_ローカル動画のみ --> S6_動画_手動SRTあり: 手動指定
+    S3_動画_YT字幕あり --> S5_動画_両方あり: Whisper追加
+    S7_YouTube_DL済み_字幕なし --> S3_動画_YT字幕あり: yt-srt実行
+    S7_YouTube_DL済み_字幕なし --> S4_動画_WP字幕あり: Whisper実行
+
+    S3_動画_YT字幕あり --> 処理可能
+    S4_動画_WP字幕あり --> 処理可能
+    S5_動画_両方あり --> 処理可能
+    S6_動画_手動SRTあり --> 処理可能
+
+    処理可能 --> [*]
+```
+
+### 前処理出力と文字起こし入力の対応
+
+```mermaid
+flowchart LR
+    subgraph PREPROCESS["前処理の出力"]
+        direction TB
+        P1["YouTube経由で完了"]
+        P2["ローカル動画をWhisper"]
+        P3["ローカル動画のみ編集"]
+    end
+
+    subgraph STATE["入力状態"]
+        direction TB
+        S3["状態3: 動画+YT字幕"]
+        S5["状態5: 動画+両方"]
+        S4["状態4: 動画+WP字幕"]
+        S2["状態2: 動画のみ"]
+        S7["状態7: DL済み字幕なし"]
+    end
+
+    subgraph TRANSCRIPTION["文字起こしmethod"]
+        direction TB
+        M_SKIP["skip"]
+        M_WHISPER["whisper"]
+        M_YOUTUBE["youtube"]
+        M_MANUAL["manual"]
+    end
+
+    P1 --> S3
+    P1 --> S5
+    P2 --> S4
+    P3 --> S2
+    P3 --> S7
+
+    S3 --> M_SKIP
+    S4 --> M_SKIP
+    S5 --> M_SKIP
+    S2 --> M_WHISPER
+    S2 --> M_MANUAL
+    S7 --> M_YOUTUBE
+    S7 --> M_WHISPER
+```
+
+### ワークフロー境界の定義
+
+```mermaid
+flowchart TB
+    subgraph BOUNDARY["ワークフロー境界"]
+        direction LR
+        PRE["前処理<br>Video Chapter Editor"]
+        INTERFACE[/"SRTファイル<br>（作業ディレクトリに存在）"/]
+        TRANS["文字起こし<br>Transcription Workflow"]
+
+        PRE -->|"責務: SRT存在を保証"| INTERFACE
+        INTERFACE -->|"責務: SRT読込→AI→出力"| TRANS
+    end
+
+    subgraph STANDALONE["単独起動時"]
+        TRANS2["文字起こし単独起動"]
+        SRT_ACQ["SRT取得も実行可能"]
+        TRANS2 --> SRT_ACQ
+    end
+```
+
+---
+
 ## 文字起こしワークフロー スキーマ構造
 
 ### ファイル参照関係

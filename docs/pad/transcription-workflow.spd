@@ -40,37 +40,73 @@
 	glossary 読み込み（存在時）
 
 :comment ============================================
-:comment Phase 3: ソース処理
+:comment Phase 3: 入力状態判定
 :comment ============================================
 
-:switch source.type
-:case local
-	:if source.files 指定あり
-		:loop 各ファイル
-			ファイル存在確認
-			SRT 読み込み
-	:else
-		作業ディレクトリからSRT検出
-:case youtube
-	:call YouTube字幕取得
-		yt-srt 実行
+:call 入力状態判定
+	:switch 判定結果
+	:case S1: YouTube URL のみ
+		source.state.video = "url_only"
+		source.state.youtube_srt = "missing"
+	:case S2: ローカル動画のみ
+		source.state.video = "ready"
+		source.state.youtube_srt = "not_applicable"
+		source.state.whisper_srt = "missing"
+	:case S3: 動画 + YT字幕あり
+		source.state.video = "ready"
+		source.state.youtube_srt = "exists"
+	:case S4: 動画 + Whisper字幕あり
+		source.state.video = "ready"
+		source.state.whisper_srt = "exists"
+	:case S5: 動画 + 両方あり
+		source.state.youtube_srt = "exists"
+		source.state.whisper_srt = "exists"
+	:case S6: 動画 + 手動SRTあり
+		source.state.manual_srt = "exists"
+	:case S7: YouTube DL済み 字幕なし
+		source.state.video = "ready"
+		source.state.youtube_srt = "missing"
+
+:comment ============================================
+:comment Phase 4: ソース処理（状態に応じた処理）
+:comment ============================================
+
+:switch source.state.video
+:case url_only
+	:call YouTube動画+字幕取得
+		ytdl 実行（動画+字幕同時）
+		動画保存
 		SRT 保存
+		source.state 更新
+:case ready
+	動画ファイル確認済み
 
 :comment ============================================
-:comment Phase 4: 文字起こし
+:comment Phase 5: 文字起こし（SRT取得）
 :comment ============================================
 
 :switch transcription.method
+:case auto
+	:call 自動判定
+		:if source.state.*_srt いずれか exists
+			method = "skip"
+		:else
+			auto_priority に従い決定
 :case youtube
-	YouTube自動字幕を使用
+	:if source.state.youtube_srt = "missing"
+		:call yt-srt 実行
+			YouTube字幕取得
+			SRT 保存
 :case whisper
-	:call Whisper文字起こし
-		whisper-remote 実行
-		SRT 生成
+	:if source.state.whisper_srt = "missing"
+		:call Whisper文字起こし
+			whisper-remote 実行
+			SRT 生成
 :case manual
-	既存SRTを使用
+	:if source.state.manual_srt = "missing"
+		ユーザーにSRTファイル指定を要求
 :case skip
-	前処理済みSRTを使用
+	既存SRTを使用（処理なし）
 
 :if 複数SRTあり
 	:call SRT統合
@@ -78,7 +114,7 @@
 		相補的マージ
 
 :comment ============================================
-:comment Phase 5: プロンプト生成
+:comment Phase 6: プロンプト生成
 :comment ============================================
 
 :call テンプレート変数展開
@@ -103,14 +139,14 @@
 	クリップボードコピー（オプション）
 
 :comment ============================================
-:comment Phase 6: AI処理（外部）
+:comment Phase 7: AI処理（外部）
 :comment ============================================
 
 :comment ユーザーがWeb AIまたはCLIで実行
 Claude / ChatGPT / ローカルLLM
 
 :comment ============================================
-:comment Phase 7: 出力生成
+:comment Phase 8: 出力生成
 :comment ============================================
 
 :switch output.format

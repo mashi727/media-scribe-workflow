@@ -9,18 +9,26 @@
 :comment ============================================
 
 :call 設定ファイル
-	schema_version: "1.0"
+	schema_version: "1.1"
 	profile: "プロファイル名"
 
 	:call source
 		type: local | youtube
 		path: "ファイルパス or URL"
 		working_dir: "作業ディレクトリ"
-		files: {youtube_srt, whisper_srt}
+
+		:call state（入力状態）
+			video: ready | url_only | missing
+			youtube_srt: exists | missing | not_applicable
+			whisper_srt: exists | missing
+			manual_srt: exists | missing
+
+		files: {youtube_srt, whisper_srt, manual_srt}
 
 	:call transcription
-		method: youtube | whisper | manual | skip
+		method: auto | youtube | whisper | manual | skip
 		language: "ja"
+		auto_priority: ["whisper", "youtube"]
 
 	:call fields
 		（プロファイル定義に従う値）

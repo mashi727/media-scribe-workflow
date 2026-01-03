@@ -61,27 +61,101 @@
 
 ---
 
-## 3. スキーマ設計
+## 3. 入力状態の場合分け
 
-### 3.1 設定ファイル（transcription_workflow.yaml）
+### 3.1 問題の背景
+
+YouTube経由の場合、`yt-dlp` で動画と字幕が同時に取得される。この自然な処理フローと、前処理/文字起こしワークフローの境界設計を整合させる必要がある。
+
+### 3.2 入力状態の次元
+
+```
+入力の次元:
+1. 動画ソース: YouTube URL | ローカルファイル | 処理済み動画
+2. SRT状態: なし | YouTube字幕あり | Whisper字幕あり | 両方あり | 手動SRTあり
+```
+
+### 3.3 全状態の列挙
+
+| # | 動画 | YT字幕 | Whisper | 手動SRT | 必要な処理 |
+|---|------|--------|---------|---------|-----------|
+| 1 | YouTube URL | - | - | - | ytdl（動画+YT字幕）、任意でWhisper |
+| 2 | ローカル動画のみ | - | - | - | Whisperまたは手動SRT |
+| 3 | ローカル動画 | ✓ | - | - | 任意でWhisper追加 |
+| 4 | ローカル動画 | - | ✓ | - | 処理可能 |
+| 5 | ローカル動画 | ✓ | ✓ | - | 処理可能（統合） |
+| 6 | ローカル動画 | - | - | ✓ | 処理可能 |
+| 7 | YouTube DL済み | - | - | - | yt-srt or Whisper |
+
+### 3.4 前処理との関係
+
+| 前処理の出力状態 | 文字起こしへの引き継ぎ |
+|-----------------|---------------------|
+| YouTube経由で完了 | 状態3 or 5（YT字幕あり） |
+| ローカル動画をWhisper | 状態4（WP字幕あり） |
+| ローカル動画のみ編集 | 状態2 or 7（字幕なし） |
+
+### 3.5 ワークフロー境界の定義
+
+```
+前処理の責務:
+  「SRTファイルが作業ディレクトリに存在する状態」を保証
+
+文字起こしの責務:
+  SRTファイルを読み込み、AI処理→出力
+  （ただし単独起動時はSRT取得も可能）
+```
+
+ソースタイプ別の責務分担：
+
+```
+[YouTube経由]
+前処理: ytdl → 動画 + SRT（両方取得）
+文字起こし: method = "skip"（SRT既存）
+
+[ローカル動画]
+前処理: video-trim → チャプター → 最終動画
+文字起こし: method = "whisper" or "manual"（SRT取得）
+
+[YouTubeから直接（前処理スキップ）]
+文字起こし単独起動: method = "youtube"（ytdl実行）
+```
+
+---
+
+## 4. スキーマ設計
+
+### 4.1 設定ファイル（transcription_workflow.yaml）
 
 ユーザーが毎回編集するプロジェクト固有の設定：
 
 ```yaml
-schema_version: "1.0"
+schema_version: "1.1"
 profile: "orchestral_rehearsal"
 
 source:
   type: "local"              # local | youtube
   path: "video.mp4"
   working_dir: "/path/to/project"
+
+  # 入力状態を明示的に記述
+  state:
+    video: "ready"           # ready | url_only | missing
+    youtube_srt: "exists"    # exists | missing | not_applicable
+    whisper_srt: "missing"   # exists | missing
+    manual_srt: "missing"    # exists | missing
+
   files:
-    youtube_srt: "video_yt.srt"
-    whisper_srt: "video_wp.srt"
+    youtube_srt: "video_yt.srt"   # state.youtube_srt = exists の場合
+    whisper_srt: null             # state.whisper_srt = missing の場合
+    manual_srt: null
 
 transcription:
-  method: "whisper"          # youtube | whisper | manual | skip
+  method: "auto"             # auto | youtube | whisper | manual | skip
   language: "ja"
+
+  # method = "auto" の場合の優先順位
+  auto_priority: ["whisper", "youtube"]
 
 fields:
   title: "ブラームス交響曲第1番"
@@ -94,7 +168,7 @@ output:
   format: "latex"            # markdown | latex | docx
 ```
 
-### 3.2 プロファイル（profiles/*.yaml）
+### 4.2 プロファイル（profiles/*.yaml）
 
 マクロ定義。稀に編集：
 
@@ -133,7 +207,7 @@ prompt_template: "orchestral_rehearsal.md"
 glossary: "music_terms.yaml"
 ```
 
-### 3.3 参加者構造の類型
+### 4.3 参加者構造の類型
 
 | パターン | 構造 | 例 |
 |----------|------|-----|
@@ -142,7 +216,7 @@ glossary: "music_terms.yaml"
 
 ---
 
-## 4. ファイル構成
+## 5. ファイル構成
 
 ```
 ~/.config/rehearsal-workflow/          # ユーザー設定（グローバル）
@@ -184,9 +258,9 @@ glossary: "music_terms.yaml"
 
 ---
 
-## 5. 適用対象の分析
+## 6. 適用対象の分析
 
-### 5.1 既存カスタムコマンドの分析
+### 6.1 既存カスタムコマンドの分析
 
 | コマンド | 行数 | 対象 | 特殊処理 |
 |----------|------|------|----------|
@@ -194,7 +268,7 @@ glossary: "music_terms.yaml"
 | `horn_hamaji.md` | 127 | ホルンレッスン | 初心者向け補足 |
 | `srt-meeting-report.md` | 549 | 国際会議 | 発言者識別、footnote、チャプター生成 |
 
-### 5.2 共通要素（templates/luatex_twocolumn.tex として共有）
+### 6.2 共通要素（templates/luatex_twocolumn.tex として共有）
 
 - LuaTeX 2段組設定
 - フォント設定（Libertinus + 原ノ味）
@@ -202,7 +276,7 @@ glossary: "music_terms.yaml"
 - ハイパーリンク色設定
 - 表スタイル（縦線なし、booktabs）
 
-### 5.3 差分要素（プロファイル/プロンプトで差別化）
+### 6.3 差分要素（プロファイル/プロンプトで差別化）
 
 - field_schema（フィールド定義）
 - participants（参加者構造）
@@ -212,7 +286,7 @@ glossary: "music_terms.yaml"
 
 ---
 
-## 6. 処理フロー
+## 7. 処理フロー
 
 ### Phase 1: 初期化
 - 設定ファイル読込 or 新規作成
@@ -244,7 +318,7 @@ glossary: "music_terms.yaml"
 
 ---
 
-## 7. 可視化手法の選択
+## 8. 可視化手法の選択
 
 | 対象 | 手法 | 理由 |
 |------|------|------|
@@ -253,7 +327,7 @@ glossary: "music_terms.yaml"
 
 ---
 
-## 8. 今後の実装タスク
+## 9. 今後の実装タスク
 
 1. [ ] dataclass実装
 2. [ ] 設定ファイル読み書きモジュール作成
@@ -263,7 +337,7 @@ glossary: "music_terms.yaml"
 
 ---
 
-## 9. 参考資料
+## 10. 参考資料
 
 - 既存カスタムコマンド: `~/.claude/commands/`
 - PAD図: `docs/pad/transcription-*.spd`
