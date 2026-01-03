@@ -176,162 +176,176 @@ flowchart LR
 
 ---
 
-## 前処理ワークフロー ユーザー/UI/バックエンド インタラクション図
+## 前処理ワークフロー アクティビティ図（スイムレーン）
 
 Video Chapter Editor における前処理フェーズのアクター間協調。
+処理の詳細はPAD（`docs/pad/preprocessing-workflow.png`）を参照。
 
 ### 全体フロー
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant U as ユーザー
-    participant UI as UI
-    participant BE as バックエンド
-
-    rect rgb(240, 248, 255)
-        Note over U,BE: Phase 1: 動画読込
-        U->>UI: 動画ファイルをドロップ
-        UI->>BE: メディア情報解析要求
-        BE-->>UI: duration, codec, resolution
-        UI-->>U: サムネイル・タイムライン表示
+flowchart TB
+    subgraph USER["👤 ユーザー"]
+        direction TB
+        U1([開始])
+        U2[動画ファイルをドロップ]
+        U3[再生位置をシーク]
+        U4[開始点/終了点を設定]
+        U5[トリミング確定]
+        U6[チャプターマーカー追加]
+        U7[チャプター名入力]
+        U8[チャプター編集完了]
+        U9{複数動画?}
+        U10[結合順序確定]
+        U11{字幕取得方式}
+        U12[YouTube URL入力]
+        U13[SRTファイル指定]
+        U14([次フェーズへ])
     end
 
-    rect rgb(255, 250, 240)
-        Note over U,BE: Phase 2: 不要部分削除（video-trim）
-        loop トリミング操作
-            U->>UI: 再生位置をシーク
-            UI-->>U: プレビュー表示
-            U->>UI: 開始点/終了点を設定
-            UI-->>U: 選択範囲ハイライト
-            U->>UI: 区間を削除/復元
-        end
-        U->>UI: トリミング確定
-        UI->>BE: ffmpeg トリミング実行
-        loop 処理中
-            BE-->>UI: 進捗通知
-            UI-->>U: プログレスバー更新
-        end
-        BE-->>UI: 中間ファイル生成完了
+    subgraph UI_LAYER["🖥️ UI"]
+        direction TB
+        I1[サムネイル・タイムライン表示]
+        I2[プレビュー表示]
+        I3[選択範囲ハイライト]
+        I4[プログレスバー更新]
+        I5[チャプターエディタ表示]
+        I6[マーカー名入力ダイアログ]
+        I7[タイムライン上にマーカー表示]
+        I8[結合順序確認ダイアログ]
+        I9[完了通知]
+        I10[字幕取得方式選択]
+        I11[次フェーズボタン有効化]
     end
 
-    rect rgb(240, 255, 240)
-        Note over U,BE: Phase 3: チャプター作成（movie-viewer連携）
-        UI-->>U: チャプターエディタ表示
-        loop チャプター操作
-            U->>UI: 再生位置をシーク
-            U->>UI: チャプターマーカー追加
-            UI-->>U: マーカー名入力ダイアログ
-            U->>UI: チャプター名入力
-            UI-->>U: タイムライン上にマーカー表示
-        end
-        U->>UI: チャプター編集完了
-        UI->>BE: chapters.txt 保存
-        BE-->>UI: 保存完了
+    subgraph BACKEND["⚙️ バックエンド"]
+        direction TB
+        B1[メディア情報解析]
+        B2[ffmpeg トリミング実行]
+        B3[中間ファイル生成]
+        B4[chapters.txt 保存]
+        B5[動画結合実行]
+        B6[チャプター埋込]
+        B7[最終動画出力]
+        B8[whisper-remote 接続確認]
     end
 
-    rect rgb(255, 240, 245)
-        Note over U,BE: Phase 4: 動画結合・チャプター埋込（video-chapters）
-        alt 複数動画あり
-            UI-->>U: 結合順序確認ダイアログ
-            U->>UI: 順序確定
-            UI->>BE: 動画結合実行
-            BE-->>UI: 結合完了
-        end
-        UI->>BE: チャプター埋込実行
-        BE->>BE: ffmpeg -map_metadata
-        BE-->>UI: 最終動画出力完了
-        UI-->>U: 完了通知・ファイル場所表示
-    end
+    %% Phase 0-1: 動画読込
+    U1 --> U2
+    U2 --> B1
+    B1 --> I1
 
-    rect rgb(245, 245, 255)
-        Note over U,BE: Phase 5: 字幕取得準備
-        UI-->>U: 字幕取得方式選択
-        alt YouTube経由
-            U->>UI: YouTube URL 入力
-            UI-->>U: yt-srt 実行準備完了
-        else ローカル Whisper
-            UI->>BE: whisper-remote 接続確認
-            BE-->>UI: 接続OK
-            UI-->>U: Whisper 準備完了
-        else 手動
-            U->>UI: 既存SRTファイル指定
-        end
-        UI-->>U: 「次フェーズへ進む」ボタン有効化
-    end
+    %% Phase 2: トリミング
+    I1 --> U3
+    U3 --> I2
+    I2 --> U4
+    U4 --> I3
+    I3 --> U5
+    U5 --> B2
+    B2 --> I4
+    I4 --> B3
+
+    %% Phase 3: チャプター
+    B3 --> I5
+    I5 --> U6
+    U6 --> I6
+    I6 --> U7
+    U7 --> I7
+    I7 --> U8
+    U8 --> B4
+
+    %% Phase 4: 結合・埋込
+    B4 --> U9
+    U9 -->|Yes| I8
+    I8 --> U10
+    U10 --> B5
+    B5 --> B6
+    U9 -->|No| B6
+    B6 --> B7
+    B7 --> I9
+
+    %% Phase 5: 字幕準備
+    I9 --> I10
+    I10 --> U11
+    U11 -->|YouTube| U12
+    U11 -->|Whisper| B8
+    U11 -->|手動| U13
+    U12 --> I11
+    B8 --> I11
+    U13 --> I11
+    I11 --> U14
 ```
 
 ### トリミング操作の詳細
 
 ```mermaid
-sequenceDiagram
-    participant U as ユーザー
-    participant UI as UI
-    participant TL as タイムライン
-    participant BE as バックエンド
+flowchart LR
+    subgraph USER["👤 ユーザー"]
+        U1[タイムラインをクリック]
+        U2["[I] 開始点設定"]
+        U3[別位置へシーク]
+        U4["[O] 終了点設定"]
+        U5["[X] 区間削除"]
+        U6[トリミング実行ボタン]
+    end
 
-    U->>TL: タイムラインをクリック/ドラッグ
-    TL-->>UI: 位置変更通知
-    UI->>BE: フレーム取得要求
-    BE-->>UI: サムネイルフレーム
-    UI-->>U: プレビュー表示
+    subgraph UI_LAYER["🖥️ UI/タイムライン"]
+        I1[プレビュー表示]
+        I2[緑マーカー表示]
+        I3[赤マーカー表示]
+        I4[区間ハイライト]
+        I5[グレーアウト表示]
+        I6[タイムライン更新]
+    end
 
-    U->>UI: [I] キー押下（開始点）
-    UI->>TL: 開始マーカー設置
-    TL-->>U: 緑マーカー表示
+    subgraph BACKEND["⚙️ バックエンド"]
+        B1[フレーム取得]
+        B2[ffmpeg 区間抽出・結合]
+    end
 
-    U->>TL: 別位置へシーク
-    U->>UI: [O] キー押下（終了点）
-    UI->>TL: 終了マーカー設置
-    TL-->>U: 赤マーカー表示・区間ハイライト
+    U1 --> B1 --> I1
+    U2 --> I2
+    U3 --> U4 --> I3 --> I4
+    U5 --> I5
+    U6 --> B2 --> I6
 
-    U->>UI: [X] キー押下（区間削除）
-    UI->>TL: 削除区間として記録
-    TL-->>U: グレーアウト表示
-
-    Note over U,BE: 複数区間の削除を繰り返し可能
-
-    U->>UI: 「トリミング実行」ボタン
-    UI->>BE: 削除区間リスト送信
-    BE->>BE: ffmpeg で区間抽出・結合
-    BE-->>UI: 処理完了
-    UI-->>U: 新しい動画でタイムライン更新
+    %% ループを示す注釈
+    I5 -.->|繰り返し| U1
 ```
 
 ### チャプター編集の詳細
 
 ```mermaid
-sequenceDiagram
-    participant U as ユーザー
-    participant UI as UI
-    participant TL as タイムライン
-    participant BE as バックエンド
+flowchart LR
+    subgraph USER["👤 ユーザー"]
+        U1[再生位置をシーク]
+        U2["[M] マーカー追加"]
+        U3[チャプター名入力]
+        U4[マーカーをダブルクリック]
+        U5[名前変更入力]
+        U6[マーカーをドラッグ]
+    end
 
-    U->>TL: 再生位置をシーク
-    TL-->>UI: 現在位置通知
-    UI-->>U: 現在時刻表示
+    subgraph UI_LAYER["🖥️ UI/タイムライン"]
+        I1[現在時刻表示]
+        I2[名前入力ダイアログ]
+        I3[マーカー表示]
+        I4[編集ダイアログ]
+        I5[ラベル更新]
+        I6[マーカー位置更新]
+    end
 
-    U->>UI: [M] キー押下（マーカー追加）
-    UI-->>U: チャプター名入力ダイアログ
-    U->>UI: 「第1楽章」と入力
-    UI->>TL: チャプターマーカー追加
-    TL-->>U: マーカー表示（旗アイコン）
+    subgraph BACKEND["⚙️ バックエンド"]
+        B1[chapters.txt 保存]
+    end
 
-    U->>TL: マーカーをダブルクリック
-    UI-->>U: 編集ダイアログ
-    U->>UI: 名前変更「第1楽章 Allegro」
-    UI->>TL: マーカー更新
-    TL-->>U: ラベル更新表示
-
-    U->>TL: マーカーをドラッグ
-    TL-->>UI: 位置変更通知
-    UI->>TL: マーカー位置更新
-    TL-->>U: 新位置にマーカー表示
-
-    U->>UI: 「保存」ボタン
-    UI->>BE: chapters.txt 形式で保存要求
-    BE-->>UI: 保存完了
-    UI-->>U: 「保存しました」通知
+    U1 --> I1
+    U2 --> I2 --> U3 --> I3
+    U4 --> I4 --> U5 --> I5
+    U6 --> I6
+    I3 --> B1
+    I5 --> B1
+    I6 --> B1
 ```
 
 ### 状態遷移（UI視点）
@@ -757,122 +771,132 @@ flowchart TD
 
 ---
 
-## ユーザー/UI/バックエンド インタラクション図
+## 文字起こしワークフロー アクティビティ図（スイムレーン）
 
-ユーザー、UI、バックエンド間の協調を示す。バックエンド内部の処理詳細はPAD参照。
+ユーザー、UI、バックエンド間の協調を示す。処理の詳細はPAD（`docs/pad/transcription-workflow.png`）を参照。
 
 ### 全体フロー
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant U as ユーザー
-    participant UI as UI
-    participant BE as バックエンド
-
-    rect rgb(240, 248, 255)
-        Note over U,BE: Phase 1: 初期化
-        U->>UI: アプリ起動
-        UI->>BE: 設定ファイル検索
-        alt 既存設定あり
-            BE-->>UI: 設定ファイル一覧
-            UI-->>U: 選択ダイアログ表示
-            U->>UI: ファイル選択
-        else 新規作成
-            UI-->>U: プロファイル選択画面
-            U->>UI: プロファイル選択
-            UI-->>U: 設定フォーム表示
-            U->>UI: 各フィールド入力
-        end
-        UI->>BE: 設定読込/生成
-        BE-->>UI: 設定オブジェクト
+flowchart TB
+    subgraph USER["👤 ユーザー"]
+        direction TB
+        U1([開始])
+        U2{既存設定?}
+        U3[ファイル選択]
+        U4[プロファイル選択]
+        U5[フィールド入力]
+        U6[ファイル指定]
+        U7{文字起こし方式}
+        U8[方式選択]
+        U9[クリップボードコピー]
+        U10[AI実行<br>Claude/ChatGPT]
+        U11[AI出力をペースト]
+        U12{出力形式}
+        U13[ファイルを開く]
+        U14([完了])
     end
 
-    rect rgb(255, 250, 240)
-        Note over U,BE: Phase 2-3: プロファイル解決・ソース処理
-        UI->>BE: プロファイル解決要求
-        BE-->>UI: リソース読込完了
-        UI->>BE: ソースファイル確認
-        alt ファイル不足
-            BE-->>UI: 不足ファイル通知
-            UI-->>U: エラー表示
-            U->>UI: ファイル指定
-        end
-        BE-->>UI: SRT読込完了
+    subgraph UI_LAYER["🖥️ UI"]
+        direction TB
+        I1[選択ダイアログ表示]
+        I2[プロファイル選択画面]
+        I3[設定フォーム表示]
+        I4[エラー表示]
+        I5[文字起こし方式確認]
+        I6[プログレスバー更新]
+        I7[プロンプトプレビュー表示]
+        I8[「AIで実行してください」]
+        I9[出力形式確認]
+        I10[結果表示・ファイル場所通知]
     end
 
-    rect rgb(240, 255, 240)
-        Note over U,BE: Phase 4: 文字起こし
-        UI-->>U: 文字起こし方式確認
-        U->>UI: 方式選択（youtube/whisper/manual/skip）
-        UI->>BE: 文字起こし実行
-        loop 処理中
-            BE-->>UI: 進捗通知
-            UI-->>U: プログレスバー更新
-        end
-        BE-->>UI: SRT生成完了
+    subgraph BACKEND["⚙️ バックエンド"]
+        direction TB
+        B1[設定ファイル検索]
+        B2[YAML読込/生成]
+        B3[プロファイル解決]
+        B4[リソース読込]
+        B5[ソースファイル確認]
+        B6{ファイル不足?}
+        B7[SRT読込]
+        B8[文字起こし実行]
+        B9[SRT生成]
+        B10[プロンプト生成]
+        B11[AI出力保存]
+        B12{LaTeX?}
+        B13[luatex-pdf実行]
+        B14[出力生成]
     end
 
-    rect rgb(255, 240, 245)
-        Note over U,BE: Phase 5: プロンプト生成
-        UI->>BE: プロンプト生成要求
-        BE-->>UI: プロンプト生成完了
-        UI-->>U: プロンプトプレビュー表示
-        U->>UI: クリップボードコピー or ファイル保存
-    end
+    %% Phase 1: 初期化
+    U1 --> B1
+    B1 --> U2
+    U2 -->|Yes| I1 --> U3
+    U2 -->|No| I2 --> U4
+    U3 --> B2
+    U4 --> I3 --> U5 --> B2
 
-    rect rgb(245, 245, 255)
-        Note over U,BE: Phase 6: AI処理（外部）
-        UI-->>U: 「AIでプロンプトを実行してください」
-        Note right of U: Claude / ChatGPT 等で実行
-        U->>UI: AI出力をペースト or ファイル指定
-        UI->>BE: AI出力保存
-    end
+    %% Phase 2-3: プロファイル解決・ソース処理
+    B2 --> B3 --> B4 --> B5 --> B6
+    B6 -->|Yes| I4 --> U6 --> B5
+    B6 -->|No| B7
 
-    rect rgb(255, 255, 240)
-        Note over U,BE: Phase 7: 出力生成
-        UI-->>U: 出力形式確認
-        U->>UI: 形式選択（latex/markdown/docx）
-        UI->>BE: 出力生成要求
-        alt LaTeX選択
-            BE->>BE: luatex-pdf実行
-        end
-        BE-->>UI: 出力完了
-        UI-->>U: 結果表示・ファイル場所通知
-        U->>UI: ファイルを開く
-    end
+    %% Phase 4-5: 文字起こし
+    B7 --> I5 --> U7
+    U7 --> U8 --> B8
+    B8 --> I6 --> B9
+
+    %% Phase 6: プロンプト生成
+    B9 --> B10 --> I7 --> U9
+
+    %% Phase 7: AI処理（外部）
+    U9 --> I8 --> U10 --> U11 --> B11
+
+    %% Phase 8: 出力生成
+    B11 --> I9 --> U12
+    U12 --> B12
+    B12 -->|Yes| B13 --> B14
+    B12 -->|No| B14
+    B14 --> I10 --> U13 --> U14
 ```
 
 ### エラー処理フロー
 
 ```mermaid
-sequenceDiagram
-    participant U as ユーザー
-    participant UI as UI
-    participant BE as バックエンド
-
-    UI->>BE: 処理要求
-
-    alt 正常終了
-        BE-->>UI: 成功レスポンス
-        UI-->>U: 完了通知
-    else バリデーションエラー
-        BE-->>UI: エラー（修正可能）
-        UI-->>U: エラー箇所ハイライト
-        U->>UI: 修正入力
-        UI->>BE: 再処理要求
-    else 外部ツールエラー
-        BE-->>UI: エラー（yt-srt/whisper/luatex失敗）
-        UI-->>U: エラー詳細表示
-        UI-->>U: 代替手段提案
-        U->>UI: 代替手段選択 or 中止
-    else 致命的エラー
-        BE-->>UI: エラー（回復不可）
-        UI-->>U: エラーログ表示
-        UI->>BE: 状態保存（途中経過）
-        BE-->>UI: 保存完了
-        UI-->>U: 「再開可能」通知
+flowchart TB
+    subgraph USER["👤 ユーザー"]
+        U1[修正入力]
+        U2[代替手段選択]
+        U3[中止]
     end
+
+    subgraph UI_LAYER["🖥️ UI"]
+        I1[完了通知]
+        I2[エラー箇所ハイライト]
+        I3[エラー詳細表示]
+        I4[代替手段提案]
+        I5[エラーログ表示]
+        I6[「再開可能」通知]
+    end
+
+    subgraph BACKEND["⚙️ バックエンド"]
+        B1[処理要求]
+        B2{結果}
+        B3[成功レスポンス]
+        B4[バリデーションエラー]
+        B5[外部ツールエラー]
+        B6[致命的エラー]
+        B7[再処理]
+        B8[状態保存]
+    end
+
+    B1 --> B2
+    B2 -->|正常| B3 --> I1
+    B2 -->|バリデーション| B4 --> I2 --> U1 --> B7 --> B1
+    B2 -->|外部ツール| B5 --> I3 --> I4 --> U2 --> B1
+    I4 --> U3
+    B2 -->|致命的| B6 --> I5 --> B8 --> I6
 ```
 
 ### 状態遷移（UI視点）
