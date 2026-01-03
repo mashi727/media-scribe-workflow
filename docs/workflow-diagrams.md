@@ -185,6 +185,12 @@ Video Chapter Editor における前処理フェーズのアクター間協調�
 
 ```mermaid
 flowchart TB
+    subgraph YAML["📄 YAML（プロジェクトマニフェスト）"]
+        direction LR
+        Y1[("静的セクション<br>profile, source.path<br>fields, output")]
+        Y2[("動的セクション<br>source.state<br>source.files")]
+    end
+
     subgraph USER["👤 ユーザー"]
         direction TB
         U1([開始])
@@ -228,12 +234,16 @@ flowchart TB
         B6[チャプター埋込]
         B7[最終動画出力]
         B8[whisper-remote 接続確認]
+        B9[state更新]
     end
 
-    %% Phase 0-1: 動画読込
-    U1 --> U2
-    U2 --> B1
+    %% Phase 0: YAML読込
+    U1 --> Y1
+    Y1 -->|source.path読込| B1
+
+    %% Phase 1: 動画読込
     B1 --> I1
+    B1 -->|video: ready| Y2
 
     %% Phase 2: トリミング
     I1 --> U3
@@ -264,15 +274,17 @@ flowchart TB
     B6 --> B7
     B7 --> I9
 
-    %% Phase 5: 字幕準備
+    %% Phase 5: 字幕準備・state更新
     I9 --> I10
     I10 --> U11
     U11 -->|YouTube| U12
     U11 -->|Whisper| B8
     U11 -->|手動| U13
-    U12 --> I11
-    B8 --> I11
-    U13 --> I11
+    U12 --> B9
+    B8 --> B9
+    U13 --> B9
+    B9 -->|youtube_srt/whisper_srt/manual_srt| Y2
+    Y2 --> I11
     I11 --> U14
 ```
 
@@ -779,6 +791,12 @@ flowchart TD
 
 ```mermaid
 flowchart TB
+    subgraph YAML["📄 YAML（プロジェクトマニフェスト）"]
+        direction LR
+        Y1[("静的セクション<br>profile, fields<br>transcription.method<br>output")]
+        Y2[("動的セクション<br>source.state<br>source.files")]
+    end
+
     subgraph USER["👤 ユーザー"]
         direction TB
         U1([開始])
@@ -829,16 +847,22 @@ flowchart TB
         B14[出力生成]
     end
 
-    %% Phase 1: 初期化
+    %% Phase 1: 初期化・YAML読込
     U1 --> B1
     B1 --> U2
     U2 -->|Yes| I1 --> U3
     U2 -->|No| I2 --> U4
-    U3 --> B2
-    U4 --> I3 --> U5 --> B2
+    U3 --> Y1
+    U4 --> I3 --> U5
+    U5 -->|静的セクション保存| Y1
+    Y1 --> B2
 
     %% Phase 2-3: プロファイル解決・ソース処理
-    B2 --> B3 --> B4 --> B5 --> B6
+    B2 -->|profile読込| B3
+    B3 --> B4
+    Y2 -->|source.state確認| B5
+    B4 --> B5
+    B5 --> B6
     B6 -->|Yes| I4 --> U6 --> B5
     B6 -->|No| B7
 
@@ -846,9 +870,12 @@ flowchart TB
     B7 --> I5 --> U7
     U7 --> U8 --> B8
     B8 --> I6 --> B9
+    B9 -->|SRT状態更新| Y2
 
     %% Phase 6: プロンプト生成
-    B9 --> B10 --> I7 --> U9
+    B9 --> B10
+    Y1 -->|fields展開| B10
+    B10 --> I7 --> U9
 
     %% Phase 7: AI処理（外部）
     U9 --> I8 --> U10 --> U11 --> B11
