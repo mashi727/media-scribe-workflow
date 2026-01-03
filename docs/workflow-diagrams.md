@@ -176,6 +176,208 @@ flowchart LR
 
 ---
 
+## 前処理ワークフロー ユーザー/UI/バックエンド インタラクション図
+
+Video Chapter Editor における前処理フェーズのアクター間協調。
+
+### 全体フロー
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as ユーザー
+    participant UI as UI
+    participant BE as バックエンド
+
+    rect rgb(240, 248, 255)
+        Note over U,BE: Phase 1: 動画読込
+        U->>UI: 動画ファイルをドロップ
+        UI->>BE: メディア情報解析要求
+        BE-->>UI: duration, codec, resolution
+        UI-->>U: サムネイル・タイムライン表示
+    end
+
+    rect rgb(255, 250, 240)
+        Note over U,BE: Phase 2: 不要部分削除（video-trim）
+        loop トリミング操作
+            U->>UI: 再生位置をシーク
+            UI-->>U: プレビュー表示
+            U->>UI: 開始点/終了点を設定
+            UI-->>U: 選択範囲ハイライト
+            U->>UI: 区間を削除/復元
+        end
+        U->>UI: トリミング確定
+        UI->>BE: ffmpeg トリミング実行
+        loop 処理中
+            BE-->>UI: 進捗通知
+            UI-->>U: プログレスバー更新
+        end
+        BE-->>UI: 中間ファイル生成完了
+    end
+
+    rect rgb(240, 255, 240)
+        Note over U,BE: Phase 3: チャプター作成（movie-viewer連携）
+        UI-->>U: チャプターエディタ表示
+        loop チャプター操作
+            U->>UI: 再生位置をシーク
+            U->>UI: チャプターマーカー追加
+            UI-->>U: マーカー名入力ダイアログ
+            U->>UI: チャプター名入力
+            UI-->>U: タイムライン上にマーカー表示
+        end
+        U->>UI: チャプター編集完了
+        UI->>BE: chapters.txt 保存
+        BE-->>UI: 保存完了
+    end
+
+    rect rgb(255, 240, 245)
+        Note over U,BE: Phase 4: 動画結合・チャプター埋込（video-chapters）
+        alt 複数動画あり
+            UI-->>U: 結合順序確認ダイアログ
+            U->>UI: 順序確定
+            UI->>BE: 動画結合実行
+            BE-->>UI: 結合完了
+        end
+        UI->>BE: チャプター埋込実行
+        BE->>BE: ffmpeg -map_metadata
+        BE-->>UI: 最終動画出力完了
+        UI-->>U: 完了通知・ファイル場所表示
+    end
+
+    rect rgb(245, 245, 255)
+        Note over U,BE: Phase 5: 字幕取得準備
+        UI-->>U: 字幕取得方式選択
+        alt YouTube経由
+            U->>UI: YouTube URL 入力
+            UI-->>U: yt-srt 実行準備完了
+        else ローカル Whisper
+            UI->>BE: whisper-remote 接続確認
+            BE-->>UI: 接続OK
+            UI-->>U: Whisper 準備完了
+        else 手動
+            U->>UI: 既存SRTファイル指定
+        end
+        UI-->>U: 「次フェーズへ進む」ボタン有効化
+    end
+```
+
+### トリミング操作の詳細
+
+```mermaid
+sequenceDiagram
+    participant U as ユーザー
+    participant UI as UI
+    participant TL as タイムライン
+    participant BE as バックエンド
+
+    U->>TL: タイムラインをクリック/ドラッグ
+    TL-->>UI: 位置変更通知
+    UI->>BE: フレーム取得要求
+    BE-->>UI: サムネイルフレーム
+    UI-->>U: プレビュー表示
+
+    U->>UI: [I] キー押下（開始点）
+    UI->>TL: 開始マーカー設置
+    TL-->>U: 緑マーカー表示
+
+    U->>TL: 別位置へシーク
+    U->>UI: [O] キー押下（終了点）
+    UI->>TL: 終了マーカー設置
+    TL-->>U: 赤マーカー表示・区間ハイライト
+
+    U->>UI: [X] キー押下（区間削除）
+    UI->>TL: 削除区間として記録
+    TL-->>U: グレーアウト表示
+
+    Note over U,BE: 複数区間の削除を繰り返し可能
+
+    U->>UI: 「トリミング実行」ボタン
+    UI->>BE: 削除区間リスト送信
+    BE->>BE: ffmpeg で区間抽出・結合
+    BE-->>UI: 処理完了
+    UI-->>U: 新しい動画でタイムライン更新
+```
+
+### チャプター編集の詳細
+
+```mermaid
+sequenceDiagram
+    participant U as ユーザー
+    participant UI as UI
+    participant TL as タイムライン
+    participant BE as バックエンド
+
+    U->>TL: 再生位置をシーク
+    TL-->>UI: 現在位置通知
+    UI-->>U: 現在時刻表示
+
+    U->>UI: [M] キー押下（マーカー追加）
+    UI-->>U: チャプター名入力ダイアログ
+    U->>UI: 「第1楽章」と入力
+    UI->>TL: チャプターマーカー追加
+    TL-->>U: マーカー表示（旗アイコン）
+
+    U->>TL: マーカーをダブルクリック
+    UI-->>U: 編集ダイアログ
+    U->>UI: 名前変更「第1楽章 Allegro」
+    UI->>TL: マーカー更新
+    TL-->>U: ラベル更新表示
+
+    U->>TL: マーカーをドラッグ
+    TL-->>UI: 位置変更通知
+    UI->>TL: マーカー位置更新
+    TL-->>U: 新位置にマーカー表示
+
+    U->>UI: 「保存」ボタン
+    UI->>BE: chapters.txt 形式で保存要求
+    BE-->>UI: 保存完了
+    UI-->>U: 「保存しました」通知
+```
+
+### 状態遷移（UI視点）
+
+```mermaid
+stateDiagram-v2
+    [*] --> 待機中
+
+    待機中 --> 動画読込中: ファイルドロップ
+    動画読込中 --> トリミングモード: 読込完了
+
+    トリミングモード --> トリミングモード: 区間操作
+    トリミングモード --> トリミング処理中: 実行確定
+    トリミング処理中 --> チャプターモード: 処理完了
+    トリミングモード --> チャプターモード: スキップ
+
+    チャプターモード --> チャプターモード: マーカー操作
+    チャプターモード --> 結合処理中: チャプター確定
+
+    結合処理中 --> 字幕準備: 出力完了
+
+    字幕準備 --> YouTube入力: YouTube選択
+    字幕準備 --> Whisper待機: Whisper選択
+    字幕準備 --> SRT指定: 手動選択
+
+    YouTube入力 --> 次フェーズ準備: URL入力完了
+    Whisper待機 --> 次フェーズ準備: 接続確認完了
+    SRT指定 --> 次フェーズ準備: ファイル指定完了
+
+    次フェーズ準備 --> [*]: 次フェーズへ
+
+    トリミング処理中 --> エラー: 処理失敗
+    結合処理中 --> エラー: 処理失敗
+    エラー --> トリミングモード: リトライ
+```
+
+---
+
+## 前処理ワークフロー PAD図
+
+### 処理フロー
+
+![前処理ワークフロー](pad/preprocessing-workflow.png)
+
+---
+
 ## 文字起こしワークフロー スキーマ構造
 
 ### ファイル参照関係
