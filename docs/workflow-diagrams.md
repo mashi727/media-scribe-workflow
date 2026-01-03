@@ -173,3 +173,179 @@ flowchart LR
 | video-replace-audio | 音声差し替え | 拡張 |
 | whisper-remote | 高精度文字起こし | 拡張 |
 | luatex-docker-remote | PDF生成 | 拡張 |
+
+---
+
+## 文字起こしワークフロー スキーマ構造
+
+### ファイル参照関係
+
+```mermaid
+graph TD
+    subgraph WD["作業ディレクトリ"]
+        YAML["transcription_workflow.yaml<br>(設定ファイル)"]
+        SRT1["*_yt.srt"]
+        SRT2["*_wp.srt"]
+        OUTPUT["output/*.tex"]
+    end
+
+    subgraph CONFIG["~/.config/rehearsal-workflow/"]
+        subgraph PROFILES["profiles/"]
+            P1["orchestral_rehearsal.yaml"]
+            P2["horn_lesson.yaml"]
+            P3["meeting_report.yaml"]
+        end
+
+        subgraph PROMPTS["prompts/"]
+            PR1["orchestral_rehearsal.md"]
+            PR2["horn_lesson.md"]
+            PR3["meeting_report.md"]
+        end
+
+        subgraph TEMPLATES["templates/"]
+            T1["luatex_twocolumn.tex"]
+        end
+
+        subgraph MACROS["macros/"]
+            M1["common.tex"]
+            M2["meeting_speakers.tex"]
+        end
+
+        subgraph GLOSSARIES["glossaries/"]
+            G1["music_terms.yaml"]
+            G2["horn_techniques.yaml"]
+            G3["defense_acronyms.yaml"]
+        end
+    end
+
+    YAML -->|"profile:"| PROFILES
+    P1 -->|"prompt_template:"| PR1
+    P2 -->|"prompt_template:"| PR2
+    P3 -->|"prompt_template:"| PR3
+    P1 -->|"base_template:"| T1
+    P2 -->|"base_template:"| T1
+    P3 -->|"base_template:"| T1
+    P1 -->|"macros:"| M1
+    P3 -->|"macros:"| M2
+    P1 -->|"glossary:"| G1
+    P2 -->|"glossary:"| G2
+    P3 -->|"glossary:"| G3
+
+    YAML -->|"source.files:"| SRT1
+    YAML -->|"source.files:"| SRT2
+    YAML -->|"output:"| OUTPUT
+```
+
+### スキーマ階層（TeX/LaTeXアナロジー）
+
+```mermaid
+graph TB
+    subgraph ANALOGY["設計思想: TeX/LaTeX アナロジー"]
+        direction LR
+        TEX[".tex ファイル<br>(内容)"] --> CLS[".cls / .sty<br>(構造定義)"]
+        CLS --> MACRO["マクロ展開<br>(処理)"]
+    end
+
+    subgraph SYSTEM["本システム"]
+        direction LR
+        YAML2["設定ファイル<br>(値)"] --> PROFILE["プロファイル<br>(型定義)"]
+        PROFILE --> PROMPT["プロンプト生成<br>(処理)"]
+    end
+
+    ANALOGY -.->|"対応"| SYSTEM
+```
+
+### 参加者構造の類型
+
+```mermaid
+graph LR
+    subgraph HIER["hierarchical (階層型)"]
+        direction TB
+        I1["講師/指揮者"]
+        S1["生徒/奏者"]
+        I1 -->|"指導"| S1
+    end
+
+    subgraph FLAT["flat (フラット型)"]
+        direction TB
+        P1["参加者A"]
+        P2["参加者B"]
+        P3["参加者C"]
+        P1 <-->|"対等"| P2
+        P2 <-->|"対等"| P3
+    end
+
+    HIER --- EXAMPLES1["レッスン, 講義, リハーサル"]
+    FLAT --- EXAMPLES2["会議, 座談会"]
+```
+
+### 処理フェーズ
+
+```mermaid
+flowchart LR
+    subgraph P1["Phase 1"]
+        direction TB
+        P1A["初期化"]
+        P1B["設定読込/新規作成"]
+    end
+
+    subgraph P2["Phase 2"]
+        direction TB
+        P2A["プロファイル解決"]
+        P2B["リソース読込"]
+    end
+
+    subgraph P3["Phase 3"]
+        direction TB
+        P3A["ソース処理"]
+        P3B["SRT取得/読込"]
+    end
+
+    subgraph P4["Phase 4"]
+        direction TB
+        P4A["文字起こし"]
+        P4B["SRT統合"]
+    end
+
+    subgraph P5["Phase 5"]
+        direction TB
+        P5A["プロンプト生成"]
+        P5B["変数展開"]
+    end
+
+    subgraph P6["Phase 6"]
+        direction TB
+        P6A["AI処理"]
+        P6B["(外部)"]
+    end
+
+    subgraph P7["Phase 7"]
+        direction TB
+        P7A["出力生成"]
+        P7B["PDF/MD/DOCX"]
+    end
+
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
+```
+
+### プロファイル検索順序
+
+```mermaid
+flowchart TD
+    START["profile: 'xxx' を解決"]
+
+    CHECK1{"作業ディレクトリ内<br>./profiles/xxx.yaml"}
+    CHECK2{"ユーザー設定<br>~/.config/.../profiles/xxx.yaml"}
+    CHECK3{"ビルトイン<br>パッケージ内蔵"}
+
+    FOUND["プロファイル読込"]
+    ERROR["エラー: 見つからない"]
+
+    START --> CHECK1
+    CHECK1 -->|"存在"| FOUND
+    CHECK1 -->|"なし"| CHECK2
+    CHECK2 -->|"存在"| FOUND
+    CHECK2 -->|"なし"| CHECK3
+    CHECK3 -->|"存在"| FOUND
+    CHECK3 -->|"なし"| ERROR
+```

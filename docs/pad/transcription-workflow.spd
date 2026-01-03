@@ -1,0 +1,142 @@
+# transcription-workflow.spd
+# 文字起こしワークフロー 処理フロー
+
+:terminal 開始
+
+:comment ============================================
+:comment Phase 1: 初期化
+:comment ============================================
+
+:switch 起動方法
+:case 設定ファイル指定
+	:call 設定ファイル読み込み
+		YAML パース
+		バリデーション
+:case 新規作成
+	:call プロファイル選択UI
+		プロファイル一覧表示
+		ユーザー選択
+	:call 設定ファイル生成
+		field_schema からフォーム生成
+		デフォルト値設定
+
+:comment ============================================
+:comment Phase 2: プロファイル解決
+:comment ============================================
+
+:call プロファイル読み込み
+	:switch 検索順序
+	:case 作業ディレクトリ内
+		./profiles/{name}.yaml
+	:case ユーザー設定
+		~/.config/rehearsal-workflow/profiles/{name}.yaml
+	:case ビルトイン
+		パッケージ内蔵
+
+:call リソース読み込み
+	base_template 読み込み
+	macros 読み込み
+	prompt_template 読み込み
+	glossary 読み込み（存在時）
+
+:comment ============================================
+:comment Phase 3: ソース処理
+:comment ============================================
+
+:switch source.type
+:case local
+	:if source.files 指定あり
+		:loop 各ファイル
+			ファイル存在確認
+			SRT 読み込み
+	:else
+		作業ディレクトリからSRT検出
+:case youtube
+	:call YouTube字幕取得
+		yt-srt 実行
+		SRT 保存
+
+:comment ============================================
+:comment Phase 4: 文字起こし
+:comment ============================================
+
+:switch transcription.method
+:case youtube
+	YouTube自動字幕を使用
+:case whisper
+	:call Whisper文字起こし
+		whisper-remote 実行
+		SRT 生成
+:case manual
+	既存SRTを使用
+:case skip
+	前処理済みSRTを使用
+
+:if 複数SRTあり
+	:call SRT統合
+		タイムスタンプ照合
+		相補的マージ
+
+:comment ============================================
+:comment Phase 5: プロンプト生成
+:comment ============================================
+
+:call テンプレート変数展開
+	:loop field_schema
+		{{label}} → プロファイル定義
+		{{value}} → 設定ファイル値
+
+:call 参加者情報展開
+	:switch participants.type
+	:case hierarchical
+		講師/生徒 構造展開
+	:case flat
+		参加者リスト展開
+
+:call 字幕データ埋め込み
+	{{transcript}} → SRT内容
+	{{youtube_srt}} → YouTube字幕
+	{{whisper_srt}} → Whisper字幕
+
+:call プロンプト出力
+	prompt_for_ai.md 生成
+	クリップボードコピー（オプション）
+
+:comment ============================================
+:comment Phase 6: AI処理（外部）
+:comment ============================================
+
+:comment ユーザーがWeb AIまたはCLIで実行
+Claude / ChatGPT / ローカルLLM
+
+:comment ============================================
+:comment Phase 7: 出力生成
+:comment ============================================
+
+:switch output.format
+:case markdown
+	Markdown 出力
+:case latex
+	:call LaTeX生成
+		base_template 適用
+		macros 展開
+		コンテンツ埋め込み
+	:call コンパイル
+		luatex-pdf 実行
+		PDF 生成
+:case docx
+	:call Word生成
+		pandoc 変換
+
+:if output.additional_files
+	:loop 追加出力
+		:switch type
+		:case chapters
+			チャプターファイル生成
+
+:call 状態保存
+	status.phase = "done"
+	status.artifacts 更新
+	updated_at 記録
+
+:terminal 終了

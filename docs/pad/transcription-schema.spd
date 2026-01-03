@@ -1,0 +1,91 @@
+# transcription-schema.spd
+# 文字起こしワークフロー スキーマ構造
+
+:terminal スキーマ構造
+
+:comment ============================================
+:comment 設定ファイル（transcription_workflow.yaml）
+:comment ユーザーが毎回編集
+:comment ============================================
+
+:call 設定ファイル
+	schema_version: "1.0"
+	profile: "プロファイル名"
+
+	:call source
+		type: local | youtube
+		path: "ファイルパス or URL"
+		working_dir: "作業ディレクトリ"
+		files: {youtube_srt, whisper_srt}
+
+	:call transcription
+		method: youtube | whisper | manual | skip
+		language: "ja"
+
+	:call fields
+		（プロファイル定義に従う値）
+		title, date, key_person...
+
+	:call output
+		basename: "出力ファイル名"
+		format: markdown | latex | docx
+
+:comment ============================================
+:comment プロファイル（profiles/*.yaml）
+:comment マクロ定義・稀に編集
+:comment ============================================
+
+:call プロファイル
+	name: "表示名"
+	icon: "アイコン"
+	base_template: "テンプレート.tex"
+	macros: ["common.tex", ...]
+
+	:call participants（参加者構造）
+		:switch type
+		:case hierarchical（階層型）
+			instructor: {label, default}
+			students: {label, count}
+		:case flat（フラット型）
+			roles: [{id, label}, ...]
+
+	:call field_schema（フィールド定義）
+		:loop 各フィールド
+			id: {label, type, required, default}
+
+	:call source_schema
+		multi_srt: true | false
+		session_based: true | false
+		files: {pattern...}
+
+	prompt_template: "プロンプト.md"
+	glossary: "用語集.yaml"
+
+	:call output
+		additional_files: [...]
+
+:comment ============================================
+:comment 共有リソース
+:comment ============================================
+
+:call templates/（LaTeX基本設定）
+	luatex_twocolumn.tex
+	フォント設定
+	ヘッダー/フッター
+	2段組レイアウト
+
+:call macros/（LaTeXマクロ）
+	common.tex（JST日時、リンク色）
+	meeting_speakers.tex（発言者マクロ）
+
+:call prompts/（AI指示）
+	orchestral_rehearsal.md
+	horn_lesson.md
+	meeting_report.md
+
+:call glossaries/（用語集）
+	music_terms.yaml
+	horn_techniques.yaml
+	defense_acronyms.yaml
+
+:terminal 終了
