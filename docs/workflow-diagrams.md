@@ -352,6 +352,157 @@ flowchart TD
 
 ---
 
+## ユーザー/UI/バックエンド インタラクション図
+
+ユーザー、UI、バックエンド間の協調を示す。バックエンド内部の処理詳細はPAD参照。
+
+### 全体フロー
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as ユーザー
+    participant UI as UI
+    participant BE as バックエンド
+
+    rect rgb(240, 248, 255)
+        Note over U,BE: Phase 1: 初期化
+        U->>UI: アプリ起動
+        UI->>BE: 設定ファイル検索
+        alt 既存設定あり
+            BE-->>UI: 設定ファイル一覧
+            UI-->>U: 選択ダイアログ表示
+            U->>UI: ファイル選択
+        else 新規作成
+            UI-->>U: プロファイル選択画面
+            U->>UI: プロファイル選択
+            UI-->>U: 設定フォーム表示
+            U->>UI: 各フィールド入力
+        end
+        UI->>BE: 設定読込/生成
+        BE-->>UI: 設定オブジェクト
+    end
+
+    rect rgb(255, 250, 240)
+        Note over U,BE: Phase 2-3: プロファイル解決・ソース処理
+        UI->>BE: プロファイル解決要求
+        BE-->>UI: リソース読込完了
+        UI->>BE: ソースファイル確認
+        alt ファイル不足
+            BE-->>UI: 不足ファイル通知
+            UI-->>U: エラー表示
+            U->>UI: ファイル指定
+        end
+        BE-->>UI: SRT読込完了
+    end
+
+    rect rgb(240, 255, 240)
+        Note over U,BE: Phase 4: 文字起こし
+        UI-->>U: 文字起こし方式確認
+        U->>UI: 方式選択（youtube/whisper/manual/skip）
+        UI->>BE: 文字起こし実行
+        loop 処理中
+            BE-->>UI: 進捗通知
+            UI-->>U: プログレスバー更新
+        end
+        BE-->>UI: SRT生成完了
+    end
+
+    rect rgb(255, 240, 245)
+        Note over U,BE: Phase 5: プロンプト生成
+        UI->>BE: プロンプト生成要求
+        BE-->>UI: プロンプト生成完了
+        UI-->>U: プロンプトプレビュー表示
+        U->>UI: クリップボードコピー or ファイル保存
+    end
+
+    rect rgb(245, 245, 255)
+        Note over U,BE: Phase 6: AI処理（外部）
+        UI-->>U: 「AIでプロンプトを実行してください」
+        Note right of U: Claude / ChatGPT 等で実行
+        U->>UI: AI出力をペースト or ファイル指定
+        UI->>BE: AI出力保存
+    end
+
+    rect rgb(255, 255, 240)
+        Note over U,BE: Phase 7: 出力生成
+        UI-->>U: 出力形式確認
+        U->>UI: 形式選択（latex/markdown/docx）
+        UI->>BE: 出力生成要求
+        alt LaTeX選択
+            BE->>BE: luatex-pdf実行
+        end
+        BE-->>UI: 出力完了
+        UI-->>U: 結果表示・ファイル場所通知
+        U->>UI: ファイルを開く
+    end
+```
+
+### エラー処理フロー
+
+```mermaid
+sequenceDiagram
+    participant U as ユーザー
+    participant UI as UI
+    participant BE as バックエンド
+
+    UI->>BE: 処理要求
+
+    alt 正常終了
+        BE-->>UI: 成功レスポンス
+        UI-->>U: 完了通知
+    else バリデーションエラー
+        BE-->>UI: エラー（修正可能）
+        UI-->>U: エラー箇所ハイライト
+        U->>UI: 修正入力
+        UI->>BE: 再処理要求
+    else 外部ツールエラー
+        BE-->>UI: エラー（yt-srt/whisper/luatex失敗）
+        UI-->>U: エラー詳細表示
+        UI-->>U: 代替手段提案
+        U->>UI: 代替手段選択 or 中止
+    else 致命的エラー
+        BE-->>UI: エラー（回復不可）
+        UI-->>U: エラーログ表示
+        UI->>BE: 状態保存（途中経過）
+        BE-->>UI: 保存完了
+        UI-->>U: 「再開可能」通知
+    end
+```
+
+### 状態遷移（UI視点）
+
+```mermaid
+stateDiagram-v2
+    [*] --> 初期画面
+
+    初期画面 --> 設定選択: 既存ファイル選択
+    初期画面 --> プロファイル選択: 新規作成
+
+    プロファイル選択 --> 設定編集: プロファイル決定
+    設定選択 --> 設定編集: ファイル読込完了
+
+    設定編集 --> ソース確認: 設定保存
+    ソース確認 --> 設定編集: ファイル不足
+
+    ソース確認 --> 文字起こし中: 処理開始
+    文字起こし中 --> プロンプト確認: 完了
+
+    プロンプト確認 --> AI待機: プロンプト出力
+    AI待機 --> 出力生成中: AI結果入力
+
+    出力生成中 --> 完了: 生成成功
+    出力生成中 --> エラー: 生成失敗
+
+    エラー --> 設定編集: 修正
+    エラー --> 完了: スキップ
+
+    完了 --> [*]
+    完了 --> 設定編集: 別の設定で再実行
+```
+
+---
+
 ## 文字起こしワークフロー PAD図
 
 ### スキーマ構造
