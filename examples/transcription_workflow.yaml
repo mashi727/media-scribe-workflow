@@ -1,0 +1,102 @@
+# transcription_workflow.yaml
+# 文字起こしワークフロー設定ファイル（プロジェクト固有）
+#
+# このファイルはプロジェクトごとに作成し、作業ディレクトリに配置します。
+# 静的セクション（profile, fields, output）はユーザーが最初に記入し、
+# 動的セクション（source.state, source.files）は処理中に自動更新されます。
+
+schema_version: "1.1"
+
+# 使用するプロファイル
+# 検索順序: 作業ディレクトリ → ~/.config/rehearsal-workflow/profiles/ → ビルトイン
+profile: "orchestral_rehearsal"
+
+# ============================================
+# ソース設定
+# ============================================
+source:
+  # ソースタイプ: local（ローカル動画）または youtube（YouTube URL）
+  type: "local"
+
+  # 動画ファイルパスまたはYouTube URL
+  path: "rehearsal_2025-01-03.mp4"
+
+  # 作業ディレクトリ（相対パスはこのディレクトリ基準）
+  working_dir: "/Users/username/Projects/orchestra/2025-01-03"
+
+  # --------------------------------------------
+  # 入力状態（動的セクション - 処理中に自動更新）
+  # --------------------------------------------
+  state:
+    # 動画状態: ready（ファイルあり）| url_only（URLのみ）| missing（なし）
+    video: "ready"
+
+    # YouTube字幕状態: exists | missing | not_applicable
+    youtube_srt: "missing"
+
+    # Whisper字幕状態: exists | missing
+    whisper_srt: "missing"
+
+    # 手動字幕状態: exists | missing
+    manual_srt: "missing"
+
+  # --------------------------------------------
+  # SRTファイルパス（動的セクション - 処理中に自動更新）
+  # --------------------------------------------
+  files:
+    youtube_srt: null      # 例: "rehearsal_2025-01-03_yt.srt"
+    whisper_srt: null      # 例: "rehearsal_2025-01-03_wp.srt"
+    manual_srt: null       # 例: "rehearsal_2025-01-03_manual.srt"
+
+# ============================================
+# 文字起こし設定
+# ============================================
+transcription:
+  # 方式: auto | youtube | whisper | manual | skip
+  #   auto: auto_priority に従って自動選択
+  #   skip: 既存SRTを使用（新規取得しない）
+  method: "auto"
+
+  # 言語コード
+  language: "ja"
+
+  # auto 時の優先順位（先頭が最優先）
+  auto_priority:
+    - "whisper"
+    - "youtube"
+
+# ============================================
+# フィールド値（プロファイルの field_schema に対応）
+# ============================================
+fields:
+  title: "ブラームス交響曲第1番"
+  date: "2025-01-03"
+  key_person: "山田太郎"
+  organization: "〇〇交響楽団"
+  consumer: "団員"
+
+# ============================================
+# 出力設定
+# ============================================
+output:
+  # 出力ファイル名（拡張子なし）
+  basename: "rehearsal_record_2025-01-03"
+
+  # 出力形式: markdown | latex | docx
+  format: "latex"
+
+  # 出力ディレクトリ（省略時は working_dir/output/）
+  output_dir: null
+
+# ============================================
+# ステータス（動的セクション - 処理中に自動更新）
+# ============================================
+status:
+  # 現在のフェーズ: init | preprocessing | transcription | prompt | ai | output | done
+  phase: "init"
+
+  # 生成済みアーティファクト
+  artifacts: []
+
+  # 最終更新日時
+  updated_at: null

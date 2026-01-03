@@ -1,0 +1,107 @@
+# profiles/horn_lesson.yaml
+# ホルンレッスン用プロファイル
+
+name: "ホルンレッスン"
+icon: "🎺"
+description: "個人レッスン・マスタークラスの記録作成"
+
+# 出力テンプレート
+base_template: "luatex_twocolumn.tex"
+macros:
+  - "common.tex"
+
+# 参加者構造
+participants:
+  type: "hierarchical"
+  instructor:
+    id: "teacher"
+    label: "講師"
+    label_en: "Teacher"
+  students:
+    id: "student"
+    label: "受講生"
+    label_en: "Student"
+    count_label: "人数"
+
+# フィールド定義
+field_schema:
+  title:
+    label: "レッスン内容"
+    label_en: "Lesson Content"
+    type: "string"
+    required: true
+    placeholder: "モーツァルト ホルン協奏曲第3番"
+
+  date:
+    label: "レッスン日"
+    label_en: "Date"
+    type: "date"
+    required: true
+    default: "today"
+
+  key_person:
+    label: "講師"
+    label_en: "Teacher"
+    type: "string"
+    required: true
+    placeholder: "浜地宗"
+
+  student_name:
+    label: "受講生"
+    label_en: "Student"
+    type: "string"
+    required: false
+    placeholder: "生徒名"
+
+  student_level:
+    label: "レベル"
+    label_en: "Level"
+    type: "enum"
+    required: false
+    options:
+      - value: "beginner"
+        label: "初心者"
+      - value: "intermediate"
+        label: "中級者"
+      - value: "advanced"
+        label: "上級者"
+      - value: "professional"
+        label: "プロ"
+    default: "intermediate"
+
+  organization:
+    label: "所属"
+    label_en: "Affiliation"
+    type: "string"
+    required: false
+    placeholder: "〇〇音楽大学"
+
+  consumer:
+    label: "対象者"
+    label_en: "Target Audience"
+    type: "string"
+    required: false
+    default: "受講生本人"
+
+# ソーススキーマ
+source_schema:
+  multi_srt: true
+  session_based: false
+  files:
+    youtube_srt:
+      pattern: "*_yt.srt"
+      description: "YouTube自動字幕"
+    whisper_srt:
+      pattern: "*_wp.srt"
+      description: "Whisper文字起こし"
+
+# プロンプト
+prompt_template: "horn_lesson.md"
+
+# 用語集
+glossary: "horn_techniques.yaml"
+
+# 出力設定
+output:
+  default_format: "latex"
+  additional_files: []

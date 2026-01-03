@@ -1,0 +1,37 @@
+# transcription_workflow.yaml テンプレート
+# このファイルをコピーして作業ディレクトリに配置し、値を編集してください。
+
+schema_version: "1.1"
+profile: "orchestral_rehearsal"  # orchestral_rehearsal | horn_lesson | meeting_report
+
+source:
+  type: "local"                   # local | youtube
+  path: ""                        # 動画ファイルパス or YouTube URL
+  working_dir: ""                 # 作業ディレクトリ
+
+  # 以下は自動更新されます
+  state:
+    video: "missing"
+    youtube_srt: "missing"
+    whisper_srt: "missing"
+    manual_srt: "missing"
+  files:
+    youtube_srt: null
+    whisper_srt: null
+    manual_srt: null
+
+transcription:
+  method: "auto"                  # auto | youtube | whisper | manual | skip
+  language: "ja"
+  auto_priority: ["whisper", "youtube"]
+
+fields:
+  title: ""
+  date: ""
+  key_person: ""
+  organization: ""
+  consumer: ""
+
+output:
+  basename: ""
+  format: "latex"                 # markdown | latex | docx

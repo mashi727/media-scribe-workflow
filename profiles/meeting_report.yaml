@@ -1,0 +1,101 @@
+# profiles/meeting_report.yaml
+# 会議レポート用プロファイル
+
+name: "会議レポート"
+icon: "📋"
+description: "会議・ミーティングの議事録作成"
+
+# 出力テンプレート
+base_template: "luatex_twocolumn.tex"
+macros:
+  - "common.tex"
+  - "meeting_speakers.tex"
+
+# 参加者構造
+participants:
+  type: "flat"
+  roles:
+    - id: "chairperson"
+      label: "議長"
+      label_en: "Chairperson"
+      required: false
+    - id: "participants"
+      label: "参加者"
+      label_en: "Participants"
+      multiple: true
+
+# フィールド定義
+field_schema:
+  title:
+    label: "会議名"
+    label_en: "Meeting Title"
+    type: "string"
+    required: true
+    placeholder: "第3回プロジェクト進捗会議"
+
+  date:
+    label: "開催日時"
+    label_en: "Date & Time"
+    type: "datetime"
+    required: true
+    default: "today"
+
+  key_person:
+    label: "議長"
+    label_en: "Chairperson"
+    type: "string"
+    required: false
+    placeholder: "田中一郎"
+
+  organization:
+    label: "組織名"
+    label_en: "Organization"
+    type: "string"
+    required: false
+    placeholder: "〇〇株式会社"
+
+  location:
+    label: "場所"
+    label_en: "Location"
+    type: "string"
+    required: false
+    placeholder: "会議室A / オンライン"
+
+  attendees:
+    label: "出席者"
+    label_en: "Attendees"
+    type: "list"
+    required: false
+    placeholder: "出席者1, 出席者2, ..."
+
+  consumer:
+    label: "配布先"
+    label_en: "Distribution"
+    type: "string"
+    required: false
+    default: "出席者・関係者"
+
+# ソーススキーマ
+source_schema:
+  multi_srt: true
+  session_based: true
+  files:
+    youtube_srt:
+      pattern: "*_yt.srt"
+      description: "YouTube自動字幕"
+    whisper_srt:
+      pattern: "*_wp.srt"
+      description: "Whisper文字起こし"
+
+# プロンプト
+prompt_template: "meeting.md"
+
+# 用語集（オプション、プロジェクト固有の場合）
+glossary: null
+
+# 出力設定
+output:
+  default_format: "markdown"
+  additional_files:
+    - type: "chapters"
+      description: "議題ごとのチャプターファイル"

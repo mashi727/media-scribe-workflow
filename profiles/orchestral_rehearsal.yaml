@@ -1,0 +1,85 @@
+# profiles/orchestral_rehearsal.yaml
+# オーケストラリハーサル用プロファイル
+
+name: "オーケストラリハーサル"
+icon: "🎼"
+description: "オーケストラ・吹奏楽団等のリハーサル記録作成"
+
+# 出力テンプレート
+base_template: "luatex_twocolumn.tex"
+macros:
+  - "common.tex"
+
+# 参加者構造
+participants:
+  type: "hierarchical"
+  instructor:
+    id: "conductor"
+    label: "指揮者"
+    label_en: "Conductor"
+  students:
+    id: "players"
+    label: "奏者"
+    label_en: "Players"
+    count_label: "パート数"
+
+# フィールド定義
+field_schema:
+  title:
+    label: "曲目"
+    label_en: "Title"
+    type: "string"
+    required: true
+    placeholder: "ブラームス交響曲第1番"
+
+  date:
+    label: "練習日"
+    label_en: "Date"
+    type: "date"
+    required: true
+    default: "today"
+
+  key_person:
+    label: "指揮者"
+    label_en: "Conductor"
+    type: "string"
+    required: true
+    placeholder: "山田太郎"
+
+  organization:
+    label: "団体名"
+    label_en: "Organization"
+    type: "string"
+    required: false
+    placeholder: "〇〇交響楽団"
+
+  consumer:
+    label: "対象者"
+    label_en: "Target Audience"
+    type: "string"
+    required: false
+    default: "団員"
+    description: "このレポートの想定読者"
+
+# ソーススキーマ
+source_schema:
+  multi_srt: true
+  session_based: false
+  files:
+    youtube_srt:
+      pattern: "*_yt.srt"
+      description: "YouTube自動字幕"
+    whisper_srt:
+      pattern: "*_wp.srt"
+      description: "Whisper文字起こし"
+
+# プロンプト
+prompt_template: "rehearsal.md"
+
+# 用語集
+glossary: "music_terms.yaml"
+
+# 出力設定
+output:
+  default_format: "latex"
+  additional_files: []
