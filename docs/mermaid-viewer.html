@@ -171,26 +171,32 @@
         I3["YouTube URL"]
     end
 
-    subgraph SCOPE["現状の前処理スコープ（Video Chapter Editor）"]
+    subgraph SCOPE["Video Chapter Editor スコープ"]
+        subgraph DOWNLOAD["動画取得"]
+            D1["yt-dlp<br>動画DL"]
+        end
+
         subgraph PREPROCESS["前処理"]
             P1["video-trim<br>トリミング"]
             P2["video-chapters<br>チャプター付与"]
         end
 
         subgraph SRT_ACQ["SRT取得"]
-            S1["yt-srt"]
-            S2["whisper-remote"]
+            S1["yt-srt<br>YouTube字幕"]
+            S2["whisper-remote<br>Whisper"]
         end
     end
 
-    subgraph MIDDLE["中間出力（SRT）"]
+    subgraph MIDDLE["中間出力"]
         M1["SRT<br>（YouTube字幕）"]
         M2["SRT<br>（Whisper）"]
         M3["SRT + 話者<br>（whisperX）"]
         M4["チャプター付きmp4"]
+        M5["chapters.txt"]
     end
 
     subgraph EXTERNAL["外部処理"]
+        E1["whisperX<br>（話者特定）"]
         E2["AI処理<br>（Claude等）"]
         E3["LaTeX<br>（luatex-pdf）"]
     end
@@ -202,22 +208,24 @@
         O4["チャプターリスト<br>（YouTube概要欄用）"]
     end
 
+    I3 --> D1
     I1 --> P1
     I2 --> P1
+    D1 --> P1
     P1 --> P2
-    I3 --> S1 --> M1
-    I1 --> S2 --> M2
-    I2 --> S2
-    I1 -->|whisperX| M3
-    I2 -->|whisperX| M3
     P2 --> M4
+    P2 --> M5
+    I3 --> S1 --> M1
+    D1 -.->|URL保持| S1
+    M4 --> S2 --> M2
+    M4 --> E1 --> M3
     M1 --> E2
     M2 --> E2
     M3 --> E2
-    E2 --> E3 --> O1
-    E2 --> E3 --> O2
+    E2 -->|スクリプト用| E3 --> O1
+    E2 -->|サマリー用| E3 --> O2
     M4 --> O3
-    M4 -->|抽出| O4`
+    M5 --> O4`
             },
             "basic-workflow": {
                 name: "基本ワークフロー（単一動画 → SRT）",
