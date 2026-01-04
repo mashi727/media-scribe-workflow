@@ -1,5 +1,80 @@
 # ワークフロー図
 
+## 成果物変換図
+
+入力から最終出力までの変換関係を示す。
+
+```mermaid
+flowchart LR
+    subgraph INPUT["入力"]
+        I1["mp4/mov<br>（ローカル映像）"]
+        I2["m4a/mp3<br>（ローカル音声）"]
+        I3["YouTube URL"]
+    end
+
+    subgraph PREPROCESS["前処理"]
+        P1["video-trim<br>トリミング"]
+        P2["video-chapters<br>チャプター付与"]
+    end
+
+    subgraph MIDDLE["中間出力"]
+        M1["SRT<br>（YouTube字幕）"]
+        M2["SRT<br>（Whisper）"]
+        M3["SRT + 話者<br>（Diarization）"]
+        M4["チャプター付きmp4"]
+    end
+
+    subgraph OUTPUT["最終出力"]
+        O1["📄 スクリプト PDF<br>（一次資料）"]
+        O2["📋 サマリー PDF<br>（二次資料）"]
+        O3["🎬 チャプター付き動画"]
+        O4["📝 チャプターリスト<br>（YouTube概要欄用）"]
+    end
+
+    %% 入力 → 前処理
+    I1 --> P1
+    I2 --> P1
+    P1 --> P2
+
+    %% 入力 → 中間出力（SRT）
+    I3 -->|yt-srt| M1
+    I1 -->|Whisper| M2
+    I2 -->|Whisper| M2
+    I1 -->|whisperX| M3
+    I2 -->|whisperX| M3
+
+    %% 前処理 → 中間出力（動画）
+    P2 --> M4
+
+    %% 中間出力 → 最終出力
+    M1 -->|"AI + LaTeX"| O1
+    M2 -->|"AI + LaTeX"| O1
+    M3 -->|"AI + LaTeX"| O1
+    M1 -->|"AI + LaTeX"| O2
+    M2 -->|"AI + LaTeX"| O2
+    M3 -->|"AI + LaTeX"| O2
+    M4 --> O3
+    M4 -->|抽出| O4
+```
+
+### 成果物一覧
+
+| 分類 | 成果物 | 形式 | 生成方法 | 用途 |
+|------|--------|------|----------|------|
+| 入力 | ローカル映像 | mp4, mov | - | 素材 |
+| 入力 | ローカル音声 | m4a, mp3 | - | 素材 |
+| 入力 | YouTube動画 | URL | - | 素材 |
+| 中間 | SRT（YouTube） | .srt | yt-srt | 文字起こし |
+| 中間 | SRT（Whisper） | .srt | whisper-remote | 文字起こし |
+| 中間 | SRT + 話者 | .srt | whisperX | 話者特定付き |
+| 中間 | チャプター付きmp4 | .mp4 | video-chapters | 編集済み動画 |
+| 最終 | スクリプト | .pdf | AI + LaTeX | 一次資料、詳細記録 |
+| 最終 | サマリーレポート | .pdf | AI + LaTeX | 二次資料、学習教材 |
+| 最終 | チャプター付き動画 | .mp4 | - | 自習・確認用 |
+| 最終 | チャプターリスト | .txt | 抽出 | YouTube概要欄用 |
+
+---
+
 ## 基本ワークフロー（単一動画 → SRT）
 
 ```mermaid
