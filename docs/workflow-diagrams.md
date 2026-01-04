@@ -12,9 +12,16 @@ flowchart LR
         I3["YouTube URL"]
     end
 
-    subgraph PREPROCESS["前処理"]
-        P1["video-trim<br>トリミング"]
-        P2["video-chapters<br>チャプター付与"]
+    subgraph SCOPE["現状の前処理スコープ（Video Chapter Editor）"]
+        subgraph PREPROCESS["前処理"]
+            P1["video-trim<br>トリミング"]
+            P2["video-chapters<br>チャプター付与"]
+        end
+
+        subgraph SRT_ACQ["SRT取得"]
+            S1["yt-srt"]
+            S2["whisper-remote"]
+        end
     end
 
     subgraph MIDDLE["中間出力"]
@@ -22,6 +29,12 @@ flowchart LR
         M2["SRT<br>（Whisper）"]
         M3["SRT + 話者<br>（Diarization）"]
         M4["チャプター付きmp4"]
+    end
+
+    subgraph EXTERNAL["外部処理"]
+        E1["whisperX<br>（話者特定）"]
+        E2["AI処理<br>（Claude等）"]
+        E3["LaTeX<br>（luatex-pdf）"]
     end
 
     subgraph OUTPUT["最終出力"]
@@ -36,25 +49,30 @@ flowchart LR
     I2 --> P1
     P1 --> P2
 
-    %% 入力 → 中間出力（SRT）
-    I3 -->|yt-srt| M1
-    I1 -->|Whisper| M2
-    I2 -->|Whisper| M2
-    I1 -->|whisperX| M3
-    I2 -->|whisperX| M3
+    %% 入力 → SRT取得
+    I3 --> S1 --> M1
+    I1 --> S2 --> M2
+    I2 --> S2
+
+    %% 話者特定（外部）
+    I1 --> E1 --> M3
+    I2 --> E1
 
     %% 前処理 → 中間出力（動画）
     P2 --> M4
 
-    %% 中間出力 → 最終出力
-    M1 -->|"AI + LaTeX"| O1
-    M2 -->|"AI + LaTeX"| O1
-    M3 -->|"AI + LaTeX"| O1
-    M1 -->|"AI + LaTeX"| O2
-    M2 -->|"AI + LaTeX"| O2
-    M3 -->|"AI + LaTeX"| O2
+    %% 中間出力 → 外部処理 → 最終出力
+    M1 --> E2
+    M2 --> E2
+    M3 --> E2
+    E2 --> E3 --> O1
+    E2 --> E3 --> O2
     M4 --> O3
     M4 -->|抽出| O4
+
+    %% スタイル
+    style SCOPE fill:#e6f3ff,stroke:#0066cc,stroke-width:2px
+    style EXTERNAL fill:#fff3e6,stroke:#cc6600,stroke-width:1px,stroke-dasharray: 5 5
 ```
 
 ### 成果物一覧
