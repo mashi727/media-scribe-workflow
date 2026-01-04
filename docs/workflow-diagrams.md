@@ -24,15 +24,14 @@ flowchart LR
         end
     end
 
-    subgraph MIDDLE["中間出力"]
+    subgraph MIDDLE["中間出力（SRT）"]
         M1["SRT<br>（YouTube字幕）"]
         M2["SRT<br>（Whisper）"]
-        M3["SRT + 話者<br>（Diarization）"]
+        M3["SRT + 話者<br>（whisperX）"]
         M4["チャプター付きmp4"]
     end
 
     subgraph EXTERNAL["外部処理"]
-        E1["whisperX<br>（話者特定）"]
         E2["AI処理<br>（Claude等）"]
         E3["LaTeX<br>（luatex-pdf）"]
     end
@@ -54,9 +53,9 @@ flowchart LR
     I1 --> S2 --> M2
     I2 --> S2
 
-    %% 話者特定（外部）
-    I1 --> E1 --> M3
-    I2 --> E1
+    %% 話者特定（オプション）
+    I1 -->|whisperX| M3
+    I2 -->|whisperX| M3
 
     %% 前処理 → 中間出力（動画）
     P2 --> M4
