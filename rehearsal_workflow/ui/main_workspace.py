@@ -19,10 +19,10 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
     QSplitter, QComboBox, QLineEdit, QGroupBox,
     QSizePolicy, QAbstractItemView, QSlider, QFileDialog, QDialog,
-    QCheckBox, QSpinBox, QApplication, QStackedLayout
+    QCheckBox, QSpinBox, QApplication, QStackedLayout, QAbstractButton
 )
 from PySide6.QtCore import Qt, Signal, QUrl, QThread, QObject, QTimer, QEvent, QMimeData
-from PySide6.QtGui import QFont, QFontDatabase, QPainter, QColor, QPen, QBrush
+from PySide6.QtGui import QFont, QFontDatabase, QPainter, QColor, QPen, QBrush, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -33,7 +33,7 @@ import tempfile
 import os
 
 from .log_panel import LogPanel, LogLevel
-from .dialogs import SourceSelectionDialog, CoverImageDialog
+from .dialogs import SourceSelectionDialog
 from .models import (
     ChapterInfo,
     ColorspaceInfo,
@@ -44,7 +44,7 @@ from .models import (
     detect_video_bitrate,
     detect_available_encoders,
 )
-from .workers import WaveformWorker, SpectrogramWorker, ExportWorker, SplitExportWorker
+from .workers import WaveformWorker, SpectrogramWorker, ExportWorker, SplitExportWorker, YouTubeDownloadWorker
 from .widgets import WaveformWidget, CenteredFileDialog
 from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, extract_chapters_with_ffmpeg, get_subprocess_kwargs
 
@@ -327,6 +327,12 @@ class MainWorkspace(QWidget):
         # カバー画像
         self._cover_image = None  # QImage
 
+        # YouTube URL（ダウンロード用）
+        self._youtube_url = ""
+
+        # YouTubeダウンロードワーカー
+        self._youtube_worker: Optional[YouTubeDownloadWorker] = None
+
         # 埋め込みチャプターフラグ（MP4から読み込んだチャプターがあるか）
         self._has_embedded_chapters = False
 
@@ -335,6 +341,9 @@ class MainWorkspace(QWidget):
 
         # 現在再生中のチャプター行（ハイライト用）
         self._current_chapter_row = -1
+
+        # チャプターが編集されたかどうか（スキップボタン有効化用）
+        self._chapters_edited = False
 
         self._setup_ui()
 
@@ -397,9 +406,13 @@ class MainWorkspace(QWidget):
             }
         """)
 
-        main_layout = QVBoxLayout(frame)
+        main_layout = QHBoxLayout(frame)
         main_layout.setContentsMargins(12, 8, 12, 8)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(12)
+
+        # === 左側: ソース選択 + 出力ファイル名 ===
+        left_layout = QVBoxLayout()
+        left_layout.setSpacing(8)
 
         # 上段: ソース選択
         source_row = QHBoxLayout()
@@ -423,22 +436,9 @@ class MainWorkspace(QWidget):
         self._source_btn.clicked.connect(self._open_source_dialog)
         source_row.addWidget(self._source_btn)
 
-        # カバー画像ボタン
-        self._cover_btn = QPushButton("Cover Image")
-        self._cover_btn.setStyleSheet(self._button_style())
-        self._cover_btn.setToolTip("カバー画像を設定")
-        self._cover_btn.clicked.connect(self._open_cover_dialog)
-        source_row.addWidget(self._cover_btn)
-
-        # カバー情報表示
-        self._cover_info = QLabel("")
-        self._cover_info.setStyleSheet("color: #666666;")
-        self._cover_set = False  # カバー画像設定済みフラグ
-        source_row.addWidget(self._cover_info)
-
         source_row.addStretch()
 
-        main_layout.addLayout(source_row)
+        left_layout.addLayout(source_row)
 
         # 下段: 出力ファイル名
         output_row = QHBoxLayout()
@@ -468,7 +468,27 @@ class MainWorkspace(QWidget):
         browse_btn.clicked.connect(self._browse_output)
         output_row.addWidget(browse_btn)
 
-        main_layout.addLayout(output_row)
+        left_layout.addLayout(output_row)
+
+        main_layout.addLayout(left_layout, stretch=1)
+
+        # === 右側: カバー画像プレビュー ===
+        self._cover_preview = QLabel()
+        self._cover_preview.setFixedSize(142, 80)  # 16:9 アスペクト比
+        self._cover_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cover_preview.setStyleSheet("""
+            QLabel {
+                background: #0a0a0a;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                color: #ef4444;
+                font-size: 13px;
+                font-weight: bold;
+            }
+        """)
+        self._cover_preview.setText("Cover Image\nUnset")
+        self._cover_preview.setToolTip("カバー画像（Select Sourceで設定）")
+        main_layout.addWidget(self._cover_preview)
 
         return frame
 
@@ -503,82 +523,130 @@ class MainWorkspace(QWidget):
         ctrl_row = QHBoxLayout()
         ctrl_row.addStretch()  # 左側スペーサー
 
-        # 時間移動ボタンのスタイル
-        time_btn_style = """
+        # 時間移動ボタンのスタイル（戻る系: パステルブルー）
+        back_btn_style = """
             QPushButton {
-                background: #2d2d2d;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
+                background: #2a3a4d;
+                color: #a8c8e8;
+                border: 1px solid #3a5068;
                 border-radius: 12px;
                 font-size: 18px;
                 font-weight: bold;
                 padding: 4px 2px;
             }
             QPushButton:hover {
-                background: #3d3d3d;
+                background: #354a5f;
             }
             QPushButton:pressed {
-                background: #4d4d4d;
+                background: #405a70;
             }
             QPushButton:disabled {
-                background: #1a1a1a;
-                color: #666666;
+                background: #1a2530;
+                color: #4a5a6a;
             }
         """
 
+        # 時間移動ボタンのスタイル（進む系: パステルブルーに統一）
+        forward_btn_style = back_btn_style
+
         # -10s
-        btn_m10s = QPushButton("-10s")
-        btn_m10s.setStyleSheet(time_btn_style)
-        btn_m10s.setFixedSize(55, 45)
-        btn_m10s.setToolTip("10秒戻る")
-        btn_m10s.clicked.connect(lambda: self._seek_relative(-10000))
-        ctrl_row.addWidget(btn_m10s)
+        self._btn_m10s = QPushButton("-10s")
+        self._btn_m10s.setStyleSheet(back_btn_style)
+        self._btn_m10s.setFixedSize(55, 45)
+        self._btn_m10s.setToolTip("10秒戻る")
+        self._btn_m10s.clicked.connect(lambda: self._seek_relative(-10000))
+        self._btn_m10s.setEnabled(False)
+        ctrl_row.addWidget(self._btn_m10s)
 
         # -1s
-        btn_m1s = QPushButton("-1s")
-        btn_m1s.setStyleSheet(time_btn_style)
-        btn_m1s.setFixedSize(55, 45)
-        btn_m1s.setToolTip("1秒戻る")
-        btn_m1s.clicked.connect(lambda: self._seek_relative(-1000))
-        ctrl_row.addWidget(btn_m1s)
+        self._btn_m1s = QPushButton("-1s")
+        self._btn_m1s.setStyleSheet(back_btn_style)
+        self._btn_m1s.setFixedSize(55, 45)
+        self._btn_m1s.setToolTip("1秒戻る")
+        self._btn_m1s.clicked.connect(lambda: self._seek_relative(-1000))
+        self._btn_m1s.setEnabled(False)
+        ctrl_row.addWidget(self._btn_m1s)
 
         # -.3s
-        btn_m03s = QPushButton("-.3s")
-        btn_m03s.setStyleSheet(time_btn_style)
-        btn_m03s.setFixedSize(55, 45)
-        btn_m03s.setToolTip("0.3秒戻る")
-        btn_m03s.clicked.connect(lambda: self._seek_relative(-300))
-        ctrl_row.addWidget(btn_m03s)
+        self._btn_m03s = QPushButton("-.3s")
+        self._btn_m03s.setStyleSheet(back_btn_style)
+        self._btn_m03s.setFixedSize(55, 45)
+        self._btn_m03s.setToolTip("0.3秒戻る")
+        self._btn_m03s.clicked.connect(lambda: self._seek_relative(-300))
+        self._btn_m03s.setEnabled(False)
+        ctrl_row.addWidget(self._btn_m03s)
 
         # -1f (約33ms @ 30fps)
-        btn_m1f = QPushButton("-1f")
-        btn_m1f.setStyleSheet(time_btn_style)
-        btn_m1f.setFixedSize(55, 45)
-        btn_m1f.setToolTip("1フレーム戻る")
-        btn_m1f.clicked.connect(lambda: self._seek_relative(-33))
-        ctrl_row.addWidget(btn_m1f)
+        self._btn_m1f = QPushButton("-1f")
+        self._btn_m1f.setStyleSheet(back_btn_style)
+        self._btn_m1f.setFixedSize(55, 45)
+        self._btn_m1f.setToolTip("1フレーム戻る")
+        self._btn_m1f.clicked.connect(lambda: self._seek_relative(-33))
+        self._btn_m1f.setEnabled(False)
+        ctrl_row.addWidget(self._btn_m1f)
+
+        # チャプタースキップボタンのスタイル
+        # Windows: Segoe UI Symbolを使用して絵文字ではなくシンボルとして描画
+        is_windows = platform.system() == "Windows"
+        symbol_font_css = "font-family: 'Segoe UI Symbol';" if is_windows else ""
+
+        # 前のチャプター（パステルブルー - 戻る系と統一）
+        prev_chapter_style = f"""
+            QPushButton {{
+                background: #2a3a4d;
+                color: #a8c8e8;
+                border: 1px solid #3a5068;
+                border-radius: 14px;
+                font-size: 20px;
+                font-weight: bold;
+                {symbol_font_css}
+            }}
+            QPushButton:hover {{
+                background: #354a5f;
+            }}
+            QPushButton:pressed {{
+                background: #405a70;
+            }}
+            QPushButton:disabled {{
+                background: #1a2530;
+                color: #4a5a6a;
+            }}
+        """
+
+        # 次のチャプター（パステルブルーに統一）
+        next_chapter_style = prev_chapter_style
+
+        # 前のチャプター
+        self._prev_chapter_btn = QPushButton("|◀")
+        self._prev_chapter_btn.setStyleSheet(prev_chapter_style)
+        self._prev_chapter_btn.setFixedSize(50, 50)
+        self._prev_chapter_btn.setToolTip("前のチャプター")
+        self._prev_chapter_btn.clicked.connect(self._goto_prev_chapter)
+        self._prev_chapter_btn.setEnabled(False)
+        ctrl_row.addWidget(self._prev_chapter_btn)
 
         # Play/Pause（大きめボタン）
         self._play_btn = QPushButton("▶")
-        self._play_btn.setStyleSheet("""
-            QPushButton {
+        self._play_btn.setStyleSheet(f"""
+            QPushButton {{
                 background: #3b82f6;
                 color: white;
                 border: none;
                 border-radius: 16px;
                 font-size: 28px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
+                {symbol_font_css}
+            }}
+            QPushButton:hover {{
                 background: #2563eb;
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background: #1d4ed8;
-            }
-            QPushButton:disabled {
+            }}
+            QPushButton:disabled {{
                 background: #1e3a5f;
                 color: #666666;
-            }
+            }}
         """)
         self._play_btn.setFixedSize(80, 55)
         self._play_btn.setToolTip("再生/一時停止 (Space)")
@@ -586,37 +654,50 @@ class MainWorkspace(QWidget):
         self._play_btn.setEnabled(False)
         ctrl_row.addWidget(self._play_btn)
 
+        # 次のチャプター
+        self._next_chapter_btn = QPushButton("▶|")
+        self._next_chapter_btn.setStyleSheet(next_chapter_style)
+        self._next_chapter_btn.setFixedSize(50, 50)
+        self._next_chapter_btn.setToolTip("次のチャプター")
+        self._next_chapter_btn.clicked.connect(self._goto_next_chapter)
+        self._next_chapter_btn.setEnabled(False)
+        ctrl_row.addWidget(self._next_chapter_btn)
+
         # +1f
-        btn_p1f = QPushButton("+1f")
-        btn_p1f.setStyleSheet(time_btn_style)
-        btn_p1f.setFixedSize(55, 45)
-        btn_p1f.setToolTip("1フレーム進む")
-        btn_p1f.clicked.connect(lambda: self._seek_relative(33))
-        ctrl_row.addWidget(btn_p1f)
+        self._btn_p1f = QPushButton("+1f")
+        self._btn_p1f.setStyleSheet(forward_btn_style)
+        self._btn_p1f.setFixedSize(55, 45)
+        self._btn_p1f.setToolTip("1フレーム進む")
+        self._btn_p1f.clicked.connect(lambda: self._seek_relative(33))
+        self._btn_p1f.setEnabled(False)
+        ctrl_row.addWidget(self._btn_p1f)
 
         # +.3s
-        btn_p03s = QPushButton("+.3s")
-        btn_p03s.setStyleSheet(time_btn_style)
-        btn_p03s.setFixedSize(55, 45)
-        btn_p03s.setToolTip("0.3秒進む")
-        btn_p03s.clicked.connect(lambda: self._seek_relative(300))
-        ctrl_row.addWidget(btn_p03s)
+        self._btn_p03s = QPushButton("+.3s")
+        self._btn_p03s.setStyleSheet(forward_btn_style)
+        self._btn_p03s.setFixedSize(55, 45)
+        self._btn_p03s.setToolTip("0.3秒進む")
+        self._btn_p03s.clicked.connect(lambda: self._seek_relative(300))
+        self._btn_p03s.setEnabled(False)
+        ctrl_row.addWidget(self._btn_p03s)
 
         # +1s
-        btn_p1s = QPushButton("+1s")
-        btn_p1s.setStyleSheet(time_btn_style)
-        btn_p1s.setFixedSize(55, 45)
-        btn_p1s.setToolTip("1秒進む")
-        btn_p1s.clicked.connect(lambda: self._seek_relative(1000))
-        ctrl_row.addWidget(btn_p1s)
+        self._btn_p1s = QPushButton("+1s")
+        self._btn_p1s.setStyleSheet(forward_btn_style)
+        self._btn_p1s.setFixedSize(55, 45)
+        self._btn_p1s.setToolTip("1秒進む")
+        self._btn_p1s.clicked.connect(lambda: self._seek_relative(1000))
+        self._btn_p1s.setEnabled(False)
+        ctrl_row.addWidget(self._btn_p1s)
 
         # +10s
-        btn_p10s = QPushButton("+10s")
-        btn_p10s.setStyleSheet(time_btn_style)
-        btn_p10s.setFixedSize(55, 45)
-        btn_p10s.setToolTip("10秒進む")
-        btn_p10s.clicked.connect(lambda: self._seek_relative(10000))
-        ctrl_row.addWidget(btn_p10s)
+        self._btn_p10s = QPushButton("+10s")
+        self._btn_p10s.setStyleSheet(forward_btn_style)
+        self._btn_p10s.setFixedSize(55, 45)
+        self._btn_p10s.setToolTip("10秒進む")
+        self._btn_p10s.clicked.connect(lambda: self._seek_relative(10000))
+        self._btn_p10s.setEnabled(False)
+        ctrl_row.addWidget(self._btn_p10s)
 
         ctrl_row.addStretch()  # 右側スペーサー
         layout.addLayout(ctrl_row)
@@ -829,6 +910,8 @@ class MainWorkspace(QWidget):
         self._table.setHorizontalHeaderLabels(["Time", "Title"])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # 行番号（垂直ヘッダー）を表示
+        self._table.verticalHeader().setVisible(True)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)  # セル単位選択
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)  # 単一選択
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)  # Enterキーのみで編集
@@ -848,12 +931,26 @@ class MainWorkspace(QWidget):
                 background: #3b82f6;
             }
             QHeaderView::section {
-                background: #1a1a1a;
+                background: #000000;
                 color: #a0a0a0;
                 border: none;
                 padding: 8px;
             }
+            QTableCornerButton::section {
+                background: #000000;
+                color: #a0a0a0;
+                border: none;
+            }
         """)
+        # コーナーウィジェットに「No.」ラベルを設定
+        corner_btn = self._table.findChild(QAbstractButton)
+        if corner_btn:
+            corner_label = QLabel("No.")
+            corner_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            corner_label.setStyleSheet("background: #000000; color: #a0a0a0; padding: 4px;")
+            corner_btn.setLayout(QVBoxLayout())
+            corner_btn.layout().setContentsMargins(0, 0, 0, 0)
+            corner_btn.layout().addWidget(corner_label)
         # チャプター編集後に波形を更新（ダブルクリックシークはeventFilterで処理）
         self._table.cellChanged.connect(self._on_chapter_edited)
         # 選択変更時に文字色を復元
@@ -1181,6 +1278,7 @@ class MainWorkspace(QWidget):
             self._state.video_path = file_path
             self._media_player.setSource(QUrl.fromLocalFile(str(file_path)))
             self._play_btn.setEnabled(True)
+            self._update_seek_buttons(True)
             self._log_panel.info(f"Video loaded: {file_path.name}", source="Media")
             self._start_waveform_generation(file_path)
             # 埋め込みチャプターがあれば読み込み
@@ -1197,6 +1295,7 @@ class MainWorkspace(QWidget):
                 self._state.video_path = file_path
                 self._media_player.setSource(QUrl.fromLocalFile(str(file_path)))
                 self._play_btn.setEnabled(True)
+                self._update_seek_buttons(True)
                 self._log_panel.info(f"Audio loaded: {file_path.name}", source="Media")
                 self._start_waveform_generation(file_path)
             else:
@@ -1204,6 +1303,7 @@ class MainWorkspace(QWidget):
                 # Export時にffmpegで結合する
                 self._state.video_path = None
                 self._play_btn.setEnabled(False)
+                self._update_seek_buttons(False)
                 self._log_panel.info(
                     f"{len(self._state.sources)} audio files selected (preview after Export)",
                     source="Media"
@@ -1345,6 +1445,8 @@ class MainWorkspace(QWidget):
     def _on_duration_changed(self, duration: int):
         """動画長さ変更"""
         self._log_panel.debug(f"Duration: {self._format_time(duration)}", source="Video")
+        # チャプタースキップボタンの有効/無効を更新
+        self._update_chapter_buttons()
 
     def _highlight_current_chapter(self, position: int):
         """現在再生中のチャプターをハイライト"""
@@ -1373,14 +1475,14 @@ class MainWorkspace(QWidget):
 
         # 全行の背景をクリア（文字色は維持）
         for row in range(self._table.rowCount()):
-            for col in range(2):
+            for col in range(2):  # Time, Title
                 item = self._table.item(row, col)
                 if item:
                     item.setBackground(transparent_bg)
 
         # 現在のチャプターをハイライト（背景色のみ変更、文字色は維持）
         if current_row >= 0:
-            for col in range(2):
+            for col in range(2):  # Time, Title
                 item = self._table.item(current_row, col)
                 if item:
                     item.setBackground(highlight_bg)
@@ -1639,8 +1741,14 @@ class MainWorkspace(QWidget):
         """新しいソース読み込み前の準備処理
 
         チャプター、スペクトログラム、UI状態をリセット。
+        再生中のメディアを停止し、再生画面をクリア。
         Select Source / ドロップ共通処理。
         """
+        # 再生中のメディアを停止し、再生画面をクリア
+        if self._media_player:
+            self._media_player.stop()
+            self._media_player.setSource(QUrl())  # ソースをクリアして画面をリセット
+
         self._update_source_info()
         self.source_changed.emit(self._state.sources)
 
@@ -1650,8 +1758,10 @@ class MainWorkspace(QWidget):
         self._chapter_title_label.setTextFormat(Qt.TextFormat.PlainText)
         self._table.setRowCount(0)  # チャプターリストをクリア
         self._current_chapter_row = -1  # ハイライトもリセット
+        self._chapters_edited = False  # 編集フラグもリセット
 
-        # スペクトログラム関連をリセット
+        # 波形・スペクトログラム関連をリセット
+        self._waveform_widget.clear()  # 波形データをクリア
         self._spectrogram_generated = False
         self._waveform_widget.set_spectrogram(None)  # スペクトログラムデータをクリア
         self._waveform_widget.set_display_mode(WaveformWidget.MODE_WAVEFORM)  # 振幅モードに戻す
@@ -1660,46 +1770,163 @@ class MainWorkspace(QWidget):
 
     def _open_source_dialog(self):
         """ソース選択ダイアログを開く"""
-        dialog = SourceSelectionDialog(self, self._state.sources, work_dir=self._state.work_dir)
+        dialog = SourceSelectionDialog(
+            self,
+            self._state.sources,
+            work_dir=self._state.work_dir,
+            initial_cover_image=self._cover_image
+        )
         if dialog.exec():
-            self._state.sources = dialog.get_sources()
-            self._log_panel.info(
-                f"Sources updated: {len(self._state.sources)} files",
-                source="UI"
+            source_type = dialog.get_source_type()
+
+            if source_type == "youtube":
+                # YouTube URLが入力された場合
+                youtube_url = dialog.get_youtube_url()
+                if youtube_url:
+                    self._youtube_url = youtube_url
+                    # 作業ディレクトリを更新
+                    new_work_dir = dialog.get_work_dir()
+                    if new_work_dir != self._state.work_dir:
+                        self._state.work_dir = new_work_dir
+                    # 再生中のメディアを停止してリセット
+                    self._prepare_for_new_source()
+                    # ダウンロード開始
+                    self._start_youtube_download(youtube_url)
+            else:
+                # ローカルファイルが選択された場合
+                self._state.sources = dialog.get_sources()
+
+                # 作業ディレクトリを更新
+                new_work_dir = dialog.get_work_dir()
+                if new_work_dir != self._state.work_dir:
+                    self._state.work_dir = new_work_dir
+                    self._log_panel.info(
+                        f"Working directory: {new_work_dir}",
+                        source="UI"
+                    )
+
+                self._log_panel.info(
+                    f"Sources updated: {len(self._state.sources)} files",
+                    source="UI"
+                )
+                self._prepare_for_new_source()
+
+                # 複数MP3の場合、チャプターを自動生成
+                if len(self._state.sources) > 1:
+                    self._generate_chapters_from_sources()
+
+                # ソースがあれば自動的にメディアプレーヤーに読み込み
+                if self._state.sources:
+                    self._load_source_media()
+
+            # カバー画像を取得・更新
+            cover_image = dialog.get_cover_image()
+            if cover_image != self._cover_image:
+                self._cover_image = cover_image
+                self._update_cover_preview()
+                if cover_image:
+                    self._log_panel.info("Cover image set", source="UI")
+                else:
+                    self._log_panel.info("Cover image cleared", source="UI")
+
+    def _update_cover_preview(self):
+        """カバー画像プレビューを更新"""
+        if self._cover_image is None:
+            # カバー画像なし: 黒背景 + 赤字 "Unset"
+            self._cover_preview.setPixmap(QPixmap())
+            self._cover_preview.setText("Cover Image\nUnset")
+            self._cover_preview.setStyleSheet("""
+                QLabel {
+                    background: #0a0a0a;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 4px;
+                    color: #ef4444;
+                    font-size: 13px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            # カバー画像あり: 画像を表示
+            pixmap = QPixmap.fromImage(self._cover_image)
+            scaled = pixmap.scaled(
+                self._cover_preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
             )
-            self._prepare_for_new_source()
-
-            # 複数MP3の場合、チャプターを自動生成
-            if len(self._state.sources) > 1:
-                self._generate_chapters_from_sources()
-
-            # ソースがあれば自動的にメディアプレーヤーに読み込み
-            if self._state.sources:
-                self._load_source_media()
-
-    def _open_cover_dialog(self):
-        """カバー画像ダイアログを開く"""
-        dialog = CoverImageDialog(self, work_dir=self._state.work_dir)
-        if dialog.exec():
-            image = dialog.get_image()
-            if image:
-                self._cover_image = image  # QImageを保存
-                self._cover_set = True
-                self._cover_info.setText("Set")
-                self._cover_info.setStyleSheet("color: #22c55e;")  # 緑
-                self._log_panel.info("Cover image set", source="UI")
+            self._cover_preview.setText("")
+            self._cover_preview.setPixmap(scaled)
+            self._cover_preview.setStyleSheet("""
+                QLabel {
+                    background: #0a0a0a;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 4px;
+                }
+            """)
 
     def _update_source_info(self):
         """ソース情報表示を更新"""
-        if not self._state.sources:
-            # ソースがない場合はカバー情報を非表示
-            self._cover_info.setText("")
-            return
+        # カバープレビューの更新（ソース変更時）
+        pass
 
-        # ソースがロードされたらカバー情報を表示
-        if not self._cover_set:
-            self._cover_info.setText("Not Set")
-            self._cover_info.setStyleSheet("color: #ef4444;")  # 赤
+    # === YouTubeダウンロード ===
+
+    def _start_youtube_download(self, url: str):
+        """YouTubeダウンロードを開始"""
+        # 既存のダウンロードがあればキャンセル
+        if self._youtube_worker and self._youtube_worker.isRunning():
+            self._youtube_worker.cancel()
+            self._youtube_worker.wait()
+
+        self._log_panel.info(f"Starting YouTube download: {url}", source="YouTube")
+
+        # ワーカーを作成
+        self._youtube_worker = YouTubeDownloadWorker(
+            url=url,
+            output_dir=str(self._state.work_dir),
+            download_subs=True,
+            sub_lang="ja"
+        )
+
+        # シグナル接続
+        self._youtube_worker.log_message.connect(
+            lambda msg: self._log_panel.info(msg, source="YouTube")
+        )
+        self._youtube_worker.progress_update.connect(self._on_youtube_progress)
+        self._youtube_worker.download_completed.connect(self._on_youtube_completed)
+        self._youtube_worker.error_occurred.connect(self._on_youtube_error)
+
+        # ダウンロード開始
+        self._youtube_worker.start()
+
+    def _on_youtube_progress(self, message: str):
+        """YouTubeダウンロード進捗"""
+        # ステータスバーなどに表示（現在はログパネルに表示）
+        self._log_panel.debug(message, source="YouTube")
+
+    def _on_youtube_completed(self, video_path: str, srt_path: str):
+        """YouTubeダウンロード完了"""
+        self._log_panel.info(f"Download completed: {Path(video_path).name}", source="YouTube")
+
+        if srt_path:
+            self._log_panel.info(f"Subtitle saved: {Path(srt_path).name}", source="YouTube")
+
+        # ダウンロードした動画をソースとしてロード
+        video_path_obj = Path(video_path)
+        if video_path_obj.exists():
+            duration_ms = detect_video_duration(str(video_path_obj)) or 0
+            source = SourceFile(
+                path=video_path_obj,
+                duration_ms=duration_ms,
+                file_type="mp4"
+            )
+            self._state.sources = [source]
+            self._prepare_for_new_source()
+            self._load_source_media()
+            self._log_panel.info("Video loaded as source", source="YouTube")
+
+    def _on_youtube_error(self, error_message: str):
+        """YouTubeダウンロードエラー"""
+        self._log_panel.error(f"Download failed: {error_message}", source="YouTube")
 
     # === チャプター操作 ===
 
@@ -1779,7 +2006,9 @@ class MainWorkspace(QWidget):
         self._table.selectRow(insert_row)
 
         self._log_panel.debug(f"Chapter added at {time_str}", source="UI")
+        self._chapters_edited = True
         self._update_waveform_chapters()
+        self._update_chapter_buttons()
 
     def _remove_chapter(self):
         """選択チャプター削除"""
@@ -1787,17 +2016,21 @@ class MainWorkspace(QWidget):
         for row in sorted(rows, reverse=True):
             self._table.removeRow(row)
         self._log_panel.debug(f"Removed {len(rows)} chapters", source="UI")
+        self._chapters_edited = True
         self._update_waveform_chapters()
+        self._update_chapter_buttons()
 
     def _on_chapter_edited(self, row: int, column: int):
         """チャプター編集後に波形を更新"""
+        self._chapters_edited = True
         self._update_waveform_chapters()
+        self._update_chapter_buttons()
 
     def _on_selection_changed(self):
         """選択変更時に文字色を復元（Qtの選択スタイルで上書きされるのを防ぐ）"""
-        # 全行の両列の文字色を復元
+        # 全行の全列の文字色を復元
         for row in range(self._table.rowCount()):
-            for col in range(2):
+            for col in range(2):  # Time, Title
                 item = self._table.item(row, col)
                 if item:
                     original_color = item.data(Qt.ItemDataRole.UserRole)
@@ -1836,6 +2069,81 @@ class MainWorkspace(QWidget):
         if self._media_player:
             self._media_player.setPosition(position_ms)
             self._log_panel.debug(f"Seek to chapter: {time_str}", source="Chapter")
+
+    def _goto_prev_chapter(self):
+        """前のチャプターにジャンプ"""
+        if self._table.rowCount() == 0:
+            return
+
+        current_pos = self._media_player.position() if self._media_player else 0
+
+        # 現在位置より前のチャプターを探す（少しマージンを持たせる）
+        prev_row = -1
+        for row in range(self._table.rowCount()):
+            time_item = self._table.item(row, 0)
+            if time_item:
+                chapter = ChapterInfo.from_time_str(time_item.text(), "")
+                # 現在位置より1秒以上前のチャプターを探す
+                if chapter.time_ms < current_pos - 1000:
+                    prev_row = row
+                else:
+                    break
+
+        if prev_row >= 0:
+            self._on_chapter_clicked(prev_row, 0)
+            self._table.selectRow(prev_row)
+        elif self._table.rowCount() > 0:
+            # 最初のチャプターにジャンプ
+            self._on_chapter_clicked(0, 0)
+            self._table.selectRow(0)
+
+    def _goto_next_chapter(self):
+        """次のチャプターにジャンプ"""
+        if self._table.rowCount() == 0:
+            return
+
+        current_pos = self._media_player.position() if self._media_player else 0
+
+        # 現在位置より後のチャプターを探す
+        for row in range(self._table.rowCount()):
+            time_item = self._table.item(row, 0)
+            if time_item:
+                chapter = ChapterInfo.from_time_str(time_item.text(), "")
+                # 現在位置より少し後のチャプターを探す
+                if chapter.time_ms > current_pos + 500:
+                    self._on_chapter_clicked(row, 0)
+                    self._table.selectRow(row)
+                    return
+
+        # 見つからなければ最後のチャプターにジャンプ
+        last_row = self._table.rowCount() - 1
+        if last_row >= 0:
+            self._on_chapter_clicked(last_row, 0)
+            self._table.selectRow(last_row)
+
+    def _update_chapter_buttons(self):
+        """チャプタースキップボタンの有効/無効を更新
+
+        チャプターリストが編集された場合にのみ有効化
+        """
+        has_chapters = self._table.rowCount() > 0
+        has_media = self._media_player and self._media_player.duration() > 0
+        enabled = has_chapters and has_media and self._chapters_edited
+        self._prev_chapter_btn.setEnabled(enabled)
+        self._next_chapter_btn.setEnabled(enabled)
+
+    def _update_seek_buttons(self, enabled: bool):
+        """時間移動ボタンの有効/無効を更新"""
+        # 戻る系
+        self._btn_m10s.setEnabled(enabled)
+        self._btn_m1s.setEnabled(enabled)
+        self._btn_m03s.setEnabled(enabled)
+        self._btn_m1f.setEnabled(enabled)
+        # 進む系
+        self._btn_p1f.setEnabled(enabled)
+        self._btn_p03s.setEnabled(enabled)
+        self._btn_p1s.setEnabled(enabled)
+        self._btn_p10s.setEnabled(enabled)
 
     def _load_chapters(self):
         """チャプターファイルを読み込み
@@ -2205,7 +2513,9 @@ class MainWorkspace(QWidget):
             self._table.setItem(row, 1, title_item)
 
         self._state.chapters = chapters
+        self._chapters_edited = True
         self._update_waveform_chapters()
+        self._update_chapter_buttons()
         self._log_panel.info(f"Pasted {len(chapters)} chapters from clipboard", source="Paste")
 
     # === エクスポート ===
@@ -2417,6 +2727,7 @@ class MainWorkspace(QWidget):
         # メディアプレーヤーに読み込み
         self._media_player.setSource(QUrl.fromLocalFile(str(output_file)))
         self._play_btn.setEnabled(True)
+        self._update_seek_buttons(True)
 
         # 動画モードに切り替え（品質選択を有効化）
         self._update_quality_combo_for_mode(is_audio=False)
@@ -2489,6 +2800,7 @@ class MainWorkspace(QWidget):
         self._state.video_path = path
         self._media_player.setSource(QUrl.fromLocalFile(str(path)))
         self._play_btn.setEnabled(True)
+        self._update_seek_buttons(True)
         self._log_panel.info(f"Loaded: {path.name}", source="Video")
 
         # 波形生成を開始（別スレッド）

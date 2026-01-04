@@ -1510,3 +1510,193 @@ class SplitExportWorker(QThread):
         finally:
             # 一時ファイルをクリーンアップ
             self._cleanup_temp_files()
+
+
+class YouTubeDownloadWorker(QThread):
+    """YouTube動画ダウンロードワーカー
+
+    yt-dlpを使用してYouTube動画をダウンロードする。
+    字幕ファイル（SRT）も同時にダウンロード可能。
+    """
+
+    # シグナル
+    log_message = Signal(str)
+    progress_update = Signal(str)  # 進捗メッセージ
+    download_completed = Signal(str, str)  # (video_path, srt_path or "")
+    error_occurred = Signal(str)
+
+    def __init__(self, url: str, output_dir: str, download_subs: bool = True,
+                 sub_lang: str = "ja", parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.output_dir = output_dir
+        self.download_subs = download_subs
+        self.sub_lang = sub_lang
+        self._cancelled = False
+        self._process: Optional[subprocess.Popen] = None
+
+    def cancel(self):
+        """ダウンロードをキャンセル"""
+        self._cancelled = True
+        if self._process:
+            self._process.terminate()
+
+    def _sanitize_filename(self, title: str, max_length: int = 60) -> str:
+        """ファイル名を安全な形式に変換"""
+        import unicodedata
+        # NFCで正規化
+        title = unicodedata.normalize('NFC', title)
+        # 危険な文字を置換
+        title = re.sub(r'[\/\\:*?"<>|]', '_', title)
+        # 連続するスペースやアンダースコアを単一に
+        title = re.sub(r'[\s_]+', '_', title)
+        # 先頭・末尾のアンダースコアを削除
+        title = title.strip('_')
+        # 長さ制限
+        if len(title) > max_length:
+            title = title[:max_length].rstrip('_')
+        return title
+
+    def _get_video_info(self) -> Optional[dict]:
+        """yt-dlpで動画情報を取得"""
+        try:
+            import json
+            kwargs = get_subprocess_kwargs(timeout=60)
+            result = subprocess.run(
+                ['yt-dlp', '-J', '--no-warnings', self.url],
+                **kwargs
+            )
+            if result.returncode == 0:
+                # NUL文字などを除去してパース
+                json_str = result.stdout.strip()
+                json_str = re.sub(r'[\x00-\x1f]', '', json_str)
+                return json.loads(json_str)
+        except Exception as e:
+            self.log_message.emit(f"Video info error: {e}")
+        return None
+
+    def run(self):
+        """バックグラウンドでダウンロードを実行"""
+        try:
+            # yt-dlpの存在確認
+            try:
+                subprocess.run(['yt-dlp', '--version'],
+                               capture_output=True, timeout=10)
+            except FileNotFoundError:
+                self.error_occurred.emit("yt-dlp is not installed. Install with: brew install yt-dlp")
+                return
+            except subprocess.TimeoutExpired:
+                self.error_occurred.emit("yt-dlp timeout")
+                return
+
+            self.progress_update.emit("Fetching video information...")
+            self.log_message.emit(f"URL: {self.url}")
+
+            # 動画情報を取得
+            info = self._get_video_info()
+            if not info:
+                self.error_occurred.emit("Could not fetch video information")
+                return
+
+            if self._cancelled:
+                return
+
+            title = info.get('title', 'video')
+            video_id = info.get('id', '')
+            duration = info.get('duration', 0)
+            channel = info.get('channel', 'Unknown')
+
+            self.log_message.emit(f"Title: {title}")
+            self.log_message.emit(f"Channel: {channel}")
+            self.log_message.emit(f"Duration: {duration // 60}:{duration % 60:02d}")
+
+            # ファイル名を生成
+            safe_title = self._sanitize_filename(title)
+            output_template = str(Path(self.output_dir) / f"{safe_title}.%(ext)s")
+
+            self.progress_update.emit(f"Downloading: {safe_title}")
+
+            # ダウンロードコマンドを構築
+            cmd = [
+                'yt-dlp',
+                '--cookies-from-browser', 'safari',
+                '-f', 'bv*+ba/b',
+                '--merge-output-format', 'mp4',
+                '-o', output_template,
+            ]
+
+            # 字幕オプション
+            if self.download_subs:
+                cmd.extend([
+                    '--write-auto-sub',
+                    '--sub-lang', self.sub_lang,
+                    '--sub-format', 'srt',
+                    '--convert-subs', 'srt',
+                    '--no-abort-on-error',
+                    '--ignore-errors',
+                ])
+                self.log_message.emit(f"Subtitles: {self.sub_lang}")
+
+            cmd.append(self.url)
+
+            self.log_message.emit(f"Command: {' '.join(cmd)}")
+
+            # ダウンロード実行
+            kwargs = get_popen_kwargs()
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                **kwargs
+            )
+
+            # 出力を読み取り（進捗表示）
+            for line in iter(self._process.stdout.readline, ''):
+                if self._cancelled:
+                    self._process.terminate()
+                    return
+                line = line.strip()
+                if line:
+                    # ダウンロード進捗を抽出
+                    if '[download]' in line and '%' in line:
+                        # 例: [download]  45.2% of 123.45MiB at 5.67MiB/s
+                        match = re.search(r'(\d+\.?\d*)%', line)
+                        if match:
+                            percent = match.group(1)
+                            self.progress_update.emit(f"Downloading: {percent}%")
+                    elif 'Destination:' in line or 'Merging' in line:
+                        self.log_message.emit(line)
+
+            self._process.wait()
+
+            if self._cancelled:
+                return
+
+            if self._process.returncode != 0:
+                self.error_occurred.emit("Download failed")
+                return
+
+            # 出力ファイルパスを確認
+            video_path = str(Path(self.output_dir) / f"{safe_title}.mp4")
+            srt_path = ""
+
+            if self.download_subs:
+                # 字幕ファイルをリネーム（言語コードを除去）
+                original_srt = Path(self.output_dir) / f"{safe_title}.{self.sub_lang}.srt"
+                target_srt = Path(self.output_dir) / f"{safe_title}_yt.srt"
+                if original_srt.exists():
+                    original_srt.rename(target_srt)
+                    srt_path = str(target_srt)
+                    self.log_message.emit(f"Subtitle: {target_srt.name}")
+                else:
+                    self.log_message.emit("No subtitles available for this video")
+
+            if Path(video_path).exists():
+                self.log_message.emit(f"Download completed: {Path(video_path).name}")
+                self.download_completed.emit(video_path, srt_path)
+            else:
+                self.error_occurred.emit(f"Video file not found: {video_path}")
+
+        except Exception as e:
+            self.error_occurred.emit(str(e))

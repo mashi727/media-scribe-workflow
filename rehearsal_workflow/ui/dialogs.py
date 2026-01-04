@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QFileDialog, QFrame,
     QAbstractItemView, QSizePolicy, QApplication, QWidget,
-    QSlider, QSpinBox, QCheckBox
+    QSlider, QSpinBox, QCheckBox, QLineEdit, QRadioButton,
+    QStackedWidget, QButtonGroup, QGroupBox
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QBuffer, QIODevice
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QBrush, QColor, QTransform
@@ -552,15 +553,19 @@ class SourceSelectionDialog(QDialog):
     ソース選択ダイアログ
 
     機能:
-    - ワーキングディレクトリのファイルを表示
+    - ローカルファイル選択（ワーキングディレクトリのファイルを表示）
+    - YouTube URL入力（yt-dlpでダウンロード）
     - MP3/MP4トグルでフィルタリング
     - チェックボックスで複数選択
     - 複数MP3選択時は自動結合＆チャプター生成
+    - カバー画像選択（音声ファイル用）
 
     使用例:
         dialog = SourceSelectionDialog(parent)
         if dialog.exec() == QDialog.Accepted:
             sources = dialog.get_sources()
+            youtube_url = dialog.get_youtube_url()
+            cover_image = dialog.get_cover_image()
     """
 
     # シグナル
@@ -572,23 +577,31 @@ class SourceSelectionDialog(QDialog):
 
     # ダイアログサイズ
     DEFAULT_WIDTH = 800
-    DEFAULT_HEIGHT = 600
+    DEFAULT_HEIGHT = 700
     MIN_WIDTH = 600
-    MIN_HEIGHT = 450
+    MIN_HEIGHT = 550
     ASPECT_RATIO = DEFAULT_WIDTH / DEFAULT_HEIGHT
 
-    def __init__(self, parent=None, initial_sources: Optional[List[SourceFile]] = None, work_dir: Optional[Path] = None):
+    def __init__(self, parent=None, initial_sources: Optional[List[SourceFile]] = None,
+                 work_dir: Optional[Path] = None, initial_cover_image: Optional[QImage] = None):
         super().__init__(parent)
         self._sources: List[SourceFile] = initial_sources or []
         self._work_dir = work_dir or Path.cwd()
         self._filter_mode = "mp3"  # "mp3" or "mp4"
+        self._source_type = "local"  # "local" or "youtube"
         self._resizing = False  # リサイズ中フラグ
+        self._cover_image: Optional[QImage] = initial_cover_image
+        self._youtube_url: str = ""
         self._setup_ui()
         self._refresh_file_list()
+        # カバー画像が既に設定されている場合は表示
+        if initial_cover_image:
+            self._cover_status.setText("Set")
+            self._cover_status.setStyleSheet("color: #22c55e;")
 
     def _setup_ui(self):
         """UI構築"""
-        self.setWindowTitle("Select Source Files")
+        self.setWindowTitle("Select Source")
         self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self.setStyleSheet("""
@@ -598,13 +611,70 @@ class SourceSelectionDialog(QDialog):
             QLabel {
                 color: #f0f0f0;
             }
+            QRadioButton {
+                color: #f0f0f0;
+                font-size: 14px;
+                spacing: 8px;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QRadioButton::indicator:unchecked {
+                border: 2px solid #666666;
+                border-radius: 9px;
+                background: transparent;
+            }
+            QRadioButton::indicator:checked {
+                border: 2px solid #3b82f6;
+                border-radius: 9px;
+                background: #3b82f6;
+            }
+            QGroupBox {
+                color: #a0a0a0;
+                font-size: 13px;
+                border: 1px solid #3a3a3a;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 4px;
+            }
         """)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # === 上部: トグルボタン + ディレクトリ ===
+        # === ソースタイプ選択 ===
+        source_type_layout = QHBoxLayout()
+
+        self._local_radio = QRadioButton("Local Files")
+        self._local_radio.setChecked(True)
+        self._local_radio.clicked.connect(lambda: self._set_source_type("local"))
+        source_type_layout.addWidget(self._local_radio)
+
+        self._youtube_radio = QRadioButton("YouTube URL")
+        self._youtube_radio.clicked.connect(lambda: self._set_source_type("youtube"))
+        source_type_layout.addWidget(self._youtube_radio)
+
+        source_type_layout.addStretch()
+        layout.addLayout(source_type_layout)
+
+        # === スタックウィジェット（ローカルファイル / YouTube） ===
+        self._stack = QStackedWidget()
+        layout.addWidget(self._stack, 1)
+
+        # --- ローカルファイルページ ---
+        local_page = QWidget()
+        local_layout = QVBoxLayout(local_page)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_layout.setSpacing(8)
+
+        # トグルボタン + ディレクトリ
         header_layout = QHBoxLayout()
 
         self._mp3_btn = QPushButton("MP3")
@@ -633,16 +703,76 @@ class SourceSelectionDialog(QDialog):
         browse_btn.clicked.connect(self._browse_directory)
         header_layout.addWidget(browse_btn)
 
-        layout.addLayout(header_layout)
+        local_layout.addLayout(header_layout)
 
-        # === 中央: ファイルリスト（標準選択モード） ===
+        # ファイルリスト
         self._file_list = QListWidget()
-        # MP3: 複数選択、MP4: 単一選択（モード切替時に変更）
         self._file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._file_list.setStyleSheet(self._list_style())
         self._file_list.itemSelectionChanged.connect(self._update_info)
         self._file_list.itemDoubleClicked.connect(self._on_double_click)
-        layout.addWidget(self._file_list, 1)
+        local_layout.addWidget(self._file_list, 1)
+
+        self._stack.addWidget(local_page)
+
+        # --- YouTubeページ ---
+        youtube_page = QWidget()
+        youtube_layout = QVBoxLayout(youtube_page)
+        youtube_layout.setContentsMargins(0, 0, 0, 0)
+        youtube_layout.setSpacing(12)
+
+        url_label = QLabel("YouTube URL:")
+        url_label.setStyleSheet("color: #a0a0a0; font-size: 14px;")
+        youtube_layout.addWidget(url_label)
+
+        self._youtube_url_edit = QLineEdit()
+        self._youtube_url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
+        self._youtube_url_edit.setStyleSheet("""
+            QLineEdit {
+                background: #0f0f0f;
+                color: #f0f0f0;
+                border: 1px solid #3a3a3a;
+                border-radius: 6px;
+                padding: 12px;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3b82f6;
+            }
+        """)
+        self._youtube_url_edit.textChanged.connect(self._on_youtube_url_changed)
+        youtube_layout.addWidget(self._youtube_url_edit)
+
+        # YouTube情報表示エリア
+        self._youtube_info = QLabel("Enter a YouTube URL to download")
+        self._youtube_info.setStyleSheet("color: #666666; font-size: 13px;")
+        youtube_layout.addWidget(self._youtube_info)
+
+        youtube_layout.addStretch()
+
+        self._stack.addWidget(youtube_page)
+
+        # === カバー画像セクション（音声ファイル用） ===
+        self._cover_group = QGroupBox("Cover Image (for audio files)")
+        cover_layout = QHBoxLayout(self._cover_group)
+
+        self._cover_btn = QPushButton("Select Image")
+        self._cover_btn.setStyleSheet(self._button_style())
+        self._cover_btn.clicked.connect(self._open_cover_dialog)
+        cover_layout.addWidget(self._cover_btn)
+
+        self._cover_status = QLabel("Not Set")
+        self._cover_status.setStyleSheet("color: #ef4444;")
+        cover_layout.addWidget(self._cover_status)
+
+        cover_layout.addStretch()
+
+        self._cover_clear_btn = QPushButton("Clear")
+        self._cover_clear_btn.setStyleSheet(self._button_style())
+        self._cover_clear_btn.clicked.connect(self._clear_cover_image)
+        cover_layout.addWidget(self._cover_clear_btn)
+
+        layout.addWidget(self._cover_group)
 
         # === 下部: 情報 + ボタン ===
         bottom_layout = QHBoxLayout()
@@ -664,6 +794,9 @@ class SourceSelectionDialog(QDialog):
         bottom_layout.addWidget(ok_btn)
 
         layout.addLayout(bottom_layout)
+
+        # 初期状態でカバー画像セクションを表示（MP3モード）
+        self._update_cover_visibility()
 
     def _toggle_button_style(self) -> str:
         """トグルボタンスタイル"""
@@ -835,6 +968,21 @@ class SourceSelectionDialog(QDialog):
             }
         """
 
+    def _set_source_type(self, source_type: str):
+        """ソースタイプを設定（local / youtube）"""
+        self._source_type = source_type
+        self._local_radio.setChecked(source_type == "local")
+        self._youtube_radio.setChecked(source_type == "youtube")
+
+        # スタックウィジェットを切替
+        self._stack.setCurrentIndex(0 if source_type == "local" else 1)
+
+        # カバー可視性を更新
+        self._update_cover_visibility()
+
+        # 情報表示を更新
+        self._update_info()
+
     def _set_filter_mode(self, mode: str):
         """フィルタモードを設定"""
         self._filter_mode = mode
@@ -848,6 +996,9 @@ class SourceSelectionDialog(QDialog):
             self._file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
         self._refresh_file_list()
+
+        # カバー可視性を更新
+        self._update_cover_visibility()
 
     def _refresh_file_list(self):
         """ファイル一覧を更新（ファイル → フォルダの順）"""
@@ -891,6 +1042,13 @@ class SourceSelectionDialog(QDialog):
 
     def _update_info(self):
         """情報表示更新"""
+        if self._source_type == "youtube":
+            if self._youtube_url and self._is_valid_youtube_url(self._youtube_url):
+                self._info_label.setText("YouTube video ready to download")
+            else:
+                self._info_label.setText("Enter a valid YouTube URL")
+            return
+
         count = len(self._file_list.selectedItems())
 
         if count == 0:
@@ -915,6 +1073,51 @@ class SourceSelectionDialog(QDialog):
             # ファイルの場合はOK
             self.accept()
 
+    def _on_youtube_url_changed(self, text: str):
+        """YouTube URL入力時の処理"""
+        self._youtube_url = text.strip()
+        if not self._youtube_url:
+            self._youtube_info.setText("Enter a YouTube URL to download")
+            self._youtube_info.setStyleSheet("color: #666666;")
+        elif self._is_valid_youtube_url(self._youtube_url):
+            self._youtube_info.setText("Valid YouTube URL")
+            self._youtube_info.setStyleSheet("color: #22c55e;")
+        else:
+            self._youtube_info.setText("Invalid YouTube URL")
+            self._youtube_info.setStyleSheet("color: #ef4444;")
+
+    def _is_valid_youtube_url(self, url: str) -> bool:
+        """YouTube URLの簡易バリデーション"""
+        youtube_patterns = [
+            "youtube.com/watch",
+            "youtu.be/",
+            "youtube.com/shorts/",
+            "youtube.com/live/",
+        ]
+        return any(pattern in url for pattern in youtube_patterns)
+
+    def _update_cover_visibility(self):
+        """カバー画像セクションの表示/非表示を更新"""
+        # YouTube選択時、またはMP4モード時はカバー画像を非表示
+        show_cover = self._source_type == "local" and self._filter_mode == "mp3"
+        self._cover_group.setVisible(show_cover)
+
+    def _open_cover_dialog(self):
+        """カバー画像ダイアログを開く"""
+        dialog = CoverImageDialog(self, initial_image=self._cover_image, work_dir=self._work_dir)
+        if dialog.exec():
+            image = dialog.get_image()
+            if image:
+                self._cover_image = image
+                self._cover_status.setText("Set")
+                self._cover_status.setStyleSheet("color: #22c55e;")
+
+    def _clear_cover_image(self):
+        """カバー画像をクリア"""
+        self._cover_image = None
+        self._cover_status.setText("Not Set")
+        self._cover_status.setStyleSheet("color: #ef4444;")
+
     def get_sources(self) -> List[SourceFile]:
         """選択されたソースを取得"""
         sources = []
@@ -932,6 +1135,22 @@ class SourceSelectionDialog(QDialog):
         # ファイル名順でソート
         sources.sort(key=lambda s: s.path.name.lower())
         return sources
+
+    def get_youtube_url(self) -> str:
+        """YouTube URLを取得"""
+        return self._youtube_url if self._source_type == "youtube" else ""
+
+    def get_cover_image(self) -> Optional[QImage]:
+        """カバー画像を取得"""
+        return self._cover_image
+
+    def get_source_type(self) -> str:
+        """ソースタイプを取得（local / youtube）"""
+        return self._source_type
+
+    def get_work_dir(self) -> Path:
+        """現在の作業ディレクトリを取得"""
+        return self._work_dir
 
     def keyPressEvent(self, event):
         """Returnキーで選択確定"""
