@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mermaid Diagram Viewer - rehearsal-workflow</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #333333;
+            --border-color: #dddddd;
+            --header-bg: #f5f5f5;
+            --button-bg: #0066cc;
+            --button-hover: #0052a3;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #1e1e1e;
+                --text-color: #e0e0e0;
+                --border-color: #444444;
+                --header-bg: #2d2d2d;
+                --button-bg: #0078d4;
+                --button-hover: #1084d8;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background-color: var(--header-bg);
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        select {
+            padding: 8px 12px;
+            font-size: 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            min-width: 250px;
+        }
+
+        button {
+            padding: 8px 16px;
+            font-size: 1rem;
+            background-color: var(--button-bg);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        button:hover {
+            background-color: var(--button-hover);
+        }
+
+        button svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .diagram-container {
+            padding: 20px;
+            overflow: auto;
+            min-height: 400px;
+        }
+
+        #diagram {
+            display: flex;
+            justify-content: center;
+        }
+
+        .info {
+            padding: 10px 20px;
+            background-color: var(--header-bg);
+            border-top: 1px solid var(--border-color);
+            font-size: 0.875rem;
+            color: #666;
+        }
+
+        .back-link {
+            color: var(--button-bg);
+            text-decoration: none;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Mermaid Diagram Viewer</h1>
+        <div class="controls">
+            <select id="diagramSelect">
+                <option value="">-- Select a diagram --</option>
+            </select>
+            <button id="downloadBtn" disabled>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                Download SVG
+            </button>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="diagram-container">
+            <div id="diagram"></div>
+        </div>
+    </div>
+
+    <div class="info">
+        <a href="https://github.com/mashi727/rehearsal-workflow" class="back-link">Back to Repository</a>
+        &nbsp;|&nbsp;
+        Source: <code>docs/workflow-diagrams.md</code>
+    </div>
+
+    <script>
+        // Mermaid diagrams extracted from workflow-diagrams.md
+        const diagrams = {
+            "artifact-transformation": {
+                name: "成果物変換図",
+                code: `flowchart LR
+    subgraph INPUT["入力"]
+        I1["mp4/mov<br>（ローカル映像）"]
+        I2["m4a/mp3<br>（ローカル音声）"]
+        I3["YouTube URL"]
+    end
+
+    subgraph SCOPE["現状の前処理スコープ（Video Chapter Editor）"]
+        subgraph PREPROCESS["前処理"]
+            P1["video-trim<br>トリミング"]
+            P2["video-chapters<br>チャプター付与"]
+        end
+
+        subgraph SRT_ACQ["SRT取得"]
+            S1["yt-srt"]
+            S2["whisper-remote"]
+        end
+    end
+
+    subgraph MIDDLE["中間出力（SRT）"]
+        M1["SRT<br>（YouTube字幕）"]
+        M2["SRT<br>（Whisper）"]
+        M3["SRT + 話者<br>（whisperX）"]
+        M4["チャプター付きmp4"]
+    end
+
+    subgraph EXTERNAL["外部処理"]
+        E2["AI処理<br>（Claude等）"]
+        E3["LaTeX<br>（luatex-pdf）"]
+    end
+
+    subgraph OUTPUT["最終出力"]
+        O1["スクリプト PDF<br>（一次資料）"]
+        O2["サマリー PDF<br>（二次資料）"]
+        O3["チャプター付き動画"]
+        O4["チャプターリスト<br>（YouTube概要欄用）"]
+    end
+
+    I1 --> P1
+    I2 --> P1
+    P1 --> P2
+    I3 --> S1 --> M1
+    I1 --> S2 --> M2
+    I2 --> S2
+    I1 -->|whisperX| M3
+    I2 -->|whisperX| M3
+    P2 --> M4
+    M1 --> E2
+    M2 --> E2
+    M3 --> E2
+    E2 --> E3 --> O1
+    E2 --> E3 --> O2
+    M4 --> O3
+    M4 -->|抽出| O4`
+            },
+            "basic-workflow": {
+                name: "基本ワークフロー（単一動画 → SRT）",
+                code: `flowchart TD
+    START([開始])
+    INPUT[/"生の長時間動画<br>例: 13:30-17:00の練習録画"/]
+
+    subgraph TRIM["1. 不要部分の削除 (video-trim)"]
+        T1[休憩時間カット]
+        T2[準備・片付けカット]
+        T3[演奏部分のみ抽出]
+        T1 --> T2 --> T3
+    end
+
+    subgraph CHAPTER["2. 構造化 (movie-viewer)"]
+        C1[曲ごとに分割点決定]
+        C2[チャプター名付与]
+        C1 --> C2
+    end
+
+    subgraph CONCAT["3. 結合 (video-chapters)"]
+        CO1[チャプター情報埋め込み]
+        CO2[単一MP4出力]
+        CO1 --> CO2
+    end
+
+    subgraph SRT["4. 字幕取得 (yt-srt)"]
+        S1[YouTube字幕取得]
+        S2[SRTファイル出力]
+        S1 --> S2
+    end
+
+    OUTPUT[/"*.srt"/]
+    END([終了])
+
+    START --> INPUT
+    INPUT --> TRIM
+    TRIM --> CHAPTER
+    CHAPTER --> CONCAT
+    CONCAT --> SRT
+    SRT --> OUTPUT
+    OUTPUT --> END`
+            },
+            "extended-workflow": {
+                name: "拡張ワークフロー（複数ソース対応）",
+                code: `flowchart TD
+    START([開始])
+
+    subgraph INPUT["入力ソース"]
+        I1[/"Wireless Pro<br>指揮者近くマイク"/]
+        I2[/"iPhone<br>後方からの動画"/]
+    end
+
+    CHECK{複数ソースあり?}
+
+    subgraph AUDIO["A. 音声処理"]
+        A1[audio-normalize<br>音量正規化]
+        A2[audio-extract-channel<br>指揮者チャンネル抽出]
+        A3[文字起こし用音声]
+        A1 --> A2 --> A3
+    end
+
+    subgraph VIDEO["B. 映像処理"]
+        V1[video-trim<br>不要部分削除]
+        V2[movie-viewer<br>チャプター付け]
+        V1 --> V2
+    end
+
+    subgraph MERGE["C. 合成"]
+        M1[video-replace-audio<br>動画+指揮者音声]
+        M2[最終動画]
+        M1 --> M2
+    end
+
+    subgraph SINGLE["単一ソース処理"]
+        SG1[video-trim]
+        SG2[movie-viewer]
+        SG1 --> SG2
+    end
+
+    TRANS_METHOD{文字起こし方法}
+
+    subgraph YT["YouTube字幕"]
+        Y1[yt-srt]
+    end
+
+    subgraph WH["Whisper"]
+        W1[whisper-remote]
+    end
+
+    OUTPUT[/"SRTファイル"/]
+    END([終了])
+
+    START --> INPUT
+    INPUT --> CHECK
+    CHECK -->|Yes| AUDIO
+    CHECK -->|Yes| VIDEO
+    AUDIO --> MERGE
+    VIDEO --> MERGE
+    CHECK -->|No| SINGLE
+    MERGE --> TRANS_METHOD
+    SINGLE --> TRANS_METHOD
+    TRANS_METHOD -->|YouTube| YT
+    TRANS_METHOD -->|Whisper| WH
+    TRANS_METHOD -->|両方| YT
+    TRANS_METHOD -->|両方| WH
+    YT --> OUTPUT
+    WH --> OUTPUT
+    OUTPUT --> END`
+            },
+            "overall-flow": {
+                name: "全体フロー",
+                code: `flowchart LR
+    subgraph PHASE1["Phase 1: 前処理"]
+        direction TB
+        P1_IN{入力ソース}
+        P1_YT[YouTube URL]
+        P1_LOCAL[ローカル動画]
+        P1_MULTI[複数ソース]
+
+        P1_IN --> P1_YT
+        P1_IN --> P1_LOCAL
+        P1_IN --> P1_MULTI
+
+        P1_YT --> P1_SRT1[yt-srt]
+        P1_LOCAL --> P1_BASIC[基本パターン]
+        P1_MULTI --> P1_ADV[拡張パターン]
+    end
+
+    subgraph PHASE2["Phase 2: 分析"]
+        direction TB
+        P2_SRT[/"SRTファイル"/]
+        P2_LLM[LLMで分析<br>Claude/ChatGPT等]
+        P2_PROMPT[プロンプト例参照]
+
+        P2_SRT --> P2_LLM
+        P2_PROMPT -.-> P2_LLM
+    end
+
+    subgraph PHASE3["Phase 3: 出力"]
+        direction TB
+        P3_CHECK{LaTeX?}
+        P3_TEX[luatex-docker-remote<br>PDF生成]
+        P3_MD[Markdown等]
+        P3_OUT[/"最終出力"/]
+
+        P3_CHECK -->|Yes| P3_TEX
+        P3_CHECK -->|No| P3_MD
+        P3_TEX --> P3_OUT
+        P3_MD --> P3_OUT
+    end
+
+    PHASE1 --> PHASE2
+    PHASE2 --> PHASE3`
+            },
+            "preprocessing-swimlane": {
+                name: "前処理ワークフロー（スイムレーン）",
+                code: `flowchart TB
+    subgraph YAML["YAML（プロジェクトマニフェスト）"]
+        direction LR
+        Y1[("静的セクション<br>profile, source.path<br>fields, output")]
+        Y2[("動的セクション<br>source.state<br>source.files")]
+    end
+
+    subgraph USER["ユーザー"]
+        direction TB
+        U1([開始])
+        U2[動画ファイルをドロップ]
+        U3[再生位置をシーク]
+        U4[開始点/終了点を設定]
+        U5[トリミング確定]
+        U6[チャプターマーカー追加]
+        U7[チャプター名入力]
+        U8[チャプター編集完了]
+        U9{複数動画?}
+        U10[結合順序確定]
+        U11{字幕取得方式}
+        U12[YouTube URL入力]
+        U13[SRTファイル指定]
+        U14([次フェーズへ])
+    end
+
+    subgraph UI_LAYER["UI"]
+        direction TB
+        I1[サムネイル・タイムライン表示]
+        I2[プレビュー表示]
+        I3[選択範囲ハイライト]
+        I4[プログレスバー更新]
+        I5[チャプターエディタ表示]
+        I6[マーカー名入力ダイアログ]
+        I7[タイムライン上にマーカー表示]
+        I8[結合順序確認ダイアログ]
+        I9[完了通知]
+        I10[字幕取得方式選択]
+        I11[次フェーズボタン有効化]
+    end
+
+    subgraph BACKEND["バックエンド"]
+        direction TB
+        B1[メディア情報解析]
+        B2[ffmpeg トリミング実行]
+        B3[中間ファイル生成]
+        B4[chapters.txt 保存]
+        B5[動画結合実行]
+        B6[チャプター埋込]
+        B7[最終動画出力]
+        B8[whisper-remote 接続確認]
+        B9[state更新]
+    end
+
+    U1 --> Y1
+    Y1 -->|source.path読込| B1
+    B1 --> I1
+    B1 -->|video: ready| Y2
+    I1 --> U3
+    U3 --> I2
+    I2 --> U4
+    U4 --> I3
+    I3 --> U5
+    U5 --> B2
+    B2 --> I4
+    I4 --> B3
+    B3 --> I5
+    I5 --> U6
+    U6 --> I6
+    I6 --> U7
+    U7 --> I7
+    I7 --> U8
+    U8 --> B4
+    B4 --> U9
+    U9 -->|Yes| I8
+    I8 --> U10
+    U10 --> B5
+    B5 --> B6
+    U9 -->|No| B6
+    B6 --> B7
+    B7 --> I9
+    I9 --> I10
+    I10 --> U11
+    U11 -->|YouTube| U12
+    U11 -->|Whisper| B8
+    U11 -->|手動| U13
+    U12 --> B9
+    B8 --> B9
+    U13 --> B9
+    B9 -->|youtube_srt/whisper_srt/manual_srt| Y2
+    Y2 --> I11
+    I11 --> U14`
+            },
+            "input-state-transition": {
+                name: "入力状態遷移図",
+                code: `stateDiagram-v2
+    [*] --> 入力確認
+
+    state 入力確認 {
+        [*] --> 状態判定
+        状態判定 --> S1_YouTube_URL: URLのみ
+        状態判定 --> S2_ローカル動画のみ: 動画ファイルのみ
+        状態判定 --> S3_動画_YT字幕あり: 動画 + *_yt.srt
+        状態判定 --> S4_動画_WP字幕あり: 動画 + *_wp.srt
+        状態判定 --> S5_動画_両方あり: 動画 + 両SRT
+        状態判定 --> S6_動画_手動SRTあり: 動画 + 手動.srt
+        状態判定 --> S7_YouTube_DL済み_字幕なし: DL済み動画のみ
+    }
+
+    S1_YouTube_URL --> S3_動画_YT字幕あり: ytdl実行
+    S2_ローカル動画のみ --> S4_動画_WP字幕あり: Whisper実行
+    S2_ローカル動画のみ --> S6_動画_手動SRTあり: 手動指定
+    S3_動画_YT字幕あり --> S5_動画_両方あり: Whisper追加
+    S7_YouTube_DL済み_字幕なし --> S3_動画_YT字幕あり: yt-srt実行
+    S7_YouTube_DL済み_字幕なし --> S4_動画_WP字幕あり: Whisper実行
+
+    S3_動画_YT字幕あり --> 処理可能
+    S4_動画_WP字幕あり --> 処理可能
+    S5_動画_両方あり --> 処理可能
+    S6_動画_手動SRTあり --> 処理可能
+
+    処理可能 --> [*]`
+            },
+            "yaml-lifecycle": {
+                name: "YAMLライフサイクル",
+                code: `flowchart TB
+    subgraph YAML_STRUCTURE["YAMLの構成"]
+        direction TB
+        STATIC["静的セクション<br>（ユーザーが最初に記入）"]
+        DYNAMIC["動的セクション<br>（処理中に自動更新）"]
+    end
+
+    subgraph STATIC_DETAIL["静的セクション"]
+        direction LR
+        S1["schema_version, profile"]
+        S2["source.type, path, working_dir"]
+        S3["fields（title, date...）"]
+        S4["transcription.method"]
+        S5["output（basename, format）"]
+    end
+
+    subgraph DYNAMIC_DETAIL["動的セクション"]
+        direction LR
+        D1["source.state"]
+        D2["source.files"]
+    end
+
+    STATIC --> STATIC_DETAIL
+    DYNAMIC --> DYNAMIC_DETAIL`
+            },
+            "schema-file-reference": {
+                name: "スキーマ構造（ファイル参照関係）",
+                code: `graph TD
+    subgraph WD["作業ディレクトリ"]
+        YAML["transcription_workflow.yaml<br>(設定ファイル)"]
+        SRT1["*_yt.srt"]
+        SRT2["*_wp.srt"]
+        OUTPUT["output/*.tex"]
+    end
+
+    subgraph CONFIG["~/.config/rehearsal-workflow/"]
+        subgraph PROFILES["profiles/"]
+            P1["orchestral_rehearsal.yaml"]
+            P2["horn_lesson.yaml"]
+            P3["meeting_report.yaml"]
+        end
+
+        subgraph PROMPTS["prompts/"]
+            PR1["orchestral_rehearsal.md"]
+            PR2["horn_lesson.md"]
+            PR3["meeting_report.md"]
+        end
+
+        subgraph TEMPLATES["templates/"]
+            T1["luatex_twocolumn.tex"]
+        end
+
+        subgraph MACROS["macros/"]
+            M1["common.tex"]
+            M2["meeting_speakers.tex"]
+        end
+
+        subgraph GLOSSARIES["glossaries/"]
+            G1["music_terms.yaml"]
+            G2["horn_techniques.yaml"]
+            G3["defense_acronyms.yaml"]
+        end
+    end
+
+    YAML -->|"profile:"| PROFILES
+    P1 -->|"prompt_template:"| PR1
+    P2 -->|"prompt_template:"| PR2
+    P3 -->|"prompt_template:"| PR3
+    P1 -->|"base_template:"| T1
+    P2 -->|"base_template:"| T1
+    P3 -->|"base_template:"| T1
+    P1 -->|"macros:"| M1
+    P3 -->|"macros:"| M2
+    P1 -->|"glossary:"| G1
+    P2 -->|"glossary:"| G2
+    P3 -->|"glossary:"| G3
+
+    YAML -->|"source.files:"| SRT1
+    YAML -->|"source.files:"| SRT2
+    YAML -->|"output:"| OUTPUT`
+            },
+            "participants-structure": {
+                name: "参加者構造の類型",
+                code: `graph LR
+    subgraph HIER["hierarchical (階層型)"]
+        direction TB
+        I1["講師/指揮者"]
+        S1["生徒/奏者"]
+        I1 -->|"指導"| S1
+    end
+
+    subgraph FLAT["flat (フラット型)"]
+        direction TB
+        P1["参加者A"]
+        P2["参加者B"]
+        P3["参加者C"]
+        P1 <-->|"対等"| P2
+        P2 <-->|"対等"| P3
+    end
+
+    HIER --- EXAMPLES1["レッスン, 講義, リハーサル"]
+    FLAT --- EXAMPLES2["会議, 座談会"]`
+            }
+        };
+
+        // Initialize Mermaid
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default',
+            securityLevel: 'loose',
+            flowchart: {
+                useMaxWidth: true,
+                htmlLabels: true
+            }
+        });
+
+        const select = document.getElementById('diagramSelect');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const diagramDiv = document.getElementById('diagram');
+
+        // Populate select options
+        Object.entries(diagrams).forEach(([key, value]) => {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = value.name;
+            select.appendChild(option);
+        });
+
+        // Render selected diagram
+        async function renderDiagram(key) {
+            if (!key) {
+                diagramDiv.innerHTML = '<p style="color: #666;">Select a diagram from the dropdown above.</p>';
+                downloadBtn.disabled = true;
+                return;
+            }
+
+            const diagram = diagrams[key];
+            diagramDiv.innerHTML = '';
+
+            try {
+                const { svg } = await mermaid.render('mermaid-svg', diagram.code);
+                diagramDiv.innerHTML = svg;
+                downloadBtn.disabled = false;
+            } catch (error) {
+                diagramDiv.innerHTML = `<p style="color: red;">Error rendering diagram: ${error.message}</p>`;
+                downloadBtn.disabled = true;
+            }
+        }
+
+        // Download SVG
+        function downloadSVG() {
+            const svg = diagramDiv.querySelector('svg');
+            if (!svg) return;
+
+            const svgData = new XMLSerializer().serializeToString(svg);
+            const blob = new Blob([svgData], { type: 'image/svg+xml' });
+            const url = URL.createObjectURL(blob);
+
+            const key = select.value;
+            const filename = `${key}.svg`;
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        // Event listeners
+        select.addEventListener('change', (e) => renderDiagram(e.target.value));
+        downloadBtn.addEventListener('click', downloadSVG);
+
+        // Initial state
+        renderDiagram('');
+
+        // Handle URL hash
+        if (window.location.hash) {
+            const key = window.location.hash.slice(1);
+            if (diagrams[key]) {
+                select.value = key;
+                renderDiagram(key);
+            }
+        }
+    </script>
+</body>
+</html>
