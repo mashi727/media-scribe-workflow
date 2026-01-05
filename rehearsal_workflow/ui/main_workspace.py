@@ -1827,11 +1827,21 @@ class MainWorkspace(QWidget):
         from PySide6.QtCore import QSortFilterProxyModel, QDir, QFileInfo
         from rehearsal_workflow.ui.dialogs import detect_video_duration
 
-        # 許可する拡張子
-        allowed_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.mp3', '.m4a', '.wav', '.aac', '.flac'}
+        # フィルタ定義
+        VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
+        AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.flac'}
+        ALL_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 
         # カスタムプロキシモデル：フィルタに合わないファイルを非表示
         class MediaFilterProxyModel(QSortFilterProxyModel):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._allowed_extensions = ALL_EXTENSIONS
+
+            def set_allowed_extensions(self, extensions):
+                self._allowed_extensions = extensions
+                self.invalidateFilter()
+
             def filterAcceptsRow(self, source_row, source_parent):
                 model = self.sourceModel()
                 index = model.index(source_row, 0, source_parent)
@@ -1844,7 +1854,7 @@ class MainWorkspace(QWidget):
 
                 # ファイルは拡張子でフィルタ
                 suffix = file_info.suffix().lower()
-                return f'.{suffix}' in allowed_extensions
+                return f'.{suffix}' in self._allowed_extensions
 
         # ダイアログを作成
         dialog = QFileDialog(self, "Select Source Files", str(self._state.work_dir))
@@ -1856,6 +1866,29 @@ class MainWorkspace(QWidget):
         # カスタムプロキシモデルを設定
         proxy_model = MediaFilterProxyModel(dialog)
         dialog.setProxyModel(proxy_model)
+
+        # フィルタ選択肢を設定
+        filters = [
+            "Video Files (*.mp4 *.mov *.avi *.mkv)",
+            "Audio Files (*.mp3 *.m4a *.wav *.aac *.flac)",
+            "All Media (*.mp4 *.mov *.avi *.mkv *.mp3 *.m4a *.wav *.aac *.flac)"
+        ]
+        dialog.setNameFilters(filters)
+        dialog.selectNameFilter(filters[0])  # デフォルトはVideo
+
+        # 初期フィルタをVideoに設定
+        proxy_model.set_allowed_extensions(VIDEO_EXTENSIONS)
+
+        # フィルタ変更時にプロキシモデルを更新
+        def on_filter_changed(filter_text):
+            if "Video" in filter_text:
+                proxy_model.set_allowed_extensions(VIDEO_EXTENSIONS)
+            elif "Audio" in filter_text:
+                proxy_model.set_allowed_extensions(AUDIO_EXTENSIONS)
+            else:
+                proxy_model.set_allowed_extensions(ALL_EXTENSIONS)
+
+        dialog.filterSelected.connect(on_filter_changed)
 
         # ダークテーマスタイルを適用
         dialog.setStyleSheet(self._file_dialog_dark_style())
