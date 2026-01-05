@@ -576,9 +576,9 @@ class SourceSelectionDialog(QDialog):
     VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
 
     # ダイアログサイズ
-    DEFAULT_WIDTH = 800
+    DEFAULT_WIDTH = 1000
     DEFAULT_HEIGHT = 700
-    MIN_WIDTH = 600
+    MIN_WIDTH = 800
     MIN_HEIGHT = 550
     ASPECT_RATIO = DEFAULT_WIDTH / DEFAULT_HEIGHT
 
@@ -587,7 +587,7 @@ class SourceSelectionDialog(QDialog):
         super().__init__(parent)
         self._sources: List[SourceFile] = initial_sources or []
         self._work_dir = work_dir or Path.cwd()
-        self._filter_mode = "mp3"  # "mp3" or "mp4"
+        self._filter_mode = "mp4"  # "mp3" or "mp4"
         self._source_type = "local"  # "local" or "youtube"
         self._resizing = False  # リサイズ中フラグ
         self._cover_image: Optional[QImage] = initial_cover_image
@@ -677,19 +677,19 @@ class SourceSelectionDialog(QDialog):
         # トグルボタン + ディレクトリ
         header_layout = QHBoxLayout()
 
-        self._mp3_btn = QPushButton("MP3")
-        self._mp3_btn.setCheckable(True)
-        self._mp3_btn.setChecked(True)
-        self._mp3_btn.setStyleSheet(self._toggle_button_style())
-        self._mp3_btn.clicked.connect(lambda: self._set_filter_mode("mp3"))
-        header_layout.addWidget(self._mp3_btn)
-
         self._mp4_btn = QPushButton("MP4")
         self._mp4_btn.setCheckable(True)
-        self._mp4_btn.setChecked(False)
+        self._mp4_btn.setChecked(True)
         self._mp4_btn.setStyleSheet(self._toggle_button_style())
         self._mp4_btn.clicked.connect(lambda: self._set_filter_mode("mp4"))
         header_layout.addWidget(self._mp4_btn)
+
+        self._mp3_btn = QPushButton("MP3")
+        self._mp3_btn.setCheckable(True)
+        self._mp3_btn.setChecked(False)
+        self._mp3_btn.setStyleSheet(self._toggle_button_style())
+        self._mp3_btn.clicked.connect(lambda: self._set_filter_mode("mp3"))
+        header_layout.addWidget(self._mp3_btn)
 
         header_layout.addStretch()
 
@@ -831,12 +831,12 @@ class SourceSelectionDialog(QDialog):
                 color: #f0f0f0;
                 border: 1px solid #3a3a3a;
                 border-radius: 8px;
-                padding: 8px;
-                font-size: 14px;
+                padding: 4px;
+                font-size: 18px;
                 outline: none;
             }
             QListWidget::item {
-                padding: 10px;
+                padding: 4px 8px;
                 border-radius: 4px;
             }
             QListWidget::item:hover {
@@ -1023,19 +1023,29 @@ class SourceSelectionDialog(QDialog):
         files.sort(key=lambda x: x.name.lower())
         folders.sort(key=lambda x: x.name.lower())
 
-        # ファイルを先に追加
+        # ファイルを先に追加（拡張子を先頭に表示して常に見えるように）
         for f in files:
-            item = QListWidgetItem(f.name)
+            ext = f.suffix.lower().lstrip('.')
+            item = QListWidgetItem(f"[{ext:4}]  {f.name}")
             item.setData(Qt.ItemDataRole.UserRole, f)
             self._file_list.addItem(item)
 
-        # フォルダを後に追加
+        # 親ディレクトリ（..）を追加
+        parent = self._work_dir.parent
+        if parent != self._work_dir:  # ルートでない場合
+            item = QListWidgetItem("../")
+            item.setData(Qt.ItemDataRole.UserRole, parent)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            item.setForeground(QColor("#5eaeff"))  # シェル風の青色
+            self._file_list.addItem(item)
+
+        # フォルダを追加（シェル風に末尾に/、青色で表示）
         for d in folders:
-            item = QListWidgetItem(f"[DIR] {d.name}")
+            item = QListWidgetItem(f"{d.name}/")
             item.setData(Qt.ItemDataRole.UserRole, d)
             # フォルダは選択不可（ダブルクリックでナビゲート用）
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            item.setForeground(QColor("#888888"))
+            item.setForeground(QColor("#5eaeff"))  # シェル風の青色
             self._file_list.addItem(item)
 
         self._update_info()

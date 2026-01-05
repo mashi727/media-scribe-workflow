@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QUrl, QThread, QObject, QTimer, QEvent, QMimeData
 from PySide6.QtGui import QFont, QFontDatabase, QPainter, QColor, QPen, QBrush, QPixmap
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
 import platform
@@ -773,6 +773,33 @@ class MainWorkspace(QWidget):
         self._volume_slider.valueChanged.connect(self._set_volume)
         bottom_row.addWidget(self._volume_slider)
 
+        # 出力デバイス選択
+        output_label = QLabel("Out:")
+        output_label.setStyleSheet("color: #a0a0a0;")
+        bottom_row.addWidget(output_label)
+
+        self._audio_device_combo = QComboBox()
+        self._audio_device_combo.setStyleSheet("""
+            QComboBox {
+                background: #1a1a1a;
+                color: #f0f0f0;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-width: 120px;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background: #1a1a1a;
+                color: #f0f0f0;
+                selection-background-color: #3b82f6;
+            }
+        """)
+        self._audio_device_combo.setToolTip("音声出力デバイス")
+        self._populate_audio_devices()
+        self._audio_device_combo.currentIndexChanged.connect(self._on_audio_device_changed)
+        bottom_row.addWidget(self._audio_device_combo)
+
         bottom_row.addStretch()
 
         # 時間表示
@@ -1427,6 +1454,30 @@ class MainWorkspace(QWidget):
         """音量設定"""
         self._audio_output.setVolume(value / 100.0)
 
+    def _populate_audio_devices(self):
+        """音声出力デバイス一覧を取得してコンボボックスに設定"""
+        self._audio_device_combo.clear()
+        devices = QMediaDevices.audioOutputs()
+        default_device = QMediaDevices.defaultAudioOutput()
+
+        for i, device in enumerate(devices):
+            self._audio_device_combo.addItem(device.description(), device)
+            # デフォルトデバイスを選択
+            if device.id() == default_device.id():
+                self._audio_device_combo.setCurrentIndex(i)
+
+    def _on_audio_device_changed(self, index: int):
+        """音声出力デバイスが変更されたとき"""
+        if index < 0:
+            return
+        device = self._audio_device_combo.currentData()
+        if device and self._audio_output:
+            self._audio_output.setDevice(device)
+            self._log_panel.info(
+                f"Audio output: {device.description()}",
+                source="Audio"
+            )
+
     def _on_position_changed(self, position: int):
         """再生位置変更"""
         # 時間表示更新
@@ -1788,6 +1839,7 @@ class MainWorkspace(QWidget):
                     new_work_dir = dialog.get_work_dir()
                     if new_work_dir != self._state.work_dir:
                         self._state.work_dir = new_work_dir
+                        self.work_dir_changed.emit(self._state.work_dir)
                     # 再生中のメディアを停止してリセット
                     self._prepare_for_new_source()
                     # ダウンロード開始
@@ -1800,6 +1852,7 @@ class MainWorkspace(QWidget):
                 new_work_dir = dialog.get_work_dir()
                 if new_work_dir != self._state.work_dir:
                     self._state.work_dir = new_work_dir
+                    self.work_dir_changed.emit(self._state.work_dir)
                     self._log_panel.info(
                         f"Working directory: {new_work_dir}",
                         source="UI"
@@ -2899,7 +2952,31 @@ class MainWorkspace(QWidget):
 
     def cleanup(self):
         """リソースクリーンアップ"""
+        # 波形スレッドをクリーンアップ
         self._cleanup_waveform_thread()
+
+        # スペクトログラムスレッドをクリーンアップ
+        if self._spectrogram_worker:
+            self._spectrogram_worker.cancel()
+            self._spectrogram_worker = None
+
+        if self._spectrogram_thread and self._spectrogram_thread.isRunning():
+            self._spectrogram_thread.quit()
+            self._spectrogram_thread.wait(1000)
+            self._spectrogram_thread = None
+
+        # YouTubeダウンロードワーカーをクリーンアップ
+        if self._youtube_worker and self._youtube_worker.isRunning():
+            self._youtube_worker.cancel()
+            self._youtube_worker.wait(1000)
+            self._youtube_worker = None
+
+        # エクスポートワーカーをクリーンアップ
+        if hasattr(self, '_export_worker') and self._export_worker is not None:
+            if self._export_worker.isRunning():
+                self._export_worker.cancel()
+                self._export_worker.wait(1000)
+            self._export_worker = None
 
         if self._media_player:
             self._media_player.stop()

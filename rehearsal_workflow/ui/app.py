@@ -600,6 +600,20 @@ class VideoChapterEditor(QMainWindow):
         self._resizing = False
         super().resizeEvent(event)
 
+    def closeEvent(self, event):
+        """アプリケーション終了時のクリーンアップ"""
+        # アップデートチェックスレッドをクリーンアップ
+        self._cleanup_update_check()
+
+        # ダウンロードスレッドをクリーンアップ
+        self._cleanup_download()
+
+        # MainWorkspaceのクリーンアップ
+        if self._workspace:
+            self._workspace.cleanup()
+
+        super().closeEvent(event)
+
 
 def main():
     """エントリーポイント"""
