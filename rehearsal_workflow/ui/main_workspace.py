@@ -1847,6 +1847,20 @@ class MainWorkspace(QWidget):
             dialog_height = int(main_size.height() * 0.8)
             dialog.resize(dialog_width, dialog_height)
 
+        # カラム幅を調整（Name: ストレッチ、Date Modified: 内容に合わせる）
+        from PySide6.QtWidgets import QTreeView, QHeaderView
+        tree_view = dialog.findChild(QTreeView)
+        if tree_view:
+            header = tree_view.header()
+            # Name列（0）をストレッチ
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            # Size列（1）を内容に合わせる
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            # Type列（2）を内容に合わせる
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            # Date Modified列（3）を内容に合わせる
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+
         if dialog.exec() != QFileDialog.DialogCode.Accepted:
             return
 
