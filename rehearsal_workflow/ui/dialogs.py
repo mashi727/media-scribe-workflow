@@ -593,7 +593,7 @@ class SourceSelectionDialog(QDialog):
         self._cover_image: Optional[QImage] = initial_cover_image
         self._youtube_url: str = ""
         self._setup_ui()
-        self._refresh_file_list()
+        self._update_info()
         # カバー画像が既に設定されている場合は表示
         if initial_cover_image:
             self._cover_status.setText("Set")
@@ -674,7 +674,7 @@ class SourceSelectionDialog(QDialog):
         local_layout.setContentsMargins(0, 0, 0, 0)
         local_layout.setSpacing(8)
 
-        # トグルボタン + ディレクトリ
+        # トグルボタン + ファイル選択ボタン
         header_layout = QHBoxLayout()
 
         self._mp4_btn = QPushButton("MP4")
@@ -693,25 +693,26 @@ class SourceSelectionDialog(QDialog):
 
         header_layout.addStretch()
 
-        self._dir_label = QLabel(f"{self._work_dir}")
-        self._dir_label.setStyleSheet("color: #a0a0a0; font-size: 13px;")
-        header_layout.addWidget(self._dir_label)
+        select_files_btn = QPushButton("Select Files...")
+        select_files_btn.setStyleSheet(self._button_style(primary=True))
+        select_files_btn.setToolTip("ファイルを選択")
+        select_files_btn.clicked.connect(self._select_files)
+        header_layout.addWidget(select_files_btn)
 
-        browse_btn = QPushButton("Browse")
-        browse_btn.setStyleSheet(self._button_style())
-        browse_btn.setToolTip("ディレクトリを変更")
-        browse_btn.clicked.connect(self._browse_directory)
-        header_layout.addWidget(browse_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setStyleSheet(self._button_style())
+        clear_btn.setToolTip("選択をクリア")
+        clear_btn.clicked.connect(self._clear_selected_files)
+        header_layout.addWidget(clear_btn)
 
         local_layout.addLayout(header_layout)
 
-        # ファイルリスト
-        self._file_list = QListWidget()
-        self._file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._file_list.setStyleSheet(self._list_style())
-        self._file_list.itemSelectionChanged.connect(self._update_info)
-        self._file_list.itemDoubleClicked.connect(self._on_double_click)
-        local_layout.addWidget(self._file_list, 1)
+        # 選択されたファイル表示リスト（読み取り専用）
+        self._selected_files: List[Path] = []
+        self._selected_list = QListWidget()
+        self._selected_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._selected_list.setStyleSheet(self._list_style())
+        local_layout.addWidget(self._selected_list, 1)
 
         self._stack.addWidget(local_page)
 
@@ -880,94 +881,6 @@ class SourceSelectionDialog(QDialog):
             }
         """
 
-    def _browse_directory(self):
-        """ディレクトリを選択"""
-        dialog = QFileDialog(self, "Select Directory", str(self._work_dir))
-        dialog.setFileMode(QFileDialog.FileMode.Directory)
-        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dialog.setStyleSheet(self._file_dialog_style())
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            dirs = dialog.selectedFiles()
-            if dirs:
-                self._work_dir = Path(dirs[0])
-                self._dir_label.setText(str(self._work_dir))
-                self._refresh_file_list()
-
-    def _file_dialog_style(self) -> str:
-        """ファイルダイアログ用ダークテーマスタイル"""
-        return """
-            QFileDialog {
-                background-color: #1a1a1a;
-                color: #f0f0f0;
-            }
-            QFileDialog QLabel {
-                color: #f0f0f0;
-            }
-            QFileDialog QLineEdit {
-                background-color: #0f0f0f;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                padding: 6px;
-            }
-            QFileDialog QPushButton {
-                background-color: #2d2d2d;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                border-radius: 6px;
-                padding: 6px 16px;
-            }
-            QFileDialog QPushButton:hover {
-                background-color: #363636;
-            }
-            QFileDialog QTreeView, QFileDialog QListView {
-                background-color: #0f0f0f;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                selection-background-color: #3b82f6;
-            }
-            QFileDialog QTreeView::item:hover, QFileDialog QListView::item:hover {
-                background-color: #2d2d2d;
-            }
-            QFileDialog QComboBox {
-                background-color: #2d2d2d;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                padding: 6px;
-            }
-            QFileDialog QComboBox QAbstractItemView {
-                background-color: #2d2d2d;
-                color: #f0f0f0;
-                selection-background-color: #3b82f6;
-            }
-            QFileDialog QHeaderView::section {
-                background-color: #1a1a1a;
-                color: #a0a0a0;
-                border: 1px solid #3a3a3a;
-                padding: 6px;
-            }
-            QFileDialog QToolButton {
-                background-color: #2d2d2d;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-            }
-            QFileDialog QToolButton:hover {
-                background-color: #363636;
-            }
-            QFileDialog QScrollBar:vertical {
-                background-color: #1a1a1a;
-                width: 12px;
-            }
-            QFileDialog QScrollBar::handle:vertical {
-                background-color: #3a3a3a;
-                border-radius: 4px;
-                min-height: 20px;
-            }
-        """
-
     def _set_source_type(self, source_type: str):
         """ソースタイプを設定（local / youtube）"""
         self._source_type = source_type
@@ -989,66 +902,64 @@ class SourceSelectionDialog(QDialog):
         self._mp3_btn.setChecked(mode == "mp3")
         self._mp4_btn.setChecked(mode == "mp4")
 
-        # MP4モードは単一選択、MP3モードは複数選択
-        if mode == "mp4":
-            self._file_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        else:
-            self._file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        self._refresh_file_list()
+        # モード変更時は選択をクリア
+        self._clear_selected_files()
 
         # カバー可視性を更新
         self._update_cover_visibility()
 
-    def _refresh_file_list(self):
-        """ファイル一覧を更新（ファイル → フォルダの順）"""
-        self._file_list.clear()
-
-        if not self._work_dir.exists():
-            return
-
+    def _select_files(self):
+        """ネイティブダイアログでファイルを選択"""
         # フィルタに応じた拡張子
-        extensions = self.AUDIO_EXTENSIONS if self._filter_mode == "mp3" else self.VIDEO_EXTENSIONS
+        if self._filter_mode == "mp3":
+            filter_str = "Audio Files (*.mp3 *.m4a *.wav *.aac *.flac);;All Files (*)"
+        else:
+            filter_str = "Video Files (*.mp4 *.mov *.avi *.mkv);;All Files (*)"
 
-        # ファイルとフォルダを分けて取得
-        files = []
-        folders = []
-        for f in self._work_dir.iterdir():
-            if f.is_file() and f.suffix.lower() in extensions:
-                files.append(f)
-            elif f.is_dir() and not f.name.startswith('.'):
-                folders.append(f)
+        # ネイティブダイアログを使用
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Files",
+            str(self._work_dir),
+            filter_str
+        )
 
-        # それぞれソート
-        files.sort(key=lambda x: x.name.lower())
-        folders.sort(key=lambda x: x.name.lower())
+        if files:
+            # work_dirを選択したファイルのディレクトリに更新
+            self._work_dir = Path(files[0]).parent
 
-        # ファイルを先に追加（拡張子を先頭に表示して常に見えるように）
-        for f in files:
+            # MP4モードは最後の1つだけ、MP3モードは全部追加
+            if self._filter_mode == "mp4":
+                self._selected_files = [Path(files[-1])]
+            else:
+                # 既存のリストに追加（重複除去）
+                existing_paths = {f for f in self._selected_files}
+                for f in files:
+                    p = Path(f)
+                    if p not in existing_paths:
+                        self._selected_files.append(p)
+
+            self._refresh_selected_list()
+            self._update_info()
+
+    def _clear_selected_files(self):
+        """選択をクリア"""
+        self._selected_files = []
+        self._selected_list.clear()
+        self._update_info()
+
+    def _refresh_selected_list(self):
+        """選択されたファイル表示を更新"""
+        self._selected_list.clear()
+
+        # ファイル名順でソート
+        self._selected_files.sort(key=lambda x: x.name.lower())
+
+        for f in self._selected_files:
             ext = f.suffix.lower().lstrip('.')
             item = QListWidgetItem(f"[{ext:4}]  {f.name}")
             item.setData(Qt.ItemDataRole.UserRole, f)
-            self._file_list.addItem(item)
-
-        # 親ディレクトリ（..）を追加
-        parent = self._work_dir.parent
-        if parent != self._work_dir:  # ルートでない場合
-            item = QListWidgetItem("../")
-            item.setData(Qt.ItemDataRole.UserRole, parent)
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            item.setForeground(QColor("#5eaeff"))  # シェル風の青色
-            self._file_list.addItem(item)
-
-        # フォルダを追加（シェル風に末尾に/、青色で表示）
-        for d in folders:
-            item = QListWidgetItem(f"{d.name}/")
-            item.setData(Qt.ItemDataRole.UserRole, d)
-            # フォルダは選択不可（ダブルクリックでナビゲート用）
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            item.setForeground(QColor("#5eaeff"))  # シェル風の青色
-            self._file_list.addItem(item)
-
-        self._update_info()
+            self._selected_list.addItem(item)
 
     def _update_info(self):
         """情報表示更新"""
@@ -1059,7 +970,7 @@ class SourceSelectionDialog(QDialog):
                 self._info_label.setText("Enter a valid YouTube URL")
             return
 
-        count = len(self._file_list.selectedItems())
+        count = len(self._selected_files)
 
         if count == 0:
             self._info_label.setText("No files selected")
@@ -1070,18 +981,6 @@ class SourceSelectionDialog(QDialog):
                 self._info_label.setText(f"{count} MP3 files (will be merged)")
             else:
                 self._info_label.setText(f"{count} files selected")
-
-    def _on_double_click(self, item: QListWidgetItem):
-        """ダブルクリックで選択してOK、またはフォルダへナビゲート"""
-        path = item.data(Qt.ItemDataRole.UserRole)
-        if path and path.is_dir():
-            # フォルダの場合はナビゲート
-            self._work_dir = path
-            self._dir_label.setText(str(self._work_dir))
-            self._refresh_file_list()
-        else:
-            # ファイルの場合はOK
-            self.accept()
 
     def _on_youtube_url_changed(self, text: str):
         """YouTube URL入力時の処理"""
@@ -1132,8 +1031,7 @@ class SourceSelectionDialog(QDialog):
         """選択されたソースを取得"""
         sources = []
 
-        for item in self._file_list.selectedItems():
-            path = item.data(Qt.ItemDataRole.UserRole)
+        for path in self._selected_files:
             duration_ms = detect_video_duration(str(path)) or 0
             src = SourceFile(
                 path=path,
@@ -1165,8 +1063,7 @@ class SourceSelectionDialog(QDialog):
     def keyPressEvent(self, event):
         """Returnキーで選択確定"""
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            selected = self._file_list.selectedItems()
-            if selected:
+            if self._selected_files:
                 # ファイルが選択されている場合はOK
                 self.accept()
                 return
