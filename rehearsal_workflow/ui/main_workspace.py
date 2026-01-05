@@ -1839,6 +1839,14 @@ class MainWorkspace(QWidget):
         # ダークテーマスタイルを適用
         dialog.setStyleSheet(self._file_dialog_dark_style())
 
+        # メインウィンドウの80%のサイズに設定
+        main_window = self.window()
+        if main_window:
+            main_size = main_window.size()
+            dialog_width = int(main_size.width() * 0.8)
+            dialog_height = int(main_size.height() * 0.8)
+            dialog.resize(dialog_width, dialog_height)
+
         if dialog.exec() != QFileDialog.DialogCode.Accepted:
             return
 
