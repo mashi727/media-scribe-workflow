@@ -1879,11 +1879,11 @@ class MainWorkspace(QWidget):
             # Date Modified列（3）を内容に合わせる
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
 
-        # 左側のフォルダツリー（サイドバー）を広くする
+        # 左側のフォルダツリー（サイドバー）の幅を設定
         splitter = dialog.findChild(QSplitter)
         if splitter:
-            # サイドバー:メインエリア = 35:65 の比率
-            splitter.setSizes([int(dialog_width * 0.35), int(dialog_width * 0.65)])
+            # サイドバー:メインエリア = 22.5:77.5 の比率
+            splitter.setSizes([int(dialog_width * 0.225), int(dialog_width * 0.775)])
 
         if dialog.exec() != QFileDialog.DialogCode.Accepted:
             return
