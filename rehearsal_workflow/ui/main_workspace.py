@@ -1820,8 +1820,12 @@ class MainWorkspace(QWidget):
 
     def _open_source_dialog(self):
         """ソース選択ダイアログを開く（ダークテーマ付きファイルダイアログ）"""
-        from PySide6.QtWidgets import QFileDialog, QTreeView, QHeaderView, QSplitter
-        from PySide6.QtCore import QSortFilterProxyModel, QDir, QFileInfo
+        from PySide6.QtWidgets import (
+            QFileDialog, QTreeView, QHeaderView, QSplitter,
+            QListView, QWidget, QVBoxLayout
+        )
+        from PySide6.QtCore import QSortFilterProxyModel, QDir, QFileInfo, QFileSystemWatcher
+        from PySide6.QtGui import QFileSystemModel
         from rehearsal_workflow.ui.dialogs import detect_video_duration
 
         # 許可する拡張子
@@ -1867,9 +1871,9 @@ class MainWorkspace(QWidget):
             dialog.resize(dialog_width, dialog_height)
 
         # カラム幅を調整（Name: ストレッチ、Date Modified: 内容に合わせる）
-        tree_view = dialog.findChild(QTreeView)
-        if tree_view:
-            header = tree_view.header()
+        file_tree_view = dialog.findChild(QTreeView)
+        if file_tree_view:
+            header = file_tree_view.header()
             # Name列（0）をストレッチ
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             # Size列（1）を内容に合わせる
@@ -1879,9 +1883,58 @@ class MainWorkspace(QWidget):
             # Date Modified列（3）を内容に合わせる
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
 
-        # 左側のフォルダツリー（サイドバー）の幅を設定
+        # 左側のサイドバーをフォルダツリーに置き換え
         splitter = dialog.findChild(QSplitter)
         if splitter:
+            # サイドバー（QListView）を見つける
+            sidebar = dialog.findChild(QListView, "sidebar")
+            if sidebar:
+                # フォルダツリー用のモデルを作成
+                folder_model = QFileSystemModel(dialog)
+                folder_model.setRootPath("")
+                folder_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot)
+
+                # フォルダツリービューを作成
+                folder_tree = QTreeView(dialog)
+                folder_tree.setModel(folder_model)
+                folder_tree.setRootIndex(folder_model.index(""))
+
+                # 名前列のみ表示
+                folder_tree.setHeaderHidden(True)
+                for i in range(1, folder_model.columnCount()):
+                    folder_tree.hideColumn(i)
+
+                # 現在のディレクトリを展開・選択
+                current_index = folder_model.index(str(self._state.work_dir))
+                folder_tree.setCurrentIndex(current_index)
+                folder_tree.scrollTo(current_index)
+                folder_tree.expand(current_index)
+
+                # フォルダ選択時にダイアログのディレクトリを変更
+                def on_folder_clicked(index):
+                    path = folder_model.filePath(index)
+                    dialog.setDirectory(path)
+
+                folder_tree.clicked.connect(on_folder_clicked)
+
+                # スタイル適用
+                folder_tree.setStyleSheet("""
+                    QTreeView {
+                        background-color: #0f0f0f;
+                        color: #f0f0f0;
+                        border: none;
+                    }
+                    QTreeView::item:hover {
+                        background-color: #2d2d2d;
+                    }
+                    QTreeView::item:selected {
+                        background-color: #3b82f6;
+                    }
+                """)
+
+                # サイドバーを置き換え
+                splitter.replaceWidget(0, folder_tree)
+
             # サイドバー:メインエリア = 22.5:77.5 の比率
             splitter.setSizes([int(dialog_width * 0.225), int(dialog_width * 0.775)])
 
