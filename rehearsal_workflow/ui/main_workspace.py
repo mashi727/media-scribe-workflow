@@ -33,7 +33,6 @@ import tempfile
 import os
 
 from .log_panel import LogPanel, LogLevel
-from .dialogs import SourceSelectionDialog
 from .models import (
     ChapterInfo,
     ColorspaceInfo,
@@ -1820,67 +1819,61 @@ class MainWorkspace(QWidget):
         self._display_mode_combo.setEnabled(False)  # 波形生成完了まで無効化
 
     def _open_source_dialog(self):
-        """ソース選択ダイアログを開く"""
-        dialog = SourceSelectionDialog(
+        """ソース選択ダイアログを開く（ネイティブファイルダイアログ使用）"""
+        from PySide6.QtWidgets import QFileDialog
+        from rehearsal_workflow.ui.dialogs import detect_video_duration
+
+        # ネイティブファイルダイアログを使用
+        filter_str = "Media Files (*.mp4 *.mov *.avi *.mkv *.mp3 *.m4a *.wav *.aac *.flac);;Video Files (*.mp4 *.mov *.avi *.mkv);;Audio Files (*.mp3 *.m4a *.wav *.aac *.flac);;All Files (*)"
+        files, _ = QFileDialog.getOpenFileNames(
             self,
-            self._state.sources,
-            work_dir=self._state.work_dir,
-            initial_cover_image=self._cover_image
+            "Select Source Files",
+            str(self._state.work_dir),
+            filter_str
         )
-        if dialog.exec():
-            source_type = dialog.get_source_type()
 
-            if source_type == "youtube":
-                # YouTube URLが入力された場合
-                youtube_url = dialog.get_youtube_url()
-                if youtube_url:
-                    self._youtube_url = youtube_url
-                    # 作業ディレクトリを更新
-                    new_work_dir = dialog.get_work_dir()
-                    if new_work_dir != self._state.work_dir:
-                        self._state.work_dir = new_work_dir
-                        self.work_dir_changed.emit(self._state.work_dir)
-                    # 再生中のメディアを停止してリセット
-                    self._prepare_for_new_source()
-                    # ダウンロード開始
-                    self._start_youtube_download(youtube_url)
-            else:
-                # ローカルファイルが選択された場合
-                self._state.sources = dialog.get_sources()
+        if not files:
+            return
 
-                # 作業ディレクトリを更新
-                new_work_dir = dialog.get_work_dir()
-                if new_work_dir != self._state.work_dir:
-                    self._state.work_dir = new_work_dir
-                    self.work_dir_changed.emit(self._state.work_dir)
-                    self._log_panel.info(
-                        f"Working directory: {new_work_dir}",
-                        source="UI"
-                    )
+        # 作業ディレクトリを更新
+        new_work_dir = Path(files[0]).parent
+        if new_work_dir != self._state.work_dir:
+            self._state.work_dir = new_work_dir
+            self.work_dir_changed.emit(self._state.work_dir)
+            self._log_panel.info(
+                f"Working directory: {new_work_dir}",
+                source="UI"
+            )
 
-                self._log_panel.info(
-                    f"Sources updated: {len(self._state.sources)} files",
-                    source="UI"
-                )
-                self._prepare_for_new_source()
+        # ソースファイルを作成
+        sources = []
+        for f in files:
+            path = Path(f)
+            duration_ms = detect_video_duration(str(path)) or 0
+            src = SourceFile(
+                path=path,
+                duration_ms=duration_ms,
+                file_type=path.suffix[1:].lower()
+            )
+            sources.append(src)
 
-                # 複数MP3の場合、チャプターを自動生成
-                if len(self._state.sources) > 1:
-                    self._generate_chapters_from_sources()
+        # ファイル名順でソート
+        sources.sort(key=lambda s: s.path.name.lower())
+        self._state.sources = sources
 
-                # ソースがあれば自動的にメディアプレーヤーに読み込み
-                if self._state.sources:
-                    self._load_source_media()
+        self._log_panel.info(
+            f"Sources updated: {len(self._state.sources)} files",
+            source="UI"
+        )
+        self._prepare_for_new_source()
 
-            # カバー画像を取得・更新
-            cover_image = dialog.get_cover_image()
-            if cover_image != self._cover_image:
-                self._cover_image = cover_image
-                self._update_cover_preview()
-                if cover_image:
-                    self._log_panel.info("Cover image set", source="UI")
-                else:
-                    self._log_panel.info("Cover image cleared", source="UI")
+        # 複数MP3の場合、チャプターを自動生成
+        if len(self._state.sources) > 1:
+            self._generate_chapters_from_sources()
+
+        # ソースがあれば自動的にメディアプレーヤーに読み込み
+        if self._state.sources:
+            self._load_source_media()
 
     def _update_cover_preview(self):
         """カバー画像プレビューを更新"""
