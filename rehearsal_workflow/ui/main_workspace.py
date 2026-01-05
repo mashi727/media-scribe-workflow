@@ -1819,18 +1819,30 @@ class MainWorkspace(QWidget):
         self._display_mode_combo.setEnabled(False)  # 波形生成完了まで無効化
 
     def _open_source_dialog(self):
-        """ソース選択ダイアログを開く（ネイティブファイルダイアログ使用）"""
+        """ソース選択ダイアログを開く（ダークテーマ付きファイルダイアログ）"""
         from PySide6.QtWidgets import QFileDialog
         from rehearsal_workflow.ui.dialogs import detect_video_duration
 
-        # ネイティブファイルダイアログを使用
-        filter_str = "Media Files (*.mp4 *.mov *.avi *.mkv *.mp3 *.m4a *.wav *.aac *.flac);;Video Files (*.mp4 *.mov *.avi *.mkv);;Audio Files (*.mp3 *.m4a *.wav *.aac *.flac);;All Files (*)"
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select Source Files",
-            str(self._state.work_dir),
-            filter_str
-        )
+        # ダイアログを作成
+        dialog = QFileDialog(self, "Select Source Files", str(self._state.work_dir))
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+
+        # フィルタを設定（マッチしないファイルは非表示）
+        filter_str = "Media Files (*.mp4 *.mov *.avi *.mkv *.mp3 *.m4a *.wav *.aac *.flac);;Video Files (*.mp4 *.mov *.avi *.mkv);;Audio Files (*.mp3 *.m4a *.wav *.aac *.flac)"
+        dialog.setNameFilter(filter_str)
+
+        # 非ネイティブダイアログを使用（ダークテーマ適用のため）
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        # フィルタにマッチしないファイルを非表示
+        dialog.setOption(QFileDialog.Option.HideNameFilterDetails, False)
+
+        # ダークテーマスタイルを適用
+        dialog.setStyleSheet(self._file_dialog_dark_style())
+
+        if dialog.exec() != QFileDialog.DialogCode.Accepted:
+            return
+
+        files = dialog.selectedFiles()
 
         if not files:
             return
@@ -1874,6 +1886,85 @@ class MainWorkspace(QWidget):
         # ソースがあれば自動的にメディアプレーヤーに読み込み
         if self._state.sources:
             self._load_source_media()
+
+    def _file_dialog_dark_style(self) -> str:
+        """ファイルダイアログ用ダークテーマスタイル"""
+        return """
+            QFileDialog {
+                background-color: #1a1a1a;
+                color: #f0f0f0;
+            }
+            QFileDialog QLabel {
+                color: #f0f0f0;
+            }
+            QFileDialog QLineEdit {
+                background-color: #0f0f0f;
+                color: #f0f0f0;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QFileDialog QPushButton {
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+                border: 1px solid #3a3a3a;
+                border-radius: 6px;
+                padding: 6px 16px;
+            }
+            QFileDialog QPushButton:hover {
+                background-color: #363636;
+            }
+            QFileDialog QTreeView, QFileDialog QListView {
+                background-color: #0f0f0f;
+                color: #f0f0f0;
+                border: 1px solid #3a3a3a;
+                selection-background-color: #3b82f6;
+            }
+            QFileDialog QTreeView::item:hover, QFileDialog QListView::item:hover {
+                background-color: #2d2d2d;
+            }
+            QFileDialog QComboBox {
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QFileDialog QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+                selection-background-color: #3b82f6;
+            }
+            QFileDialog QHeaderView::section {
+                background-color: #1a1a1a;
+                color: #a0a0a0;
+                border: 1px solid #3a3a3a;
+                padding: 6px;
+            }
+            QFileDialog QToolButton {
+                background-color: #2d2d2d;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+            }
+            QFileDialog QToolButton:hover {
+                background-color: #363636;
+            }
+            QFileDialog QScrollBar:vertical {
+                background-color: #1a1a1a;
+                width: 12px;
+            }
+            QFileDialog QScrollBar::handle:vertical {
+                background-color: #3a3a3a;
+                border-radius: 4px;
+                min-height: 20px;
+            }
+            QFileDialog QSplitter::handle {
+                background-color: #3a3a3a;
+            }
+            QFileDialog #sidebar {
+                background-color: #1a1a1a;
+            }
+        """
 
     def _update_cover_preview(self):
         """カバー画像プレビューを更新"""
