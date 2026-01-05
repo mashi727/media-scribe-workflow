@@ -1820,27 +1820,46 @@ class MainWorkspace(QWidget):
 
     def _open_source_dialog(self):
         """ソース選択ダイアログを開く（ダークテーマ付きファイルダイアログ）"""
-        from PySide6.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog, QTreeView, QHeaderView, QSplitter
+        from PySide6.QtCore import QSortFilterProxyModel, QDir, QFileInfo
         from rehearsal_workflow.ui.dialogs import detect_video_duration
+
+        # 許可する拡張子
+        allowed_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.mp3', '.m4a', '.wav', '.aac', '.flac'}
+
+        # カスタムプロキシモデル：フィルタに合わないファイルを非表示
+        class MediaFilterProxyModel(QSortFilterProxyModel):
+            def filterAcceptsRow(self, source_row, source_parent):
+                model = self.sourceModel()
+                index = model.index(source_row, 0, source_parent)
+                file_path = model.filePath(index)
+                file_info = QFileInfo(file_path)
+
+                # ディレクトリは常に表示
+                if file_info.isDir():
+                    return True
+
+                # ファイルは拡張子でフィルタ
+                suffix = file_info.suffix().lower()
+                return f'.{suffix}' in allowed_extensions
 
         # ダイアログを作成
         dialog = QFileDialog(self, "Select Source Files", str(self._state.work_dir))
         dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
 
-        # フィルタを設定（マッチしないファイルは非表示）
-        filter_str = "Media Files (*.mp4 *.mov *.avi *.mkv *.mp3 *.m4a *.wav *.aac *.flac);;Video Files (*.mp4 *.mov *.avi *.mkv);;Audio Files (*.mp3 *.m4a *.wav *.aac *.flac)"
-        dialog.setNameFilter(filter_str)
-
         # 非ネイティブダイアログを使用（ダークテーマ適用のため）
         dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        # フィルタにマッチしないファイルを非表示
-        dialog.setOption(QFileDialog.Option.HideNameFilterDetails, False)
+
+        # カスタムプロキシモデルを設定
+        proxy_model = MediaFilterProxyModel(dialog)
+        dialog.setProxyModel(proxy_model)
 
         # ダークテーマスタイルを適用
         dialog.setStyleSheet(self._file_dialog_dark_style())
 
         # メインウィンドウの80%のサイズに設定
         main_window = self.window()
+        dialog_width = 800
         if main_window:
             main_size = main_window.size()
             dialog_width = int(main_size.width() * 0.8)
@@ -1848,7 +1867,6 @@ class MainWorkspace(QWidget):
             dialog.resize(dialog_width, dialog_height)
 
         # カラム幅を調整（Name: ストレッチ、Date Modified: 内容に合わせる）
-        from PySide6.QtWidgets import QTreeView, QHeaderView
         tree_view = dialog.findChild(QTreeView)
         if tree_view:
             header = tree_view.header()
@@ -1860,6 +1878,12 @@ class MainWorkspace(QWidget):
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
             # Date Modified列（3）を内容に合わせる
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+
+        # 左側のフォルダツリー（サイドバー）を広くする
+        splitter = dialog.findChild(QSplitter)
+        if splitter:
+            # サイドバー:メインエリア = 35:65 の比率
+            splitter.setSizes([int(dialog_width * 0.35), int(dialog_width * 0.65)])
 
         if dialog.exec() != QFileDialog.DialogCode.Accepted:
             return
