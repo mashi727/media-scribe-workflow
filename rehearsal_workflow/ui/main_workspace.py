@@ -1822,10 +1822,9 @@ class MainWorkspace(QWidget):
         """ソース選択ダイアログを開く（ダークテーマ付きファイルダイアログ）"""
         from PySide6.QtWidgets import (
             QFileDialog, QTreeView, QHeaderView, QSplitter,
-            QListView, QWidget, QVBoxLayout
+            QListView, QWidget, QVBoxLayout, QFileSystemModel
         )
-        from PySide6.QtCore import QSortFilterProxyModel, QDir, QFileInfo, QFileSystemWatcher
-        from PySide6.QtGui import QFileSystemModel
+        from PySide6.QtCore import QSortFilterProxyModel, QDir, QFileInfo
         from rehearsal_workflow.ui.dialogs import detect_video_duration
 
         # 許可する拡張子
