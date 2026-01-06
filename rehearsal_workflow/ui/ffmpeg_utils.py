@@ -16,6 +16,7 @@ _ffmpeg_path: Optional[str] = None
 _ffprobe_path: Optional[str] = None
 
 
+
 def get_ffmpeg_path() -> str:
     """
     FFmpegの実行パスを取得
@@ -53,13 +54,7 @@ def get_ffmpeg_path() -> str:
         _ffmpeg_path = system_ffmpeg
         return _ffmpeg_path
 
-    raise RuntimeError(
-        "FFmpegが見つかりません。\n"
-        "以下のいずれかの方法でインストールしてください:\n"
-        "- macOS: brew install ffmpeg\n"
-        "- Windows: https://ffmpeg.org/download.html からダウンロード\n"
-        "- pip install imageio-ffmpeg"
-    )
+    raise RuntimeError("FFmpegが見つかりません")
 
 
 def get_ffprobe_path() -> str:
@@ -105,12 +100,7 @@ def get_ffprobe_path() -> str:
         _ffprobe_path = system_ffprobe
         return _ffprobe_path
 
-    raise RuntimeError(
-        "FFprobeが見つかりません。\n"
-        "FFmpegをインストールすると通常ffprobeも含まれます。\n"
-        "- macOS: brew install ffmpeg\n"
-        "- Windows: https://ffmpeg.org/download.html からダウンロード"
-    )
+    raise RuntimeError("FFprobeが見つかりません")
 
 
 def get_subprocess_kwargs(timeout: int = 30, capture_output: bool = True) -> Dict[str, Any]:

@@ -4,7 +4,8 @@ file_dialog.py - カスタムファイルダイアログ
 中央配置 + ダークテーマ対応のファイルダイアログ。
 """
 
-from PySide6.QtWidgets import QFileDialog, QDialog
+from PySide6.QtWidgets import QFileDialog, QDialog, QListView, QTreeView
+from PySide6.QtCore import QTimer
 
 
 class CenteredFileDialog(QFileDialog):
@@ -15,6 +16,8 @@ class CenteredFileDialog(QFileDialog):
         self.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         self._filter_str = filter
         self._apply_style()
+        # フィルター変更時にファイルリストにフォーカス
+        self.filterSelected.connect(lambda _: QTimer.singleShot(50, self._focus_file_list))
 
     def _apply_extension_filter(self):
         """拡張子フィルタを適用（対象外ファイルを非表示）"""
@@ -116,6 +119,29 @@ class CenteredFileDialog(QFileDialog):
         super().showEvent(event)
         self._apply_extension_filter()
         self._center_on_parent()
+        # ファイルリストにフォーカスを設定（初期化完了後に遅延実行）
+        QTimer.singleShot(50, self._focus_file_list)
+
+    def _focus_file_list(self):
+        """ファイルリスト（QListView）にフォーカスを設定"""
+        # QFileDialogの内部ビューを探す
+        # 1. QListView（アイコン表示モード）
+        # 2. QTreeView（詳細表示モード）
+        from PySide6.QtWidgets import QAbstractItemView
+
+        # サイズが最も大きい可視のQAbstractItemViewを探す（メインのファイルリスト）
+        best_view = None
+        best_size = 0
+
+        for view in self.findChildren(QAbstractItemView):
+            if view.isVisible() and view.width() > 100:  # 小さすぎるものは除外
+                size = view.width() * view.height()
+                if size > best_size:
+                    best_size = size
+                    best_view = view
+
+        if best_view:
+            best_view.setFocus()
 
     def _center_on_parent(self):
         """親ウィンドウの中央に配置"""

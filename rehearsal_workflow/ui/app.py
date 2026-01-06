@@ -12,7 +12,8 @@ from typing import Optional
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QMenuBar, QMenu, QStatusBar, QLabel, QProgressBar, QMessageBox
+    QMenuBar, QMenu, QStatusBar, QLabel, QProgressBar, QMessageBox,
+    QFileDialog
 )
 from PySide6.QtCore import Qt, QTimer, QThread
 from PySide6.QtGui import QAction, QFont, QFontDatabase
@@ -206,6 +207,14 @@ class VideoChapterEditor(QMainWindow):
         # View メニュー
         view_menu = menubar.addMenu("View")
 
+        chapter_overlay_action = QAction("Show Chapter Overlay", self)
+        chapter_overlay_action.setCheckable(True)
+        chapter_overlay_action.setChecked(True)  # デフォルトON
+        chapter_overlay_action.triggered.connect(self._toggle_chapter_overlay)
+        view_menu.addAction(chapter_overlay_action)
+
+        view_menu.addSeparator()
+
         log_debug = QAction("Show Debug Logs", self)
         log_debug.setCheckable(True)
         log_debug.triggered.connect(lambda checked: self._set_log_level(LogLevel.DEBUG if checked else LogLevel.INFO))
@@ -260,17 +269,7 @@ class VideoChapterEditor(QMainWindow):
         self._progress_bar.setFixedHeight(16)
         self._progress_bar.setVisible(False)
         self._progress_bar.setTextVisible(False)
-        self._progress_bar.setStyleSheet("""
-            QProgressBar {
-                background: #2a2a2a;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-            }
-            QProgressBar::chunk {
-                background: #3b82f6;
-                border-radius: 3px;
-            }
-        """)
+        self._set_progress_style_processing()  # デフォルトは処理中スタイル
         right_layout.addWidget(self._progress_bar)
 
         # 状態表示ラベル
@@ -284,13 +283,16 @@ class VideoChapterEditor(QMainWindow):
     # === メニューアクション ===
 
     def _open_folder(self):
-        """フォルダを開く"""
-        # TODO: 実装
-        pass
+        """フォルダを開く（Select Sourceと同じ挙動）"""
+        self._workspace._open_source_dialog()
 
     def _paste_chapters(self):
         """チャプターをペースト"""
         self._workspace.paste_chapters()
+
+    def _toggle_chapter_overlay(self, checked: bool):
+        """チャプターオーバーレイ表示切り替え"""
+        self._workspace.set_chapter_overlay_enabled(checked)
 
     def _set_log_level(self, level: LogLevel):
         """ログレベル設定"""
@@ -367,9 +369,9 @@ class VideoChapterEditor(QMainWindow):
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(percent)
 
-        # ステータステキスト（青字）
+        # ステータステキスト（処理中は赤）
         self._status_label.setText(status)
-        self._status_label.setStyleSheet("color: #3b82f6; font-weight: bold; font-size: 18px;")
+        self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
 
     def _on_export_finished(self, success: bool, message: str):
         """エクスポート完了表示"""
@@ -393,6 +395,20 @@ class VideoChapterEditor(QMainWindow):
         self._progress_bar.setValue(0)
         self._status_label.setText("Ready")
         self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+
+    def _set_progress_style_processing(self):
+        """プログレスバーを処理中スタイル（赤）に設定"""
+        self._progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: #2a2a2a;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background: #ef4444;
+                border-radius: 3px;
+            }
+        """)
 
     def _on_work_dir_changed(self, new_dir):
         """作業ディレクトリ変更時"""
@@ -485,11 +501,11 @@ class VideoChapterEditor(QMainWindow):
         self._downloader.finished.connect(self._on_download_finished)
         self._downloader.error.connect(self._on_download_error)
 
-        # UI更新
+        # UI更新（処理中は赤）
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(0)
         self._status_label.setText("Downloading update...")
-        self._status_label.setStyleSheet("color: #3b82f6; font-weight: bold; font-size: 18px;")
+        self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
 
         self._download_thread.start()
 

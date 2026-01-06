@@ -18,6 +18,7 @@ class ChapterInfo:
     """チャプター情報"""
     time_ms: int  # ミリ秒
     title: str
+    source_index: Optional[int] = None  # 所属するソースファイルのインデックス
 
     @property
     def time_str(self) -> str:

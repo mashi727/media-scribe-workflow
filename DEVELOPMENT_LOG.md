@@ -21,6 +21,75 @@
 
 ---
 
+## 2026-01-06: チャプター移動・削除の改善 & 波形ハイライト
+
+### チャプターリスト移動時の手動追加チャプター保持
+
+**課題**: ソースファイルの順序を変更（ドラッグ移動）した際、手動で追加したチャプターが消えてしまう
+
+**原因**: `_rebuild_chapters_after_source_move()` がファイルから再読み込みしていたため、テーブルに手動追加されたチャプターが失われていた
+
+**解決策**:
+
+1. **ヘルパー関数追加** (`_get_local_time_in_source`):
+   - 仮想タイムラインの絶対時間をソース内ローカル時間に変換
+
+2. **`_rebuild_chapters_after_source_move()` の書き換え**:
+   - テーブルから現在のチャプター情報を収集（ファイル再読み込みではなく）
+   - `old_offsets` パラメータで変更前のオフセットを受け取り、正確なローカル時間を計算
+   - 移動モード: source_indexをマッピング（前→後、後→前の両方向対応）
+   - 削除モード: `removed_indices` パラメータで削除されたインデックスを受け取り、残りをシフト
+
+3. **呼び出し元の修正**:
+   - `_handle_row_move_grouped()`: 変更前にオフセットを保存、移動後にインデックスとオフセットを渡す
+   - `_remove_chapter_grouped()`: 削除前にオフセットを保存、削除後にremoved_indicesとオフセットを渡す
+
+**関数シグネチャ**:
+
+```python
+def _rebuild_chapters_after_source_move(
+    self,
+    old_source_idx: int = -1,
+    new_source_idx: int = -1,
+    removed_indices: set = None,
+    old_offsets: list = None
+)
+```
+
+### 波形ウィジェットの選択ソースハイライト表示
+
+**要望**: チャプターリストで行を選択した際、そのチャプターが属するソースファイルの範囲を波形上でハイライト表示
+
+**実装**:
+
+1. **WaveformWidget (`waveform.py`)**:
+   - `_selected_range` プロパティ追加
+   - `set_selected_source_range(start, end)` メソッド追加
+   - `clear_selected_source_range()` メソッド追加
+   - `_paint_overlays()` でハイライト描画
+
+2. **MainWorkspace (`main_workspace.py`)**:
+   - `_update_waveform_selected_range()` メソッド追加
+   - `_on_selection_changed()` から呼び出し
+
+**ハイライトのデザイン**:
+
+| 要素 | 設定 |
+|------|------|
+| 背景 | 青系半透明 (100, 180, 255, alpha=40) |
+| 斜線 | 幅1.5px、間隔15px、逆方向（除外区間と区別） |
+| 縁取り | 四角形、幅1.5px、alpha=240 |
+
+**除外区間との区別**:
+- 除外区間: 赤系、斜線は `/` 方向
+- 選択ソース: 青系、斜線は `\` 方向（逆）、四角縁取り付き
+
+**変更ファイル**:
+- `rehearsal_workflow/ui/widgets/waveform.py`
+- `rehearsal_workflow/ui/main_workspace.py`
+
+---
+
 ## 2026-01-05: UI改善
 
 ### Chaptersテーブルの行番号表示
@@ -730,4 +799,4 @@ PADは構造化プログラミング時代の産物であり、実装レベル�
 
 ---
 
-**更新**: 2025-12-29
+**更新**: 2026-01-06

@@ -8,8 +8,8 @@ min-max法による解像度適応型の波形表示。
 from typing import List
 
 from PySide6.QtWidgets import QWidget, QSizePolicy
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPainter, QColor, QPen, QImage
+from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QImage
 
 from ..models import ChapterInfo
 
@@ -55,6 +55,12 @@ class WaveformWidget(QWidget):
         self._chapters: List[ChapterInfo] = []
         self._duration_ms: int = 0
 
+        # ファイル境界位置（仮想タイムライン用）
+        self._file_boundaries: List[float] = []  # 0.0-1.0 の正規化座標
+
+        # 選択されたソース範囲（ハイライト用）
+        self._selected_range: tuple = None  # (start: float, end: float) 0.0-1.0
+
         self.setMinimumHeight(100)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMouseTracking(True)
@@ -62,7 +68,41 @@ class WaveformWidget(QWidget):
     def set_chapters(self, chapters: List[ChapterInfo], duration_ms: int):
         """チャプター情報を設定"""
         self._chapters = chapters
-        self._duration_ms = duration_ms
+        # duration_msが0の場合は既存値を保持
+        if duration_ms > 0:
+            self._duration_ms = duration_ms
+        self.update()
+
+    def set_file_boundaries(self, boundaries: List[float]):
+        """ファイル境界位置を設定（仮想タイムライン用）
+
+        Args:
+            boundaries: ファイル境界の正規化位置（0.0-1.0）のリスト
+        """
+        self._file_boundaries = boundaries
+        self.update()
+
+    def clear_file_boundaries(self):
+        """ファイル境界をクリア"""
+        self._file_boundaries = []
+        self.update()
+
+    def set_selected_source_range(self, start: float = None, end: float = None):
+        """選択されたソースファイルの範囲を設定（ハイライト表示用）
+
+        Args:
+            start: 開始位置（0.0-1.0）、Noneでクリア
+            end: 終了位置（0.0-1.0）、Noneでクリア
+        """
+        if start is not None and end is not None:
+            self._selected_range = (start, end)
+        else:
+            self._selected_range = None
+        self.update()
+
+    def clear_selected_source_range(self):
+        """選択ソース範囲をクリア"""
+        self._selected_range = None
         self.update()
 
     def _get_excluded_regions(self) -> List[tuple]:
@@ -239,6 +279,8 @@ class WaveformWidget(QWidget):
         self._loading_type = ""
         self._error_message = ""
         self._display_mode = self.MODE_WAVEFORM
+        self._file_boundaries = []
+        self._selected_range = None
         self.update()
 
     def resizeEvent(self, event):
@@ -447,12 +489,77 @@ class WaveformWidget(QWidget):
                     if x1 < end_x and x2 > start_x:
                         painter.drawLine(x1, y1, x2, y2)
 
-        # チャプターマーカーを描画
+        # 複数ファイルモードかどうか
+        is_multi_file = len(self._file_boundaries) > 0
+        marker_height = 12  # 上下のマーカー高さ
+
+        # 選択されたソース範囲をハイライト（青系の背景 + 斜線 + 四角縁取り）
+        if self._selected_range and is_multi_file:
+            start_norm, end_norm = self._selected_range
+            start_x = int(start_norm * w)
+            end_x = int(end_norm * w)
+            region_width = end_x - start_x
+
+            if region_width > 0:
+                # 半透明の青い背景
+                fill_color = QColor(100, 180, 255, 40)
+                painter.fillRect(start_x, 0, region_width, h, fill_color)
+
+                # 斜線ハッチングパターン（逆方向）
+                hatch_color = QColor(100, 180, 255, 80)
+                pen = QPen(hatch_color)
+                pen.setWidthF(1.5)
+                painter.setPen(pen)
+                spacing = 15
+                for offset in range(-h, region_width + h, spacing):
+                    x1 = start_x + offset + h
+                    y1 = 0
+                    x2 = start_x + offset
+                    y2 = h
+
+                    if x1 > end_x:
+                        y1 = x1 - end_x
+                        x1 = end_x
+                    if x2 < start_x:
+                        y2 = h - (start_x - x2)
+                        x2 = start_x
+
+                    if x1 > start_x and x2 < end_x:
+                        painter.drawLine(x1, y1, x2, y2)
+
+                # 四角形の縁取り
+                border_color = QColor(100, 180, 255, 240)
+                pen = QPen(border_color)
+                pen.setWidthF(1.5)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(start_x + 1, 1, region_width - 2, h - 2)
+
+        # ファイル境界を描画（仮想タイムライン用）- 上下の短い線
+        if self._file_boundaries:
+            pen = QPen(QColor(100, 180, 255, 220))  # 水色
+            pen.setWidth(3)
+            painter.setPen(pen)
+            for boundary_pos in self._file_boundaries:
+                x = int(boundary_pos * w)
+                # 上部の短い線
+                painter.drawLine(x, 0, x, marker_height)
+                # 下部の短い線
+                painter.drawLine(x, h - marker_height, x, h)
+
+        # チャプターマーカーを描画（ファイル境界と被らないように）
         if self._duration_ms > 0 and self._chapters:
-            painter.setPen(QColor(255, 193, 7))  # 黄色
+            pen = QPen(QColor(255, 193, 7))  # 黄色
+            pen.setWidth(1)
+            painter.setPen(pen)
             for ch in self._chapters:
                 x = int(ch.time_ms * w / self._duration_ms)
-                painter.drawLine(x, 0, x, h)
+                if is_multi_file:
+                    # 複数ファイル: 中央部分（青のファイル境界と被らない）
+                    painter.drawLine(x, marker_height, x, h - marker_height)
+                else:
+                    # 単一ファイル: 全高の線
+                    painter.drawLine(x, 0, x, h)
 
         # 再生位置インジケータ（黄色、太め）
         if self._duration_ms > 0:

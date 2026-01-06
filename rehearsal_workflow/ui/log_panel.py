@@ -168,13 +168,14 @@ class LogPanel(QWidget):
 
         # クリアボタン
         clear_btn = QPushButton("Clear")
+        clear_btn.setFixedHeight(40)
         clear_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
                 color: #a0a0a0;
                 border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                padding: 4px 12px;
+                border-radius: 6px;
+                padding: 0 12px;
             }
             QPushButton:hover {
                 background: #2d2d2d;
@@ -186,13 +187,14 @@ class LogPanel(QWidget):
 
         # コピーボタン
         copy_btn = QPushButton("Copy All")
+        copy_btn.setFixedHeight(40)
         copy_btn.setStyleSheet("""
             QPushButton {
                 background: #3b82f6;
                 color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 4px 12px;
+                border-radius: 6px;
+                padding: 0 12px;
             }
             QPushButton:hover {
                 background: #2563eb;
