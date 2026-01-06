@@ -21,6 +21,59 @@
 
 ---
 
+## 2026-01-06: v2.1.27 リリース - デュアルアーキテクチャ対応 & ffmpeg/ffprobeバンドル
+
+### ffmpeg/ffprobe のバンドル
+
+**課題**: `imageio-ffmpeg` は ffmpeg のみを同梱し、ffprobe が含まれない。アプリは動画の長さ取得やビットレート検出に ffprobe を使用。
+
+**解決策**: `static-ffmpeg` パッケージに移行
+
+| パッケージ | ffmpeg | ffprobe |
+|-----------|--------|---------|
+| imageio-ffmpeg | ✅ | ❌ |
+| static-ffmpeg | ✅ | ✅ |
+
+**変更ファイル**:
+- `pyproject.toml`: `imageio-ffmpeg` → `static-ffmpeg`
+- `ffmpeg_utils.py`: バイナリ検出ロジックを更新
+- `video_chapter_editor.spec`: バンドル設定を更新
+
+### デュアル macOS アーキテクチャビルド
+
+**要望**: Intel Mac ユーザーにも配布したい
+
+**解決策**: GitHub Actions で両アーキテクチャを並行ビルド
+
+| ランナー | アーキテクチャ | 出力ファイル |
+|----------|---------------|-------------|
+| macos-13 | Intel x86_64 | `*-macOS-Intel.dmg` |
+| macos-latest | Apple Silicon arm64 | `*-macOS-AppleSilicon.dmg` |
+
+**変更ファイル**: `.github/workflows/release.yml`
+
+### YouTube ダウンロード改善
+
+**AV1 コーデック除外**:
+- macOS で AV1 のハードウェアデコードが非対応
+- format 文字列を `bv[vcodec^=avc1]+ba/bv[vcodec!^=av01]+ba/b` に変更
+- H.264 優先、AV1 除外
+
+**一時プレイリスト対応**:
+- TLP, RD, OL, UU, LL プレフィックスを検出
+- 一時プレイリスト URL の場合、単一動画としてダウンロード
+- URL からプレイリストパラメータを自動除去
+
+**既存ファイル検出の修正**:
+- yt-dlp の "has already been downloaded" メッセージを解析
+- 正確なファイルパスを取得（mtime 検索ではなく）
+
+**変更ファイル**:
+- `workers.py`: format 文字列、ファイル検出ロジック
+- `main_workspace.py`: `_is_playlist_url()`, `_clean_youtube_url()`
+
+---
+
 ## 2026-01-06: チャプター移動・削除の改善 & 波形ハイライト
 
 ### チャプターリスト移動時の手動追加チャプター保持
@@ -799,4 +852,4 @@ PADは構造化プログラミング時代の産物であり、実装レベル�
 
 ---
 
-**更新**: 2026-01-06
+**更新**: 2026-01-06 (v2.1.27)
