@@ -1605,8 +1605,8 @@ class YouTubeDownloadWorker(QThread):
         output_template = str(Path(self.output_dir) / "%(title).200B.%(ext)s")
 
         opts = {
-            # AV1を避けてH.264/VP9を優先（古いMacはAV1ハードウェアデコード非対応）
-            'format': 'bv[vcodec^=avc1]+ba/bv[vcodec^=vp9]+ba/bv*[vcodec!=av01]+ba/b',
+            # H.264優先、AV1除外（macOSでハードウェアデコード非対応のため）
+            'format': 'bv[vcodec^=avc1]+ba/bv[vcodec!^=av01]+ba/b',
             'merge_output_format': 'mp4',
             'outtmpl': {'default': output_template},
             'noplaylist': True,
@@ -1637,9 +1637,8 @@ class YouTubeDownloadWorker(QThread):
         cmd = [
             'yt-dlp',
             '--cookies-from-browser', 'safari',
-            '--remote-components', 'ejs:github',
-            # AV1を避けてH.264/VP9を優先
-            '-f', 'bv[vcodec^=avc1]+ba/bv[vcodec^=vp9]+ba/bv*[vcodec!=av01]+ba/b',
+            # H.264優先、AV1除外（macOSでハードウェアデコード非対応のため）
+            '-f', 'bv[vcodec^=avc1]+ba/bv[vcodec!^=av01]+ba/b',
             '--merge-output-format', 'mp4',
             '-o', output_template,
             '--newline',
@@ -1706,6 +1705,14 @@ class YouTubeDownloadWorker(QThread):
                     merged_path = Path(self.output_dir) / merged_filename
                     if merged_path.exists():
                         video_path = str(merged_path)
+            elif 'has already been downloaded' in line:
+                # [download] /path/to/video.mp4 has already been downloaded
+                already_match = re.search(r'\[download\]\s+(.+\.mp4)\s+has already been downloaded', line)
+                if already_match:
+                    already_path = Path(already_match.group(1))
+                    if already_path.exists():
+                        video_path = str(already_path)
+                        self.log_message.emit(f"Already exists: {already_path.name}")
             elif '/' in line and any(line.endswith(ext) for ext in ['.mp4', '.m4a', '.webm', '.mkv']):
                 video_path = line
 
@@ -1916,27 +1923,82 @@ class PlaylistInfoWorker(QThread):
         super().__init__(parent)
         self.url = url
 
+    def _convert_to_playlist_url(self, url: str) -> str:
+        """URLをプレイリストURLに変換
+
+        youtu.be/xxx?list=xxx や youtube.com/watch?v=xxx&list=xxx
+        を youtube.com/playlist?list=xxx に変換する
+        """
+        import re
+        match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
+        if match:
+            list_id = match.group(1)
+            return f'https://www.youtube.com/playlist?list={list_id}'
+        return url
+
+    def _is_temp_playlist(self, url: str) -> bool:
+        """一時的なミックスプレイリストかどうかを判定"""
+        import re
+        match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
+        if match:
+            list_id = match.group(1)
+            # TLP, RD, OL などは一時的/自動生成プレイリスト
+            return list_id.startswith(('TLP', 'RD', 'OL', 'UU', 'LL'))
+        return False
+
     def run(self):
         """プレイリスト情報を取得"""
         try:
             import yt_dlp
 
+            # 一時的なプレイリストの事前チェック
+            if self._is_temp_playlist(self.url):
+                self.error_occurred.emit(
+                    "This is an auto-generated Mix playlist.\n"
+                    "YouTube does not allow direct access to these playlists.\n"
+                    "Please use a regular playlist URL (starts with PL...)."
+                )
+                return
+
+            # URLをプレイリストURLに変換
+            playlist_url = self._convert_to_playlist_url(self.url)
+
             opts = {
                 'extract_flat': 'in_playlist',  # プレイリスト内の動画はフラット取得
                 'quiet': True,
                 'no_warnings': True,
-                'ignoreerrors': True,
+                'ignoreerrors': False,  # エラーを例外として受け取る
             }
 
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(self.url, download=False)
+                info = ydl.extract_info(playlist_url, download=False)
                 if info:
-                    self.playlist_info_ready.emit(info)
+                    # entriesがない場合
+                    entries = info.get('entries', [])
+                    if not entries:
+                        self.error_occurred.emit(
+                            "No videos found in playlist.\n"
+                            "The playlist may be empty or private."
+                        )
+                    else:
+                        self.playlist_info_ready.emit(info)
                 else:
                     self.error_occurred.emit("Failed to extract playlist info")
 
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            error_str = str(e)
+            if "playlist does not exist" in error_str.lower():
+                self.error_occurred.emit(
+                    "Playlist not found.\n"
+                    "This may be a temporary Mix playlist or a private playlist."
+                )
+            elif "private" in error_str.lower():
+                self.error_occurred.emit(
+                    "This playlist is private.\n"
+                    "Please use a public playlist URL."
+                )
+            else:
+                self.error_occurred.emit(f"Error: {error_str}")
 
 
 class PlaylistDownloadWorker(QThread):

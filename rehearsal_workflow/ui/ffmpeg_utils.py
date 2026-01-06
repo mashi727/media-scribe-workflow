@@ -2,7 +2,7 @@
 ffmpeg_utils.py - FFmpeg/FFprobe パス解決ユーティリティ
 
 PyInstallerでバンドルされた環境でも動作するよう、
-imageio-ffmpegまたはシステムのffmpegを自動検出する。
+static-ffmpegまたはシステムのffmpeg/ffprobeを自動検出する。
 """
 
 import shutil
@@ -14,7 +14,47 @@ from typing import Optional, Dict, Any
 # キャッシュ
 _ffmpeg_path: Optional[str] = None
 _ffprobe_path: Optional[str] = None
+_static_ffmpeg_initialized: bool = False
 
+
+def _get_bundled_bin_dir() -> Optional[Path]:
+    """PyInstallerバンドル内のバイナリディレクトリを取得"""
+    # PyInstaller環境
+    if hasattr(sys, '_MEIPASS'):
+        base_path = Path(sys._MEIPASS)
+    else:
+        # 開発環境
+        base_path = Path(__file__).parent.parent.parent
+
+    # プラットフォーム別のディレクトリ名
+    if sys.platform == 'darwin':
+        platform_dir = 'darwin'
+    elif sys.platform == 'win32':
+        platform_dir = 'win64'
+    else:
+        platform_dir = 'linux64'
+
+    bin_dir = base_path / 'static_ffmpeg' / 'bin' / platform_dir
+    if bin_dir.exists():
+        return bin_dir
+
+    return None
+
+
+def _init_static_ffmpeg() -> None:
+    """static-ffmpegのパスを初期化"""
+    global _static_ffmpeg_initialized
+    if _static_ffmpeg_initialized:
+        return
+
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+        _static_ffmpeg_initialized = True
+    except ImportError:
+        pass
+    except Exception:
+        pass
 
 
 def get_ffmpeg_path() -> str:
@@ -22,8 +62,10 @@ def get_ffmpeg_path() -> str:
     FFmpegの実行パスを取得
 
     優先順位:
-    1. imageio-ffmpeg (バンドル版)
-    2. システムのffmpeg (PATH)
+    1. PyInstallerバンドル内のstatic-ffmpeg
+    2. static-ffmpeg パッケージ
+    3. imageio-ffmpeg (後方互換性)
+    4. システムのffmpeg (PATH)
 
     Returns:
         ffmpegの実行パス
@@ -36,7 +78,23 @@ def get_ffmpeg_path() -> str:
     if _ffmpeg_path is not None:
         return _ffmpeg_path
 
-    # 1. imageio-ffmpegを試行
+    # 1. PyInstallerバンドル内を確認
+    bundled_dir = _get_bundled_bin_dir()
+    if bundled_dir:
+        ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+        bundled_ffmpeg = bundled_dir / ffmpeg_name
+        if bundled_ffmpeg.exists():
+            _ffmpeg_path = str(bundled_ffmpeg)
+            return _ffmpeg_path
+
+    # 2. static-ffmpegパッケージを試行
+    _init_static_ffmpeg()
+    static_ffmpeg_path = shutil.which("ffmpeg")
+    if static_ffmpeg_path:
+        _ffmpeg_path = static_ffmpeg_path
+        return _ffmpeg_path
+
+    # 3. imageio-ffmpegを試行（後方互換性）
     try:
         import imageio_ffmpeg
         path = imageio_ffmpeg.get_ffmpeg_exe()
@@ -48,7 +106,7 @@ def get_ffmpeg_path() -> str:
     except Exception:
         pass
 
-    # 2. システムのffmpegを試行
+    # 4. システムのffmpegを試行
     system_ffmpeg = shutil.which("ffmpeg")
     if system_ffmpeg:
         _ffmpeg_path = system_ffmpeg
@@ -62,8 +120,10 @@ def get_ffprobe_path() -> str:
     FFprobeの実行パスを取得
 
     優先順位:
-    1. ffmpegと同じディレクトリのffprobe
-    2. システムのffprobe (PATH)
+    1. PyInstallerバンドル内のstatic-ffmpeg
+    2. static-ffmpeg パッケージ
+    3. ffmpegと同じディレクトリのffprobe
+    4. システムのffprobe (PATH)
 
     Returns:
         ffprobeの実行パス
@@ -76,7 +136,23 @@ def get_ffprobe_path() -> str:
     if _ffprobe_path is not None:
         return _ffprobe_path
 
-    # 1. ffmpegと同じディレクトリを確認
+    # 1. PyInstallerバンドル内を確認
+    bundled_dir = _get_bundled_bin_dir()
+    if bundled_dir:
+        ffprobe_name = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
+        bundled_ffprobe = bundled_dir / ffprobe_name
+        if bundled_ffprobe.exists():
+            _ffprobe_path = str(bundled_ffprobe)
+            return _ffprobe_path
+
+    # 2. static-ffmpegパッケージを試行
+    _init_static_ffmpeg()
+    static_ffprobe_path = shutil.which("ffprobe")
+    if static_ffprobe_path:
+        _ffprobe_path = static_ffprobe_path
+        return _ffprobe_path
+
+    # 3. ffmpegと同じディレクトリを確認
     try:
         ffmpeg_path = get_ffmpeg_path()
         ffmpeg_dir = Path(ffmpeg_path).parent
@@ -94,7 +170,7 @@ def get_ffprobe_path() -> str:
     except RuntimeError:
         pass
 
-    # 2. システムのffprobeを試行
+    # 4. システムのffprobeを試行
     system_ffprobe = shutil.which("ffprobe")
     if system_ffprobe:
         _ffprobe_path = system_ffprobe

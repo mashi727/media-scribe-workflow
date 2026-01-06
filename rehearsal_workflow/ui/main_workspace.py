@@ -2756,6 +2756,35 @@ class MainWorkspace(QWidget):
 
     # === YouTubeダウンロード ===
 
+    def _clean_youtube_url(self, url: str) -> str:
+        """URLから一時的なプレイリストパラメータを除去
+
+        TLP, RD等の自動生成プレイリストIDを含む場合、
+        list=パラメータを削除して単一動画URLにする。
+        """
+        import re
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+        # プレイリストIDを確認
+        match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
+        if match:
+            list_id = match.group(1)
+            # 一時的なプレイリストの場合、list=を削除
+            if list_id.startswith(('TLP', 'RD', 'OL', 'UU', 'LL')):
+                parsed = urlparse(url)
+                params = parse_qs(parsed.query)
+                # list パラメータを削除
+                params.pop('list', None)
+                # index パラメータも削除
+                params.pop('index', None)
+                new_query = urlencode(params, doseq=True)
+                cleaned = urlunparse((
+                    parsed.scheme, parsed.netloc, parsed.path,
+                    parsed.params, new_query, parsed.fragment
+                ))
+                return cleaned
+        return url
+
     def _start_youtube_download(self):
         """YouTubeダウンロードを開始"""
         url = self._youtube_url_edit.text().strip()
@@ -2772,6 +2801,12 @@ class MainWorkspace(QWidget):
         if self._is_playlist_url(url):
             self._start_playlist_download(url)
             return
+
+        # 一時的なプレイリストパラメータを除去
+        original_url = url
+        url = self._clean_youtube_url(url)
+        if url != original_url:
+            self._log_panel.info(f"Removed temp playlist param: {url}", source="YouTube")
 
         # 既存のダウンロードがあればキャンセル
         if self._youtube_worker and self._youtube_worker.isRunning():
@@ -2875,8 +2910,25 @@ class MainWorkspace(QWidget):
     # === プレイリストダウンロード ===
 
     def _is_playlist_url(self, url: str) -> bool:
-        """プレイリストURLかどうかを判定"""
-        return 'list=' in url
+        """プレイリストURLかどうかを判定
+
+        一時的なミックスプレイリスト（TLP, RD等）は除外し、
+        単一動画としてダウンロードする。
+        """
+        if 'list=' not in url:
+            return False
+
+        # プレイリストIDを抽出
+        import re
+        match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
+        if match:
+            list_id = match.group(1)
+            # TLP, RD, OL, UU, LL などは一時的/自動生成プレイリスト
+            # これらはAPIでアクセスできないので単一動画として扱う
+            if list_id.startswith(('TLP', 'RD', 'OL', 'UU', 'LL')):
+                return False
+
+        return True
 
     def _start_playlist_download(self, url: str):
         """プレイリスト情報取得を開始"""
