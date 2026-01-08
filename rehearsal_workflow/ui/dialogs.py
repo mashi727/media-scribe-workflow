@@ -1596,12 +1596,15 @@ class ExportSettingsDialog(QDialog):
     SETTINGS_KEY_QUALITY = "export/quality_index"
     SETTINGS_KEY_EMBED_CHAPTERS = "export/embed_chapters"
     SETTINGS_KEY_SPLIT_CHAPTERS = "export/split_chapters"
+    SETTINGS_KEY_OUTPUT_DIR = "export/output_dir"
 
-    def __init__(self, parent=None, available_encoders=None, is_audio_only=False, cover_image=None):
+    def __init__(self, parent=None, available_encoders=None, is_audio_only=False, cover_image=None, work_dir=None):
         super().__init__(parent)
         self._available_encoders = available_encoders or []
         self._is_audio_only = is_audio_only
         self._cover_image = cover_image  # QImage or None
+        self._work_dir = work_dir or Path.cwd()  # デフォルトのwork_dir
+        self._output_dir = None  # ユーザー選択の出力ディレクトリ
         self._settings = QSettings("mashi727", "VideoChapterEditor")
         self._setup_ui()
         self._load_settings()
@@ -1737,6 +1740,43 @@ class ExportSettingsDialog(QDialog):
 
         layout.addWidget(self._cover_group)
 
+        # === Output Directory ===
+        output_group = QGroupBox("Output Directory")
+        output_layout = QHBoxLayout(output_group)
+        output_layout.setContentsMargins(12, 16, 12, 12)
+        output_layout.setSpacing(8)
+
+        self._output_dir_label = QLabel()
+        self._output_dir_label.setStyleSheet("""
+            QLabel {
+                background: #2d2d2d;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                padding: 8px 12px;
+                font-size: 13px;
+                color: #a0a0a0;
+            }
+        """)
+        self._output_dir_label.setText("(Same as source)")
+        self._output_dir_label.setToolTip("出力先ディレクトリ（デフォルトはソースと同じ）")
+        output_layout.addWidget(self._output_dir_label, 1)
+
+        self._output_dir_btn = QPushButton("Change...")
+        self._output_dir_btn.setFixedHeight(36)
+        self._output_dir_btn.setStyleSheet(ButtonStyles.secondary())
+        self._output_dir_btn.setToolTip("出力先ディレクトリを変更")
+        self._output_dir_btn.clicked.connect(self._select_output_dir)
+        output_layout.addWidget(self._output_dir_btn)
+
+        self._output_dir_reset_btn = QPushButton("Reset")
+        self._output_dir_reset_btn.setFixedHeight(36)
+        self._output_dir_reset_btn.setStyleSheet(ButtonStyles.secondary())
+        self._output_dir_reset_btn.setToolTip("ソースと同じディレクトリに戻す")
+        self._output_dir_reset_btn.clicked.connect(self._reset_output_dir)
+        output_layout.addWidget(self._output_dir_reset_btn)
+
+        layout.addWidget(output_group)
+
         # === ボタン ===
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -1832,12 +1872,26 @@ class ExportSettingsDialog(QDialog):
             self._settings.value(self.SETTINGS_KEY_SPLIT_CHAPTERS, False, type=bool)
         )
 
+        # Output Directory
+        saved_output_dir = self._settings.value(self.SETTINGS_KEY_OUTPUT_DIR, "")
+        if saved_output_dir and Path(saved_output_dir).exists():
+            self._output_dir = Path(saved_output_dir)
+            self._update_output_dir_label()
+        else:
+            self._output_dir = None
+            self._output_dir_label.setText("(Same as source)")
+
     def _save_and_accept(self):
         """設定を保存してダイアログを閉じる"""
         self._settings.setValue(self.SETTINGS_KEY_ENCODER, self._encoder_combo.currentData())
         self._settings.setValue(self.SETTINGS_KEY_QUALITY, self._quality_combo.currentIndex())
         self._settings.setValue(self.SETTINGS_KEY_EMBED_CHAPTERS, self._embed_chapters_cb.isChecked())
         self._settings.setValue(self.SETTINGS_KEY_SPLIT_CHAPTERS, self._split_chapters_cb.isChecked())
+        # Output Directory
+        if self._output_dir:
+            self._settings.setValue(self.SETTINGS_KEY_OUTPUT_DIR, str(self._output_dir))
+        else:
+            self._settings.remove(self.SETTINGS_KEY_OUTPUT_DIR)
         self.accept()
 
     def get_encoder(self) -> str:
@@ -1859,6 +1913,42 @@ class ExportSettingsDialog(QDialog):
     def get_cover_image(self) -> Optional[QImage]:
         """カバー画像を取得"""
         return self._cover_image
+
+    def get_output_dir(self) -> Optional[Path]:
+        """出力先ディレクトリを取得（Noneの場合はソースと同じ）"""
+        return self._output_dir
+
+    def _select_output_dir(self):
+        """出力先ディレクトリを選択"""
+        # 初期ディレクトリを決定
+        start_dir = str(self._output_dir) if self._output_dir else str(self._work_dir)
+
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Directory",
+            start_dir,
+            QFileDialog.Option.ShowDirsOnly
+        )
+
+        if directory:
+            self._output_dir = Path(directory)
+            self._update_output_dir_label()
+
+    def _reset_output_dir(self):
+        """出力先ディレクトリをリセット（ソースと同じに）"""
+        self._output_dir = None
+        self._output_dir_label.setText("(Same as source)")
+
+    def _update_output_dir_label(self):
+        """出力先ディレクトリラベルを更新"""
+        if self._output_dir:
+            # パスを省略表示（40文字程度）
+            path_str = str(self._output_dir)
+            if len(path_str) > 40:
+                path_str = "..." + path_str[-37:]
+            self._output_dir_label.setText(path_str)
+        else:
+            self._output_dir_label.setText("(Same as source)")
 
     def _open_cover_dialog(self):
         """カバー画像ダイアログを開く"""
@@ -1892,12 +1982,15 @@ class ExportSettingsDialog(QDialog):
     def load_settings_static() -> dict:
         """静的メソッド: QSettingsから設定を読み込み (ダイアログを開かずに)"""
         settings = QSettings("mashi727", "VideoChapterEditor")
+        output_dir_str = settings.value(ExportSettingsDialog.SETTINGS_KEY_OUTPUT_DIR, "")
+        output_dir = Path(output_dir_str) if output_dir_str and Path(output_dir_str).exists() else None
         return {
             "encoder": settings.value(ExportSettingsDialog.SETTINGS_KEY_ENCODER, "copy"),
             "quality_index": settings.value(ExportSettingsDialog.SETTINGS_KEY_QUALITY, 0, type=int),
             "embed_chapters": settings.value(ExportSettingsDialog.SETTINGS_KEY_EMBED_CHAPTERS, True, type=bool),
             "cut_excluded": True,  # 常に除外区間をカット
             "split_chapters": settings.value(ExportSettingsDialog.SETTINGS_KEY_SPLIT_CHAPTERS, False, type=bool),
+            "output_dir": output_dir,
         }
 
 

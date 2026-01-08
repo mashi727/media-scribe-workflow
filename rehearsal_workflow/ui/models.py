@@ -194,6 +194,7 @@ class ProjectState:
     cover_image_path: Optional[Path] = None
     chapters: List[ChapterInfo] = field(default_factory=list)
     output_path: Optional[Path] = None
+    output_dir: Optional[Path] = None  # 出力先ディレクトリ（Noneの場合はwork_dir）
     video_path: Optional[Path] = None
     video_duration_ms: int = 0
     colorspace: Optional[ColorspaceInfo] = None
