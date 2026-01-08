@@ -11,16 +11,11 @@
 ### video-chapter-editor
 
 #### 短期（リファクタリング）
-- Phase 1: 重複コード抽出
-  - `styles.py` 新規作成（色定数・ボタンスタイル）
-  - `dialogs.py` の `_button_style()` 統一
-  - `workers.py` の `build_drawtext_filter()` 追加
-- Phase 2: ユーティリティクラス
-  - `TempFileManagerMixin`
-  - `CancellableWorkerMixin`
+- ~~Phase 1: 重複コード抽出~~ ✅ 完了
+- ~~Phase 2: ユーティリティクラス~~ ✅ 完了
 - Phase 3: God Class分割（main_workspace.py: 5000行超）
-  - テスト環境構築
-  - 責務分離（ChapterManager, MediaPlaybackController等）
+  - ~~YouTubeDownloadMixin抽出~~ ✅ 完了
+  - 残り候補: ChapterManager, MediaPlaybackController, ExportOrchestrator
 
 #### 中期（アーキテクチャ改善）
 - プロジェクトファイル（JSON）への移行 → 下記「設計検討事項」参照
@@ -35,6 +30,158 @@
 
 - 配管のプロトタイプは完了
 - 陶器（GUI）の設計は video-chapter-editor 完成後
+
+---
+
+## 2026-01-08: コードリファクタリング（Phase 1-3）
+
+### 概要
+
+main_workspace.py（5,000行超のGod Class）を中心としたコードベースの保守性向上。
+機能変更なし、テスト可能な小さな変更を積み重ねるアプローチ。
+
+### Phase 1: 重複コード抽出
+
+#### styles.py 新規作成
+
+色定数とボタンスタイルを集約。
+
+```python
+# rehearsal_workflow/ui/styles.py
+class Colors:
+    PRIMARY = "#3b82f6"
+    DANGER = "#dc2626"
+    BACKGROUND_DARK = "#1a1a1a"
+    # ...
+
+class ButtonStyles:
+    @staticmethod
+    def primary() -> str: ...
+    @staticmethod
+    def danger() -> str: ...
+    @staticmethod
+    def primary_compact() -> str: ...
+    # ...
+```
+
+#### build_drawtext_filter() 追加
+
+workers.py内の4箇所で重複していたdrawtextフィルター生成ロジックを関数化。
+
+```python
+def build_drawtext_filter(
+    fontfile: str,
+    textfile: str,
+    fontsize_ratio: float = 0.04,
+    fontcolor: str = "white",
+    # ...
+) -> str:
+```
+
+### Phase 2: Mixinパターン導入
+
+#### TempFileManagerMixin
+
+一時ファイルの作成・クリーンアップを管理。
+
+```python
+class TempFileManagerMixin:
+    def _init_temp_manager(self) -> None
+    def _create_temp_file(self, suffix: str, prefix: str = "vce_") -> str
+    def _add_temp_file(self, path: str) -> None
+    def _cleanup_temp_files(self) -> None
+```
+
+#### CancellableWorkerMixin
+
+キャンセル可能なワーカーの共通機能。
+
+```python
+class CancellableWorkerMixin:
+    def _init_cancellable(self) -> None
+    def cancel(self) -> None
+    def _is_cancelled(self) -> bool
+    def _set_process(self, process) -> None
+```
+
+#### 適用クラス
+
+- `ExportWorker`
+- `SplitExportWorker`
+- `YouTubeDownloadWorker`
+
+**効果**: 約51行の重複コード削除
+
+### Phase 3: YouTubeDownloadMixin抽出
+
+main_workspace.pyからYouTube関連メソッド18個（約380行）を分離。
+
+```python
+# rehearsal_workflow/ui/youtube_mixin.py
+class YouTubeDownloadMixin:
+    def _youtube_btn_style_normal(self) -> str
+    def _youtube_btn_style_processing(self) -> str
+    def _clean_youtube_url(self, url: str) -> str
+    def _is_playlist_url(self, url: str) -> bool
+    def _start_youtube_download(self)
+    def _on_youtube_progress(self, message: str)
+    def _on_youtube_completed(self, video_path: str, srt_path: str)
+    # ... 他11メソッド
+```
+
+**継承構造**:
+
+```python
+class MainWorkspace(QWidget, YouTubeDownloadMixin):
+    ...
+```
+
+### ユニットテスト追加
+
+GUIに依存しない純粋関数部分のテストを作成。
+
+| ファイル | テスト対象 | テスト数 |
+|---------|-----------|---------|
+| test_mixins.py | TempFileManagerMixin, CancellableWorkerMixin | 11 |
+| test_youtube_mixin.py | URL処理、プレイリスト判定 | 17 |
+| test_workers_utils.py | build_drawtext_filter | 12 |
+| test_styles.py | Colors, ButtonStyles | 16 |
+| **合計** | | **56** |
+
+実行: `pytest tests/ -v`
+
+### 変更ファイル一覧
+
+| ファイル | 操作 | 内容 |
+|---------|------|------|
+| `styles.py` | 新規 | Colors, ButtonStyles |
+| `youtube_mixin.py` | 新規 | YouTubeDownloadMixin |
+| `workers.py` | 編集 | build_drawtext_filter, Mixins追加 |
+| `dialogs.py` | 編集 | styles.pyインポート |
+| `main_workspace.py` | 編集 | Mixin継承、YouTube関連削除（-377行） |
+| `tests/` | 新規 | ユニットテスト56件 |
+
+### コミット履歴
+
+```
+240d086 Add unit tests for refactored components
+735c137 Extract YouTubeDownloadMixin from MainWorkspace (Phase 3)
+d1c9154 Apply Mixins to worker classes (Phase 2 Step 2.3)
+（以前のPhase 1-2コミットは省略）
+```
+
+### 設計判断
+
+1. **Mixinパターン採用理由**: Pythonの多重継承を活用し、既存クラス構造を維持しつつ機能を分離
+2. **TYPE_CHECKING活用**: 循環インポートを回避しつつIDE補完を維持
+3. **テスト対象の選定**: GUIに依存しない純粋関数のみをテスト対象とし、Qt依存部分は手動確認
+
+### 残課題（Phase 3継続候補）
+
+main_workspace.py（現在約5,300行）の更なる分割候補：
+- `ChapterManager`: チャプター追加・削除・編集
+- `MediaPlaybackController`: 再生制御、シーク
+- `ExportOrchestrator`: エクスポート処理の調整
 
 ---
 
