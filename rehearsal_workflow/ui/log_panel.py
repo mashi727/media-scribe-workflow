@@ -164,6 +164,7 @@ class LogPanel(QWidget):
         # エントリ数表示
         self._count_label = QLabel("0 entries")
         self._count_label.setStyleSheet("color: #666666;")
+        self._count_label.setToolTip("表示中 / 全エントリ数")
         header_layout.addWidget(self._count_label)
 
         # クリアボタン

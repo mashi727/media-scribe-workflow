@@ -1,0 +1,2118 @@
+\documentclass[10pt,a4paper,twocolumn]{ltjsarticle}
+
+% LuaLaTeX用フォント設定パッケージ
+\usepackage{luatexja-fontspec}
+\usepackage{amsmath,amssymb}
+\usepackage{unicode-math}
+
+% ====================
+% 欧文フォント設定 (Libertinus)
+% ====================
+\setmainfont{Libertinus Serif}[
+    BoldFont = {Libertinus Serif Bold},
+    ItalicFont = {Libertinus Serif Italic},
+    BoldItalicFont = {Libertinus Serif Bold Italic}
+]
+\setsansfont{Libertinus Sans}[
+    BoldFont = {Libertinus Sans Bold},
+    ItalicFont = {Libertinus Sans Italic}
+]
+\setmonofont{DejaVu Sans Mono}[Scale=0.9]
+
+% ====================
+% 日本語フォント設定 (原ノ味フォント)
+% ====================
+\setmainjfont{HaranoAjiMincho-Regular}[
+    BoldFont = {HaranoAjiGothic-Medium},
+    ItalicFont = {HaranoAjiMincho-Regular},
+    BoldItalicFont = {HaranoAjiGothic-Bold}
+]
+\setsansjfont{HaranoAjiGothic-Regular}[
+    BoldFont = {HaranoAjiGothic-Bold}
+]
+\setmonojfont{HaranoAjiGothic-Regular}
+
+% ====================
+% 数式フォント設定 (Libertinus Math)
+% ====================
+\setmathfont{Libertinus Math}
+
+% パッケージ
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue]{hyperref}
+\usepackage{ascmac}
+\usepackage{fancyvrb}
+\usepackage{tcolorbox}
+\tcbuselibrary{breakable,skins}
+\usepackage{geometry}
+\geometry{left=15mm,right=15mm,top=20mm,bottom=20mm}
+
+% ファイル生成日時（JST）
+\newcommand{\generatedDate}{2026-01-08}
+\newcommand{\generatedTime}{23:30}
+
+% ヘッダー・フッター設定
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[R]{\small \generatedDate\ \generatedTime\ JST (\thepage/\pageref{LastPage})}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% 1ページ目のスタイル
+\fancypagestyle{plain}{
+  \fancyhf{}
+  \renewcommand{\headrulewidth}{0pt}
+}
+
+% 共通インデント幅
+\newlength{\contentindent}
+\setlength{\contentindent}{1\zw}
+
+% 右寄せコンテンツ用の共通ラッパー
+\newenvironment{indentedcontent}{%
+  \par\noindent
+  \begin{flushright}%
+  \begin{minipage}{\dimexpr\linewidth-\contentindent\relax}%
+}{%
+  \end{minipage}%
+  \end{flushright}%
+}
+
+% コードブロック用ラッパー
+\newenvironment{indentedlst}{%
+  \vspace{0.15\baselineskip}%
+  \begin{indentedcontent}%
+}{%
+  \end{indentedcontent}%
+  \vspace{0.15\baselineskip}%
+}
+
+% コードブロック設定
+\lstset{
+  basicstyle=\ttfamily\tiny,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  backgroundcolor=\color{gray!10},
+  xleftmargin=0pt,
+  xrightmargin=0pt,
+  aboveskip=0pt,
+  belowskip=0pt,
+}
+
+% Y列タイプ定義
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+% 表用のラッパー環境
+\newenvironment{indentedtable}{%
+  \vspace{0.15\baselineskip}%
+  \begin{indentedcontent}%
+  \footnotesize
+  \setlength{\tabcolsep}{3pt}%
+  \renewcommand{\arraystretch}{0.85}%
+}{%
+  \end{indentedcontent}%
+  \vspace{0.15\baselineskip}%
+}
+
+% 判断ポイント用ボックス（内部定義）
+\newtcolorbox{decisionboxinner}[1][]{
+  colback=gray!5!white,
+  colframe=gray!50!white,
+  boxrule=0.5pt,
+  fonttitle=\bfseries,
+  width=\linewidth,
+  #1
+}
+
+% 判断ポイント用ボックス（ラッパー）
+\newenvironment{decisionbox}[1][]{%
+  \vspace{0.15\baselineskip}%
+  \begin{indentedcontent}%
+  \begin{decisionboxinner}[#1]%
+}{%
+  \end{decisionboxinner}%
+  \end{indentedcontent}%
+  \vspace{0.15\baselineskip}%
+}
+
+% タイトル
+\title{\textbf{Video Chapter Editor アーキテクチャ設計書}\\
+\large 設計思想から実装までの技術的詳解}
+\author{執筆者：まし\\技術監修：Claude Code (Anthropic)}
+\date{}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{plain}
+
+\section*{はじめに}
+
+本文書は、Video Chapter Editor（VCE）の設計思想、アーキテクチャ、および実装詳細を体系的に記述した技術文書である。対話記録とは異なり、設計決定の背景と技術的根拠を再構成し、将来の保守・拡張に資する形で整理している。
+
+開発は2025年12月23日から2026年1月6日までの約2週間にわたり、ユーザーとClaude Codeの間で9,000以上のメッセージがやり取りされた。本文書では、この開発過程で確立された設計思想と実装パターンを抽出し、特に\textbf{設計から実装に至る判断ポイント}を詳細に記録している。
+
+\tableofcontents
+
+\newpage
+
+%% ========================================
+%% 第1章：設計思想
+%% ========================================
+\section{設計思想}
+
+\subsection{UNIX哲学}
+
+本プロジェクトの設計思想の根底には、UNIX哲学がある。1970年代にBell研究所でUNIXを開発したKen Thompson、Dennis Ritchie、そしてパイプの考案者であるDoug McIlroyらによって培われた設計原則である\footnote{McIlroy, M. D., Pinson, E. N., \& Tague, B. A. (1978). ``Unix Time-Sharing System: Foreword.'' \textit{The Bell System Technical Journal}, 57(6), 1899--1904.}。
+
+Doug McIlroyは、UNIX哲学の核心を次のように表現した\footnote{Salus, P. H. (1994). \textit{A Quarter Century of Unix}. Addison-Wesley. p.52.}：
+
+\begin{quote}
+\textit{``Write programs that do one thing and do it well. Write programs to work together. Write programs to handle text streams, because that is a universal interface.''}
+
+（一つのことをうまくやるプログラムを書け。協調して動作するプログラムを書け。テキストストリームを扱うプログラムを書け。それが普遍的なインターフェースだからだ。）
+\end{quote}
+
+この哲学から導かれる設計原則を以下に整理する：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+原則 & 内容 \\
+\midrule
+単一目的 & 各プログラムは一つのことだけをうまく行う \\
+協調動作 & プログラム同士がパイプで連携できる \\
+普遍的IF & テキストストリームを共通インターフェースとする \\
+小さなツール & 大きなモノリスより小さなツールの組み合わせ \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+Eric S. Raymondは著書『The Art of Unix Programming』において、これらの原則を17のルールとして体系化した\footnote{Raymond, E. S. (2003). \textit{The Art of Unix Programming}. Addison-Wesley. Chapter 1.}。本プロジェクトでは、特に以下のルールを重視した：
+
+\begin{itemize}
+\item \textbf{Rule of Modularity}: 単純な部品を明確なインターフェースで接続せよ
+\item \textbf{Rule of Composition}: 他のプログラムと連携できるよう設計せよ
+\item \textbf{Rule of Separation}: ポリシーをメカニズムから分離せよ
+\item \textbf{Rule of Simplicity}: 複雑さを避け、単純さを追求せよ
+\end{itemize}
+
+\subsection{配管と陶器}
+
+Gitの設計には、UNIX哲学の影響が色濃く見られる。小さな単機能コマンドの組み合わせ、テキストベースのデータ形式、パイプによる連携といった特徴は、McIlroyの原則と合致する。Linus Torvaldsは、低レベルの内部コマンドを「配管（plumbing）」、ユーザー向けの高レベルコマンドを「陶器（porcelain）」と呼び分けた\footnote{Git公式ドキュメント: \url{https://git-scm.com/book/en/v2/Git-Internals-Plumbing-and-Porcelain}}。この用語自体がUNIX文化からの借用であり、設計思想の親和性を示唆している。本プロジェクトでは、この「配管と陶器」という表現を借用し、UNIX哲学に基づいた階層設計を行った。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+層 & 役割 \\
+\midrule
+陶器（Porcelain） & GUIアプリケーション（Video Chapter Editor）。ユーザーとの対話、視覚的フィードバック \\
+配管（Plumbing） & CLIツール群（yt-srt, video-trim等）。単一目的、組み合わせ可能 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+この設計により、UNIX哲学の利点を継承する：
+
+\begin{enumerate}
+\item \textbf{単一責任}: 各ツールは一つのことだけを行う（McIlroyの第一原則）
+\item \textbf{組み合わせ可能性}: パイプラインとして連結可能（McIlroyの第二原則）
+\item \textbf{テスタビリティ}: 個別にテスト可能（Rule of Modularity）
+\item \textbf{代替可能性}: 実装を差し替え可能（Rule of Composition）
+\end{enumerate}
+
+\subsection{ハイブリッドアプローチ}
+
+本プロジェクトは、複数の技術スタックを組み合わせたハイブリッドアプローチを採用する。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+技術 & 担当範囲 & 根拠 \\
+\midrule
+Python/PySide6 & GUIアプリケーション & Qt6による堅牢なUI \\
+Zsh関数 & CLIツール群 & シェル環境との親和性 \\
+Claude AI & 文書生成・分析 & 自然言語処理 \\
+ffmpeg & 動画処理 & 業界標準ツール \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsection{責務の境界}
+
+各コンポーネントの責務境界を明確に定義する。
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
++-------------------+
+| Video Chapter     |  陶器層
+| Editor (GUI)      |  - ユーザー操作
+|                   |  - 状態管理
++-------------------+  - 視覚的フィードバック
+         |
+         v
++-------------------+
+| Workers           |  配管層（内部）
+| (QThread)         |  - 非同期処理
+|                   |  - プログレス通知
++-------------------+
+         |
+         v
++-------------------+
+| External Tools    |  配管層（外部）
+| (ffmpeg, yt-dlp)  |  - 実際の処理
++-------------------+
+\end{lstlisting}
+\end{indentedlst}
+
+%% ========================================
+%% 第2章：上流設計
+%% ========================================
+\section{上流設計}
+
+\subsection{ユースケース分析}
+
+開発初期段階で、グラフ理論を用いたユースケース分析が行われた。入力状態から出力状態への変換をグラフとして捉え、Euler経路問題として形式化した\footnote{全ての辺を1回ずつ通る経路（Euler経路）の存在条件：奇点が0個または2個。}。
+
+\begin{decisionbox}[title={一筆書き問題としての分析}]
+\textbf{背景}: 入力パターンが5つ（単一MP3、単一MP4、複数MP3、複数MP4、YouTube URL）存在し、それぞれに異なる処理が必要だった。v2.1.x以降、複数MP4対応と仮想タイムライン機能が追加され、入力パターンが拡張された。
+
+\textbf{問題}: 機能重複が発生しやすい構造であった。
+
+\textbf{分析}: 入力ソース、中間生成物、最終生成物をノードとし、処理の流れをエッジとしたグラフを構成。グラフ理論（オイラー路の条件）の観点から、始点・終点を除く中間ノードに奇点（次数が奇数の頂点）が存在する場合、一筆書きが不可能となり、処理の重複が発生せざるを得ないことを認識。
+
+\textbf{決定}: 共通パスを1つに集約し、入口のみを分岐させる設計を採用。これにより中間ノードの奇点を解消し、処理の重複を排除。
+\end{decisionbox}
+
+\subsubsection{ワークフローグラフ}
+
+現状の処理フローを、入力ソース・中間生成物・最終成果物をノード、処理をエッジとしたグラフで表現する（図\ref{fig:workflow-graph}）\footnote{Mermaidソース: \texttt{dev\_logs\_tex/workflow\_graph.mmd}}。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{workflow_graph.pdf}
+\caption{ワークフローグラフ：入力ソースから最終成果物への処理フロー}
+\label{fig:workflow-graph}
+\end{figure}
+
+\subsubsection{ノード次数の分析}
+
+各ノードの次数（入次数＋出次数）を分析し、オイラー路の条件を確認する。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lccclX@{}}
+\toprule
+ノード & 入 & 出 & 計 & 種別 & 備考 \\
+\midrule
+YouTube URL & 0 & 1 & 1 & 始点 & 奇点（許容） \\
+単一/複数MP4 & 0 & 1 & 1 & 始点 & 奇点（許容） \\
+単一/複数MP3 & 0 & 1 & 1 & 始点 & 奇点（許容） \\
+\midrule
+仮想タイムライン & 5 & 4 & 9 & 中間 & 奇点 → 後述 \\
+SRTファイル & 2 & 2 & 4 & 中間 & 偶点 \\
+\midrule
+チャプター付きMP4 & 1 & 0 & 1 & 終点 & 奇点（許容） \\
+YouTubeチャプター & 1 & 0 & 1 & 終点 & 奇点（許容） \\
+分割動画 & 1 & 0 & 1 & 終点 & 奇点（許容） \\
+スクリプトPDF & 1 & 0 & 1 & 終点 & 奇点（許容） \\
+サマリーPDF & 1 & 0 & 1 & 終点 & 奇点（許容） \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\paragraph{分析結果}
+
+「仮想タイムライン」ノードは入次数5（5つの入力パターン：単一MP3、単一MP4、複数MP3、複数MP4、YouTube URL）、出次数4（4つの出力先）で合計次数9（奇点）となる。しかし、これは複数の始点から1つの中間ノードへ集約する設計の結果であり、\textbf{処理の重複}ではなく\textbf{処理の共有}を実現している。v2.1.x以降の仮想タイムライン機能により、複数ファイルも単一のタイムラインとして統一的に扱える。
+
+本設計のポイント：
+\begin{enumerate}
+\item 入力側の分岐を「仮想タイムライン」という共通形式に集約
+\item VCEは入力形式を問わず、統一されたMP4を処理
+\item 出力側は独立したエッジとして分岐（各出力は1回の処理で生成）
+\end{enumerate}
+
+これにより、5つの入力パターンに対して個別の処理パイプラインを構築する場合と比較し、VCE以降の処理ロジックの重複を排除している。
+
+\subsubsection{入力状態の列挙}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}clX@{}}
+\toprule
+ID & 入力タイプ & 説明 \\
+\midrule
+I1 & YouTube URL & 字幕あり/なしの2パターン \\
+I2 & 単一MP4 & ローカル動画ファイル \\
+I3 & 複数MP4 & 仮想タイムラインで統合 \\
+I4 & 単一MP3 & 要カバー画像 \\
+I5 & 複数MP3 & 要カバー画像、仮想タイムラインで統合 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{出力成果物}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}clX@{}}
+\toprule
+ID & 成果物 & 説明 \\
+\midrule
+O1 & チャプター付きMP4 & メタデータ埋め込み済み \\
+O2 & YouTubeチャプター & 説明欄用テキスト \\
+O3 & SRTファイル & 字幕ファイル \\
+O4 & スクリプトPDF & 詳細な発言記録 \\
+O5 & サマリーPDF & AI要約レポート \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{処理経路の分析}
+
+入力から出力への変換経路を分析した結果、以下の処理パターンが識別された：
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+パターン1: YouTube URL
+  YouTube URL -> [yt-dlp] -> MP4 + SRT
+              -> [VCE仮想タイムライン] -> チャプター付きMP4
+
+パターン2: 単一MP4
+  MP4 -> [VCE仮想タイムライン] -> チャプター付きMP4
+      -> [whisper] -> SRT (オプション)
+
+パターン3: 複数MP4
+  MP4群 -> [VCE仮想タイムライン] -> 単一チャプター付きMP4
+       (ソース順序の並べ替え・移動可能)
+
+パターン4: 単一MP3
+  MP3 + カバー画像 -> [ffmpeg] -> MP4
+                   -> [VCE仮想タイムライン] -> チャプター付きMP4
+
+パターン5: 複数MP3
+  MP3群 + カバー画像 -> [ffmpeg] -> 複数MP4
+                     -> [VCE仮想タイムライン] -> 単一チャプター付きMP4
+                     (ソース順序の並べ替え・移動可能)
+\end{lstlisting}
+\end{indentedlst}
+
+\subsection{ワークフロー設計}
+
+ユースケース分析に基づき、3つの主要ワークフローを設計した。
+
+\subsubsection{前処理ワークフロー}
+
+責務：素材の正規化
+
+\begin{enumerate}
+\item YouTubeダウンロード（URL→MP4+SRT）
+\item 動画トリミング（不要部分削除）
+\item 音声正規化（音量調整）
+\item カバー画像設定（音声ファイルの場合）
+\end{enumerate}
+
+\subsubsection{編集ワークフロー}
+
+責務：チャプター作成と動画編集
+
+\begin{enumerate}
+\item メディア読み込み（単一/複数ファイル対応）
+\item 仮想タイムライン構築（複数ソースの統合）
+\item ソースファイルの順序変更・移動
+\item チャプターマーク付与
+\item プレビュー確認
+\item エクスポート（チャプター埋め込み/YouTubeリスト/分割動画）
+\end{enumerate}
+
+\subsubsection{文字起こしワークフロー}
+
+責務：SRT取得とレポート生成
+
+\begin{enumerate}
+\item SRT取得（YouTube字幕/Whisper）
+\item AI分析（Claude/ChatGPT）
+\item LaTeX生成
+\item PDF出力
+\end{enumerate}
+
+\subsection{YAMLベース設定設計}
+
+再現性と再利用性を確保するため、YAMLベースの設定ファイル設計を採用した。
+
+\subsubsection{設計思想：TeX/LaTeXアナロジー}
+
+\begin{decisionbox}[title={プロファイルアーキテクチャ}]
+\textbf{背景}: 異なるタイプの文字起こし（オケリハ、レッスン、会議）で共通設定と個別設定を管理する必要があった。
+
+\textbf{検討}: 単一のモノリシックな設定ファイル vs 階層化されたプロファイルシステム。
+
+\textbf{決定}: TeX/LaTeXのクラスファイル（.cls）とテックスファイル（.tex）の関係をアナロジーとして採用。
+\begin{itemize}
+\item プロファイル = .clsファイル（構造定義）
+\item YAML = .texファイル（インスタンス）
+\item マクロ展開 = プロンプト生成
+\end{itemize}
+
+\textbf{根拠}: ユーザーが既に馴染みのある概念であり、責務分離が明確になる。
+\end{decisionbox}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+TeX/LaTeX & 本システム & 役割 \\
+\midrule
+.cls（クラス） & profiles/*.yaml & 構造定義 \\
+.tex（文書） & workflow.yaml & インスタンス \\
+マクロ展開 & プロンプト生成 & 変数展開 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{静的/動的セクションの分離}
+
+YAMLファイルは、ユーザーが記述する静的セクションと、システムが更新する動的セクションを明確に分離する。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+# === 静的（ユーザー入力） ===
+schema_version: "1.1"
+profile: "orchestral_rehearsal"
+source:
+  type: "youtube"
+  url: "https://..."
+
+# === 動的（自動更新） ===
+source:
+  state:
+    video: "ready"
+    youtube_srt: "exists"
+  files:
+    video: "downloaded.mp4"
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{入力状態の7状態定義}
+
+\begin{decisionbox}[title={入力状態の明示的列挙}]
+\textbf{背景}: YouTubeダウンロード時にSRTが取得されることで、責務の境界が曖昧になっていた。
+
+\textbf{問題}: 「入力ファイルの状態の場合分けが十分でない」という根本的問題を認識。
+
+\textbf{決定}: 7つの入力状態（S1--S7）を明示的に定義し、YAMLに\texttt{source.state}フィールドを導入。
+
+\textbf{効果}: 各状態に対する次アクションが明確になり、ワークフロー境界が確立された。
+\end{decisionbox}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}clcccX@{}}
+\toprule
+状態 & 入力 & 動画 & YT字幕 & Whisper & 次アクション \\
+\midrule
+S1 & YouTube URL & -- & -- & -- & DL→S2/S3 \\
+S2 & YT URL+字幕あり & local & exists & -- & Whisper? \\
+S3 & YT URL+字幕なし & local & n/a & -- & Whisper必須 \\
+S4 & ローカル動画のみ & local & n/a & -- & Whisper必須 \\
+S5 & 動画+YT字幕 & local & exists & -- & Whisper? \\
+S6 & 動画+Whisper & local & -- & exists & 処理可能 \\
+S7 & 動画+両方 & local & exists & exists & 選択 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{プロファイル定義}
+
+3つの主要プロファイルを定義した：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+プロファイル & 参加者構造 & 特徴 \\
+\midrule
+orchestral\_rehearsal & 階層型（指揮者→奏者） & 音楽用語対応 \\
+horn\_lesson & 階層型（講師→生徒） & 初心者補足 \\
+meeting\_report & フラット型（参加者） & 発言者識別 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+%% ========================================
+%% 第3章：アーキテクチャ
+%% ========================================
+\section{アーキテクチャ}
+
+\subsection{全体構成}
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+rehearsal-workflow/
++-- bin/                    # CLI配管ツール
+|   +-- yt-srt              # YouTube字幕取得
+|   +-- video-trim          # 動画トリミング
+|   +-- video-chapters      # チャプター結合
+|   `-- spd2png             # PAD図変換
+|
++-- rehearsal_workflow/     # Pythonパッケージ
+|   +-- ui/                 # GUIモジュール
+|   |   +-- app.py          # エントリーポイント
+|   |   +-- main_workspace.py  # メインUI
+|   |   +-- dialogs.py      # ダイアログ群
+|   |   +-- workers.py      # 非同期ワーカー
+|   |   +-- models.py       # データモデル
+|   |   +-- styles.py       # スタイル定義
+|   |   `-- widgets/        # カスタムウィジェット
+|   `-- report_workflow.py  # レポート生成
+|
++-- docs/                   # ドキュメント
++-- examples/               # プロンプト例
+`-- profiles/               # YAMLプロファイル
+\end{lstlisting}
+\end{indentedlst}
+
+\subsection{クラス階層}
+
+\subsubsection{メインアプリケーション}
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+VideoChapterEditorNext (QMainWindow)
+    |
+    +-- MainWorkspace (QWidget)
+    |       メイン画面、5162行、133メソッド
+    |       責務: メディア再生、チャプター編集、
+    |             エクスポート、UI状態管理
+    |
+    +-- ダイアログ群
+        +-- SourceSelectionDialog
+        +-- ChapterEditDialog
+        +-- ExportOptionsDialog
+        +-- SettingsDialog
+        `-- HardwareEncoderDialog
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{ワーカークラス}
+
+非同期処理を担当するQThreadベースのワーカー群。
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+QThread (Qt)
+    |
+    +-- ExportWorker
+    |       動画エクスポート（チャプター埋め込み）
+    |       1000行超、ffmpeg呼び出し
+    |
+    +-- YouTubeDownloadWorker
+    |       yt-dlp呼び出し、字幕取得
+    |
+    +-- CoverImageExportWorker
+    |       MP3 + カバー画像 -> MP4
+    |
+    `-- SplitChaptersExportWorker
+            チャプター単位で分割出力
+\end{lstlisting}
+\end{indentedlst}
+
+\subsection{Signal/Slotパターン}
+
+PySide6のSignal/Slotパターンを用いて、コンポーネント間の疎結合を実現。
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+シグナルフロー例: エクスポート処理
+
+MainWorkspace
+    |
+    +-- export_clicked()
+    |       [ユーザー操作]
+    |
+    +-- ExportOptionsDialog
+    |       [設定取得]
+    |
+    +-- ExportWorker
+    |   +-- progress_update (Signal)
+    |   +-- log_message (Signal)
+    |   `-- finished (Signal)
+    |
+    +-- MainWorkspace
+            [進捗表示、完了処理]
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{主要シグナル一覧}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+シグナル & 用途 \\
+\midrule
+progress\_update(int) & プログレスバー更新 \\
+log\_message(str) & ログパネルへのメッセージ \\
+finished() & 処理完了通知 \\
+error\_occurred(str) & エラー発生通知 \\
+chapter\_added(Chapter) & チャプター追加通知 \\
+work\_dir\_changed(object) & 作業ディレクトリ変更通知 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsection{データモデル}
+
+\subsubsection{ChapterInfoクラス（相対時間方式）}
+
+v2.1.x以降、チャプターの時間管理は「相対時間方式」を採用。各チャプターはソースファイル内のローカル時間を保持し、表示時に累積時間（絶対時間）に変換する。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+@dataclass
+class ChapterInfo:
+    local_time_ms: int   # ソースファイル内のローカル時間
+    title: str
+    source_index: Optional[int] = None  # 所属ソースのインデックス
+
+    def get_absolute_time_ms(self, source_offsets: List[int]) -> int:
+        """累積時間（絶対時間）を計算"""
+        if self.source_index is not None:
+            return source_offsets[self.source_index] + self.local_time_ms
+        return self.local_time_ms
+
+    @property
+    def time_ms(self) -> int:
+        """後方互換: local_time_msを返す"""
+        return self.local_time_ms
+\end{lstlisting}
+\end{indentedlst}
+
+\begin{decisionbox}[title={相対時間方式の採用}]
+\textbf{背景}: ソースファイルの追加・削除・並べ替え時に、チャプターの時間再計算が複雑でエラーが発生しやすかった。
+
+\textbf{検討}:
+\begin{itemize}
+\item (A) 絶対時間方式: 累積時間を保持。表示がそのまま使えるが、操作時に全チャプター再計算が必要
+\item (B) 相対時間方式: ローカル時間 + source\_indexを保持。操作時の影響範囲が限定的
+\end{itemize}
+
+\textbf{決定}: 方式(B)を採用。
+
+\textbf{根拠}:
+\begin{itemize}
+\item ソース並べ替え: source\_indexのみ更新（時間は不変）
+\item ソース挿入/削除: source\_indexのシフトのみ
+\item エラーが連鎖しにくい構造
+\end{itemize}
+\end{decisionbox}
+
+\subsubsection{ExportSettings}
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+@dataclass
+class ExportSettings:
+    output_path: Path
+    format: str           # mp4, mkv
+    codec: str            # libx264, h264_videotoolbox
+    quality: int          # CRF値
+    embed_chapters: bool
+    include_youtube_chapters: bool
+    hardware_accel: Optional[str]
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{SourceFileクラス}
+
+v2.1.x以降の仮想タイムライン機能で導入されたソースファイル管理モデル。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+@dataclass
+class SourceFile:
+    """ソースファイル情報"""
+    path: Path
+    duration_ms: int = 0  # ミリ秒
+    file_type: str = ""   # "mp3", "mp4", etc.
+
+    @property
+    def duration_str(self) -> str:
+        """HH:MM:SS形式"""
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{ProjectStateクラス}
+
+複数ソースファイルを統合管理するプロジェクト状態モデル。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+@dataclass
+class ProjectState:
+    """プロジェクト状態"""
+    work_dir: Path = field(default_factory=Path.cwd)
+    sources: List[SourceFile] = field(default_factory=list)
+    cover_image_path: Optional[Path] = None
+\end{lstlisting}
+\end{indentedlst}
+
+\begin{decisionbox}[title={仮想タイムライン設計}]
+\textbf{背景}: 複数MP4/MP3を単一の動画として編集し、チャプターを付与する機能が求められた。
+
+\textbf{検討}: (A) 事前に全ファイルを結合してから編集、(B) 仮想的に結合した状態で編集し、エクスポート時のみ実結合。
+
+\textbf{決定}: 方式(B)の仮想タイムラインを採用。
+
+\textbf{根拠}:
+\begin{itemize}
+\item 中間ファイルの生成を回避し、ディスク使用量を削減
+\item ソースファイルの順序変更が容易（ドラッグ\&ドロップ）
+\item 非破壊編集によりオリジナルを保持
+\end{itemize}
+\end{decisionbox}
+
+\subsection{UI設計}
+
+\subsubsection{モーダル分離パターン}
+
+\begin{decisionbox}[title={タブUIからモーダル分離パターンへの転換}]
+\textbf{背景}: 初期設計ではタブベースUI（Tab 1: 入力準備、Tab 2: 編集・書出）を検討。
+
+\textbf{問題点}:
+\begin{itemize}
+\item Tab 1のMP3結合は無劣化（-c copy）で可能であり、中間ファイルが不要ならタブを分ける意味が薄い
+\item 状態同期の複雑化
+\item 「入力ソースも別画面では？」という発見
+\end{itemize}
+
+\textbf{決定}: 単一画面＋ダイアログのモーダル分離パターンを採用。
+
+\textbf{根拠}:
+\begin{itemize}
+\item メディアプレイヤーは常に表示される主要コンポーネント
+\item 設定変更は低頻度操作
+\item 状態管理の単純化（単一の真実源）
+\item 明示的な「保存」「適用」ボタンが不要（自動適用）
+\end{itemize}
+\end{decisionbox}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+アプローチ & 利点 & 欠点 \\
+\midrule
+タブ型 & 情報の一覧性 & 状態同期の複雑化 \\
+モーダル型 & 単一の真実源 & 画面遷移 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{レイアウト構成}
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
++---------------------------------------------------+
+| [+ Add Source]        [Cover]  [Settings]         |
++---------------------------------------------------+
+| Sources (drag to reorder)                         |
+| [1] file1.mp4   00:15:30   [X]                    |
+| [2] file2.mp4   00:12:45   [X]                    |
++---------------------------------------------------+
+|                                                   |
+|               Video Player                        |
+|                                                   |
++---------------------------------------------------+
+| [Virtual Timeline / Waveform]  Total: 00:28:15   |
++---------------------------------------------------+
+| [-10s][-5s][-1s][|<][>||][>|][+1s][+5s][+10s]    |
++---------------------------------------------------+
+| Chapters Table                                    |
+| No. | Time     | Title             | Duration    |
++---------------------------------------------------+
+| [Add] [Delete] [Edit]            [Export ▼]      |
+|                       - Chaptered MP4            |
+|                       - YouTube Chapters         |
+|                       - Split Chapters           |
++---------------------------------------------------+
+\end{lstlisting}
+\end{indentedlst}
+
+%% ========================================
+%% 第4章：設計判断ポイント詳細
+%% ========================================
+\section{設計判断ポイント詳細}
+
+本章では、設計から実装に至る過程で判断を要したポイントを網羅的に記録する。
+
+\subsection{UI/UXに関する判断}
+
+\subsubsection{ボタンスタイルのポリシー統一}
+
+\begin{decisionbox}[title={機能ベースvs推奨度ベース}]
+\textbf{背景}: 「タブ1のボタンに色がついているものとついていないものがあるが、明確なポリシーがあるか」という問いが発生。
+
+\textbf{選択肢}:
+\begin{enumerate}
+\item 機能ベース: 主要アクションのみPrimary、他はすべてSecondary
+\item 推奨度ベース: よく使う操作をPrimaryで目立たせる
+\end{enumerate}
+
+\textbf{決定}: 機能ベース（選択肢1）を採用。
+
+\textbf{適用結果}:
+\begin{itemize}
+\item Primary（青）: 各タブの主要アクション（結合実行、書出）のみ
+\item Secondary（グレー）: その他すべて
+\item Danger（赤）: 中止ボタン
+\end{itemize}
+\end{decisionbox}
+
+\subsubsection{矢印キー挙動の統一}
+
+\begin{decisionbox}[title={プラットフォーム間の挙動差異}]
+\textbf{背景}: チャプター編集モードで上矢印キーを押した際の挙動がmacOSとWindowsで異なっていた。
+\begin{itemize}
+\item macOS: 行の先頭に移動
+\item Windows: 上のセルに移動
+\end{itemize}
+
+\textbf{決定}: macOSの挙動を正として、Windowsでも同じ挙動に統一。
+
+\textbf{実装}: \texttt{EditingState}をチェックし、編集中の場合はキーイベントをインターセプトしてカーソル位置を制御。
+\end{decisionbox}
+
+\subsubsection{ドラッグ＆ドロップの実装方式}
+
+\begin{decisionbox}[title={QVideoWidgetのイベントブロック問題}]
+\textbf{背景}: DropVideoFrameをQFrameで実装したが、QVideoWidgetが上を覆っているためドロップイベントが親フレームに届かなかった。
+
+\textbf{試行1}: イベントフィルタを使用 → 機能せず。
+
+\textbf{決定}: QStackedLayoutのStackAllモードで透明なDropOverlayウィジェットを配置。
+
+\textbf{技術的詳細}:
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+class DropOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground)
+\end{lstlisting}
+\end{indentedlst}
+\end{decisionbox}
+
+\subsubsection{Qtダイアログでのファイルフィルタリング}
+
+\begin{decisionbox}[title={ネイティブvsQtダイアログ}]
+\textbf{背景}: \texttt{setNameFilter}はネイティブOSダイアログでは正常に機能するが、Qtダイアログ（\texttt{DontUseNativeDialog}）では動作しなかった。
+
+\textbf{ユーザー要求}: 「Qtダイアログでフィルタを実装してください！」
+
+\textbf{決定}: \texttt{QSortFilterProxyModel}を継承したカスタムプロキシモデル（FileFilterProxyModel）を作成。
+
+\textbf{実装詳細}:
+\begin{itemize}
+\item \texttt{filterAcceptsRow()}でファイル拡張子をチェック
+\item ディレクトリは常にTrueを返す（グレーアウト問題の解決）
+\end{itemize}
+\end{decisionbox}
+
+\subsection{エンコードに関する判断}
+
+\subsubsection{2回エンコード問題の解決}
+
+\begin{decisionbox}[title={MP3→MP4変換の最適化}]
+\textbf{背景}: 当初のワークフローでは2回エンコードが発生していた。
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+MP3 -> [enc] -> 中間MP4 -> [enc] -> 最終MP4
+            劣化1        劣化2
+\end{lstlisting}
+\end{indentedlst}
+
+\textbf{分析}: タイトル焼き込みが必須の場合、映像は必ず1回エンコードが必要。この制約により設計空間が縮小。
+
+\textbf{決定}: 以下の最適化戦略を採用。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+入力 & 映像処理 & 音声処理 \\
+\midrule
+MP3+静止画 & enc（生成+焼込）1回 & enc 1回 \\
+MP4 & enc（焼込）1回 & copy（無劣化） \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\textbf{重要発見}: MP4入力時は音声を\texttt{-c:a copy}で無劣化コピー可能。
+\end{decisionbox}
+
+\subsubsection{CRF値と品質設定}
+
+\begin{decisionbox}[title={静止画動画のCRF設定}]
+\textbf{背景}: 元の\texttt{mp3tomp4} zsh関数ではCRF 32を使用していたが、現在の実装ではCRF 23（デフォルト）を使用していた。
+
+\textbf{議論}: 「静止画なので、CRF 32で十分ですね」
+
+\textbf{決定}:
+\begin{itemize}
+\item 音声のみエクスポート（MP3→MP4）: CRF 32
+\item 動画エクスポート: CRF 23（またはユーザー選択）
+\end{itemize}
+
+\textbf{追加決定}: \texttt{-threads 0}を追加して全CPUコアを使用。
+\end{decisionbox}
+
+\subsubsection{GPU vs CPUエンコーダ}
+
+\begin{decisionbox}[title={静止画動画でのエンコーダ選択}]
+\textbf{背景}: 「GPUより CPUの方が早い」という現象が発生。
+
+\textbf{分析}: 静止画動画ではフレーム間差分がほぼゼロのため、CRFモードのCPUエンコーダが高速。GPUはデータ転送オーバーヘッドにより逆に遅くなる。
+
+\textbf{決定}:
+\begin{itemize}
+\item GPU: 「元と同じ」選択時はビットレート×1.5倍
+\item CPU: CRFモード（CRF 18）で高画質
+\end{itemize}
+\end{decisionbox}
+
+\subsubsection{色空間の保持}
+
+\begin{decisionbox}[title={色合いの変化問題}]
+\textbf{背景}: 「CPUは色合いが少し変わってしまう」という報告。
+
+\textbf{決定}: ffprobeで元動画の色空間を検出し、エンコード時に維持。
+
+\textbf{実装}:
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+@dataclass
+class ColorspaceInfo:
+    color_space: str = ""
+    color_primaries: str = ""
+    color_transfer: str = ""
+
+    def get_ffmpeg_args(self) -> List[str]:
+        args = []
+        if self.color_space:
+            args.extend(['-colorspace',
+                         self.color_space])
+        # ...
+        return args
+\end{lstlisting}
+\end{indentedlst}
+\end{decisionbox}
+
+\subsubsection{品質ドロップダウンの分離}
+
+\begin{decisionbox}[title={「元と同じ」オプションの問題}]
+\textbf{背景}: 「Qualityで、元と同じは変なので静止画用と表示して」という要望。
+
+\textbf{決定}: 品質オプションを動画用と音声用に分離。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+self._video_quality_options = [
+    ("元と同じ (自動)", 0, 23),
+    ("高画質 (6Mbps)", 6000, 20),
+    # ...
+]
+self._audio_quality_options = [
+    ("静止画用 (CRF 32)", 500, 32),
+]
+\end{lstlisting}
+\end{indentedlst}
+
+音声ファイル読み込み時は品質コンボボックスが無効化される。
+\end{decisionbox}
+
+\subsection{スペクトログラム/波形に関する判断}
+
+\subsubsection{カラーマップの選択}
+
+\begin{decisionbox}[title={再生ヘッドの視認性}]
+\textbf{背景}: SOXデフォルトのカラーマップ（黒→青→シアン→緑→黄→赤→白）では再生ヘッドが見づらい。
+
+\textbf{試行}:
+\begin{enumerate}
+\item SOXデフォルト
+\item JET（濃紺→青→シアン→黄→赤）
+\item Inferno（黒→紫→マゼンタ→オレンジ→黄→白）
+\item 青系（黒→青）
+\end{enumerate}
+
+\textbf{決定}: 黒→青→シアン（黄緑寄り）のカラーマップを採用。
+
+\textbf{根拠}: 再生ヘッド（黄色）との視覚的コントラストが最も高い。
+\end{decisionbox}
+
+\subsubsection{メルスペクトログラムの導入}
+
+\begin{decisionbox}[title={演奏とトークの区別}]
+\textbf{背景}: 「演奏と指揮者のトークが区別しやすいようなスペクトログラム処理を」という要望。
+
+\textbf{決定}: メルスケール変換を実装。
+
+\textbf{技術的詳細}:
+\begin{itemize}
+\item 人間の聴覚特性に合わせた周波数スケール
+\item 低域を拡大、高域を圧縮
+\item トーク: 低周波に集中したエネルギー分布
+\item 演奏: 広い周波数帯域に分布する複雑なパターン
+\end{itemize}
+\end{decisionbox}
+
+\subsubsection{波形表示の維持}
+
+\begin{decisionbox}[title={スペクトログラム計算中の表示}]
+\textbf{背景}: 「振幅計算後一瞬だけ波形が表示されて、一旦消える」という問題。
+
+\textbf{決定}: スペクトログラム計算中も振幅波形の表示を維持し、下部に進捗オーバーレイを表示。
+
+\textbf{実装}: \texttt{paintEvent}を修正し、計算状態に応じて表示を切り替え。
+\end{decisionbox}
+
+\subsection{YouTubeダウンロードに関する判断}
+
+\subsubsection{AV1コーデック除外}
+
+\begin{decisionbox}[title={macOSでのAV1問題}]
+\textbf{背景}: macOSでAV1のハードウェアデコードが非対応のため、再生時にパフォーマンス問題が発生。
+
+\textbf{決定}: yt-dlpのformat文字列を変更してAV1を除外。
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+format: bv[vcodec^=avc1]+ba/bv[vcodec!^=av01]+ba/b
+\end{lstlisting}
+\end{indentedlst}
+
+H.264を優先し、AV1を明示的に除外。
+\end{decisionbox}
+
+\subsubsection{一時プレイリスト対応}
+
+\begin{decisionbox}[title={プレイリストURLの処理}]
+\textbf{背景}: TLP, RD, OL, UU, LLプレフィックスを持つ一時プレイリストURLの処理が必要。
+
+\textbf{決定}:
+\begin{itemize}
+\item 一時プレイリストURLを検出
+\item 単一動画としてダウンロード
+\item URLからプレイリストパラメータを自動除去
+\end{itemize}
+\end{decisionbox}
+
+\subsubsection{yt-dlpの終了コード問題}
+
+\begin{decisionbox}[title={字幕未取得の検出}]
+\textbf{背景}: yt-dlpは字幕がなくても終了コード0を返すため、字幕取得失敗を検出できなかった。
+
+\textbf{決定}: 実行前後のSRTファイル数を比較し、新しいファイルが生成されなかった場合はエラーを返す。
+\end{decisionbox}
+
+\subsection{クロスプラットフォームに関する判断}
+
+\subsubsection{Unicode記号の表示}
+
+\begin{decisionbox}[title={Windowsでの再生ボタン表示}]
+\textbf{背景}: Windowsで再生ボタン記号（▶、⏸）の背景色が異なる問題。
+
+\textbf{分析}: Segoe UI Emojiフォントで絵文字として描画され、独自の背景色が表示されていた。
+
+\textbf{決定}: Segoe UI Symbolフォントを指定することでカラー絵文字を回避。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+is_windows = platform.system() == "Windows"
+symbol_font = (
+    "font-family: 'Segoe UI Symbol';"
+    if is_windows else ""
+)
+\end{lstlisting}
+\end{indentedlst}
+\end{decisionbox}
+
+\subsubsection{キーボードショートカット}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+操作 & macOS & Windows \\
+\midrule
+保存 & Cmd+S & Ctrl+S \\
+エクスポート & Cmd+E & Ctrl+E \\
+削除 & Cmd+Backspace & Delete \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsection{その他の判断}
+
+\subsubsection{エクスポート後の自動読み込み}
+
+\begin{decisionbox}[title={焼き込みテキストの二重化問題}]
+\textbf{背景}: エクスポート後に出力動画を自動読み込みする機能を実装。しかし、焼き込み済みMP4を再エクスポートすると二重表示になる問題が発生。
+
+\textbf{議論}: 「良い方法はありませんよね」
+
+\textbf{決定}: これは焼き込み（drawtext）の本質的な制限であり、ユーザーの操作の自由度を優先して自動読み込み機能は維持。
+
+\textbf{対策}: 同名ファイルの場合は自動で連番サフィックスを付加。
+\end{decisionbox}
+
+\subsubsection{セミオートアップデーター方式}
+
+\begin{decisionbox}[title={アップデート方式の選択}]
+\textbf{選択肢}:
+\begin{enumerate}
+\item 完全自動（Sparkle）: 署名必須、開発工数大
+\item 半自動: ダウンロード→Finder表示
+\item 通知のみ: リンク表示のみ
+\end{enumerate}
+
+\textbf{決定}: 半自動（選択肢2）を採用。
+
+\textbf{根拠}: すぐ実装可能で、ユーザー体験も良好。差分アップデートは現状のサイズ（約80MB）では許容範囲と判断。
+\end{decisionbox}
+
+\subsubsection{ffmpeg/ffprobeのバンドル}
+
+\begin{decisionbox}[title={依存ライブラリの選択}]
+\textbf{背景}: \texttt{imageio-ffmpeg}はffmpegのみを同梱し、ffprobeが含まれない。アプリは動画の長さ取得やビットレート検出にffprobeを使用。
+
+\textbf{決定}: \texttt{static-ffmpeg}パッケージに移行。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lcc@{}}
+\toprule
+パッケージ & ffmpeg & ffprobe \\
+\midrule
+imageio-ffmpeg & ○ & × \\
+static-ffmpeg & ○ & ○ \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+\end{decisionbox}
+
+\subsubsection{PyInstaller除外設定}
+
+\begin{decisionbox}[title={依存モジュールの除外問題}]
+\textbf{背景}: macOS版が「開けない」問題が発生。ターミナルから実行すると\texttt{No module named 'email'}エラー。
+
+\textbf{分析}: PyInstallerの設定で\texttt{email}モジュールを除外していたが、\texttt{urllib.request}（アップデーターで使用）がそれに依存。
+
+\textbf{決定}: PyInstallerのexcludesから\texttt{email}, \texttt{html}, \texttt{http}を削除。
+\end{decisionbox}
+
+\subsection{標準化に関する判断}
+
+本プロジェクトでは、異なるユーザー間の相互運用性、異なるOSにおける相互運用性、および成果物の再利用性を確保するため、以下の標準化方針を採用した。
+
+\subsubsection{ファイル形式の標準化}
+
+\begin{decisionbox}[title={中間・最終成果物のファイル形式}]
+\textbf{背景}: 入力ソースは多様（YouTube、ローカル動画、音声ファイル）だが、ワークフローを統一するには共通形式への正規化が必要。
+
+\textbf{標準化方針}:
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+形式 & 用途 & 標準化の根拠 \\
+\midrule
+MP4 (H.264) & 動画の共通形式 & 最も広くサポートされるコーデック、YouTube/SNS互換 \\
+SRT & 字幕ファイル & シンプルなテキスト形式、編集容易、広く普及 \\
+YAML & 設定ファイル & 人間可読、バージョン管理に適合、コメント可能 \\
+PDF & 文書成果物 & 環境非依存の配布形式 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\textbf{相互運用性への寄与}:
+\begin{itemize}
+\item MP4 (H.264): macOS/Windows/Linux/iOS/Androidで再生可能
+\item SRT: メモ帳からプロ用NLEまで編集可能
+\item YAML: Git管理可能、差分確認容易
+\end{itemize}
+\end{decisionbox}
+
+\subsubsection{クロスプラットフォーム対応}
+
+\begin{decisionbox}[title={OS間の相互運用性}]
+\textbf{背景}: 開発者はmacOS、ユーザーはWindows環境という状況が想定された。
+
+\textbf{標準化方針}:
+
+\begin{enumerate}
+\item \textbf{パス区切り}: \texttt{pathlib.Path}を使用し、OSに依存しないパス操作
+\item \textbf{文字エンコーディング}: UTF-8を標準とし、明示的に指定
+\item \textbf{改行コード}: 出力時にOS標準を使用、読込時は柔軟に対応
+\item \textbf{フォント}: OS標準フォントへのフォールバック機構
+\end{enumerate}
+
+\textbf{実装例}:
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+# パス操作
+from pathlib import Path
+output_path = Path(base_dir) / "output" / filename
+
+# 文字エンコーディング
+with open(file_path, 'w', encoding='utf-8') as f:
+    f.write(content)
+
+# フォント選択
+if platform.system() == "Windows":
+    font = "C:/Windows/Fonts/YuGothM.ttc"
+else:
+    font = "/System/Library/.../HiraginoSans-W3.ttc"
+\end{lstlisting}
+\end{indentedlst}
+\end{decisionbox}
+
+\subsubsection{成果物の再利用性}
+
+\begin{decisionbox}[title={成果物の他ツールとの連携}]
+\textbf{背景}: VCEの成果物が他のワークフローやツールで再利用可能であることが望ましい。
+
+\textbf{標準化方針}:
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+成果物 & 再利用先 & 互換性確保策 \\
+\midrule
+チャプター付きMP4 & YouTube、NLE、VLC & ffmpegメタデータ形式準拠 \\
+YouTubeチャプター & YouTube説明欄 & HH:MM:SS形式、改行区切り \\
+SRT & Claude、Whisper & SubRip標準形式 \\
+YAML設定 & バッチ処理、他ユーザー & スキーマバージョン管理 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\textbf{YouTubeチャプター形式}:
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+0:00 オープニング
+2:35 第1楽章
+15:42 第2楽章
+\end{lstlisting}
+\end{indentedlst}
+0秒開始が必須というYouTubeの仕様に準拠。
+
+\textbf{ffmpegメタデータ形式}:
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+;FFMETADATA1
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=155000
+title=オープニング
+\end{lstlisting}
+\end{indentedlst}
+\end{decisionbox}
+
+\subsubsection{ユーザー間の相互運用性}
+
+\begin{decisionbox}[title={設定・成果物の共有}]
+\textbf{背景}: 異なるユーザー間で設定やワークフローを共有する場面が想定される。
+
+\textbf{標準化方針}:
+
+\begin{enumerate}
+\item \textbf{絶対パスの排除}: 設定ファイル内でユーザー固有のパスを使用しない
+\item \textbf{相対パス/プレースホルダ}: \texttt{\$\{WORK\_DIR\}}等の変数を使用
+\item \textbf{プロファイル分離}: 共通設定（プロファイル）と個別設定（ワークフローYAML）の分離
+\item \textbf{スキーマバージョン}: \texttt{schema\_version: "1.1"}による互換性管理
+\end{enumerate}
+
+\textbf{設計思想}: TeX/LaTeXのクラスファイル（.cls）と文書ファイル（.tex）の関係と同様、プロファイルは共有可能な構造定義、YAMLは個別のインスタンスとして設計。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+共有対象 & 共有方法 & 互換性 \\
+\midrule
+プロファイル & Git/ファイル共有 & 完全互換（構造定義のみ） \\
+ワークフローYAML & テンプレート共有 & パス以外互換 \\
+成果物MP4 & 直接共有 & 完全互換 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+\end{decisionbox}
+
+%% ========================================
+%% 第5章：下流実装
+%% ========================================
+\section{下流実装}
+
+\subsection{ffmpeg統合}
+
+動画処理のコアにffmpegを使用。以下の処理を実装。
+
+\subsubsection{チャプター埋め込み}
+
+\begin{indentedlst}
+\begin{lstlisting}[language=bash,basicstyle=\ttfamily\tiny]
+ffmpeg -i input.mp4 \
+  -f ffmetadata -i chapters.txt \
+  -map_metadata 1 \
+  -c copy \
+  output.mp4
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{ハードウェアエンコード}
+
+プラットフォーム別のハードウェアアクセラレーション対応。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+OS & コーデック & 説明 \\
+\midrule
+macOS & h264\_videotoolbox & VideoToolbox API \\
+Windows & h264\_nvenc & NVIDIA NVENC \\
+Windows & h264\_qsv & Intel Quick Sync \\
+Linux & h264\_vaapi & VA-API \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{drawtextフィルタ}
+
+チャプタータイトルのオーバーレイ表示。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+def build_drawtext_filter(
+    text: str,
+    fontfile: str,
+    fontsize: int = 48,
+    fontcolor: str = "white",
+    borderw: int = 3
+) -> str:
+    escaped = text.replace(":", "\\:")
+    return (
+        f"drawtext=text='{escaped}':"
+        f"fontfile='{fontfile}':"
+        f"fontsize={fontsize}:"
+        f"fontcolor={fontcolor}:"
+        f"borderw={borderw}:"
+        f"bordercolor=black:"
+        f"x=(w-text_w)/2:"
+        f"y=(h-text_h)/2"
+    )
+\end{lstlisting}
+\end{indentedlst}
+
+\subsection{エラーハンドリング}
+
+\subsubsection{ワーカーエラー処理}
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+class ExportWorker(QThread):
+    error_occurred = Signal(str)
+
+    def run(self):
+        try:
+            self._execute_ffmpeg()
+        except subprocess.CalledProcessError as e:
+            self.error_occurred.emit(
+                f"ffmpeg error: {e.stderr}"
+            )
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{一時ファイル管理}
+
+処理中断時のクリーンアップを確実に行う。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+class TempFileManager:
+    def __init__(self):
+        self._temp_files: list[Path] = []
+
+    def create_temp(self, suffix: str) -> Path:
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        self._temp_files.append(Path(path))
+        return Path(path)
+
+    def cleanup(self):
+        for f in self._temp_files:
+            if f.exists():
+                f.unlink()
+        self._temp_files.clear()
+\end{lstlisting}
+\end{indentedlst}
+
+\subsection{パフォーマンス最適化}
+
+\subsubsection{メディアキャッシング}
+
+QMediaPlayerのシーク性能を向上させるため、キーフレーム位置をキャッシュ。
+
+\subsubsection{遅延読み込み}
+
+波形表示ウィジェットは、初回表示時まで計算を遅延。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+class WaveformWidget(QWidget):
+    def __init__(self):
+        self._waveform_data = None
+
+    def paintEvent(self, event):
+        if self._waveform_data is None:
+            self._load_waveform()
+        # ... 描画処理
+\end{lstlisting}
+\end{indentedlst}
+
+%% ========================================
+%% 第6章：品質保証
+%% ========================================
+\section{品質保証}
+
+\subsection{テスト戦略}
+
+開発期間の制約から、自動テストの整備は限定的であった。以下の手動テストを実施。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+テスト種別 & 内容 \\
+\midrule
+機能テスト & 各ユースケースのE2E確認 \\
+互換性テスト & macOS/Windows動作確認 \\
+回帰テスト & 変更後の既存機能確認 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsection{コード品質}
+
+\subsubsection{課題：God Class}
+
+main\_workspace.pyは典型的なGod Class\footnote{God Class: 過度に多くの責務を持つクラス。Martin Fowler『Refactoring』(1999)で詳述されるコードの不吉な臭い（Code Smell）の一つ。}となっている。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lrrX@{}}
+\toprule
+ファイル & 行数 & メソッド数 & 主な問題 \\
+\midrule
+main\_workspace.py & 5,189 & 170 & 6クラス、過度な責務集中 \\
+workers.py & 2,182 & -- & 巨大メソッド、重複コード \\
+dialogs.py & 2,269 & -- & スタイル定義の重複 \\
+models.py & 422 & -- & 軽微な重複のみ \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+main\_workspace.pyの170メソッドは、本来であれば以下のような責務に分割されるべきである：
+
+\begin{itemize}
+\item \textbf{ChapterManager}: チャプターの追加・削除・編集
+\item \textbf{MediaPlaybackController}: 動画再生制御
+\item \textbf{YouTubeDownloadManager}: ダウンロード処理の管理
+\item \textbf{ExportOrchestrator}: エクスポート処理の調整
+\end{itemize}
+
+\subsubsection{リファクタリング方針}
+
+\begin{decisionbox}[title={リファクタリング戦略}]
+\textbf{状況}: God Classの解消が必要だが、機能は安定動作している
+
+\textbf{選択肢}:
+\begin{itemize}
+\item[(A)] 一括リファクタリング: 全体を一度に再設計
+\item[(B)] 段階的リファクタリング: 低リスクな変更から順次実施
+\item[(C)] 現状維持: 動作しているコードには手を加えない
+\end{itemize}
+
+\textbf{決定}: (B) 段階的リファクタリング
+
+\textbf{理由}:
+\begin{itemize}
+\item 機能は安定しており、急ぐ必要がない
+\item 各Stepで動作確認を挟み、回帰バグを防ぐ
+\item 既存のpublic APIを変更しないことでリスクを最小化
+\end{itemize}
+\end{decisionbox}
+
+リファクタリングは以下の3フェーズで計画されている：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+フェーズ & リスク & 内容 \\
+\midrule
+Phase 1 & 低 & 重複コードの抽出 \\
+Phase 2 & 中 & Mixin作成 + Platform Abstraction Layer \\
+Phase 3 & 高 & 責務分離（Qt Model-View） \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{Phase 1: 重複コードの抽出（完了）}
+
+Phase 1では、複数箇所で重複していたコードを共通モジュールに抽出した。
+
+\paragraph{Step 1.1: styles.py 新規作成}
+
+色定数とボタンスタイル定義を集約するモジュールを新規作成した。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python]
+# rehearsal_workflow/ui/styles.py (159行)
+class Colors:
+    """アプリケーション共通カラー定数"""
+    PRIMARY = "#0078d4"
+    PRIMARY_HOVER = "#1084d8"
+    DANGER = "#d32f2f"
+    BACKGROUND_DARK = "#1e1e1e"
+    ...
+
+class ButtonStyles:
+    """ボタンスタイル生成"""
+    @staticmethod
+    def primary(min_width: int = 80) -> str: ...
+    @staticmethod
+    def danger(min_width: int = 80) -> str: ...
+\end{lstlisting}
+\end{indentedlst}
+
+\paragraph{Step 1.2: \_button\_style() の統一}
+
+5箇所で重複定義されていた\texttt{\_button\_style()}メソッドを削除し、\texttt{ButtonStyles}クラスに置換した。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+元の場所 & 対応 \\
+\midrule
+dialogs.py:867 (HardwareEncoderDialog) & ButtonStyles.primaryに置換 \\
+dialogs.py:1379 (ChapterEditDialog) & ButtonStyles.primaryに置換 \\
+dialogs.py:1797 (ConfirmDialog) & ButtonStyles.primaryに置換 \\
+dialogs.py:2158 (SettingsDialog) & ButtonStyles.primaryに置換 \\
+main\_workspace.py:1600 & ButtonStyles.danger追加で対応 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\paragraph{Step 1.3: drawtextフィルター生成の統一}
+
+workers.pyの4箇所で同一ロジックが重複していたdrawtextフィルター生成を、ヘルパー関数として抽出した。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python]
+def build_drawtext_filter(
+    text: str,
+    fontfile: str,
+    fontsize: int = 48,
+    fontcolor: str = "white",
+    borderw: int = 3,
+    bordercolor: str = "black",
+    x: str = "(w-text_w)/2",
+    y: str = "(h-text_h)/2"
+) -> str:
+    """drawtextフィルター文字列を生成"""
+\end{lstlisting}
+\end{indentedlst}
+
+\subsubsection{Phase 2: インフラストラクチャ整備（未着手）}
+
+Phase 2では、ワーカークラス間で共通する振る舞いをMixinとして抽出し、さらにプラットフォーム固有コードをPlatform Abstraction Layerに集約する。
+
+\paragraph{Step 2.1: TempFileManagerMixin}
+
+一時ファイルの作成・クリーンアップを管理するMixin。現在、各ワーカーが独自に一時ファイル管理を実装しており、クリーンアップ漏れのリスクがある。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python]
+class TempFileManagerMixin:
+    """一時ファイルの作成・クリーンアップを管理"""
+    _temp_files: list[Path]
+
+    def _init_temp_manager(self) -> None:
+        self._temp_files = []
+
+    def _create_temp_file(self, suffix: str,
+                          prefix: str = "vce_") -> Path:
+        ...
+
+    def _cleanup_temp_files(self) -> None:
+        for f in self._temp_files:
+            f.unlink(missing_ok=True)
+        self._temp_files.clear()
+\end{lstlisting}
+\end{indentedlst}
+
+\paragraph{Step 2.2: CancellableWorkerMixin}
+
+キャンセル可能なワーカーの共通振る舞いを抽出するMixin。現在、キャンセル処理の実装が各ワーカーで微妙に異なっている。
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python]
+class CancellableWorkerMixin:
+    """キャンセル可能なワーカーのミックスイン"""
+    _cancelled: bool
+    _process: Optional[subprocess.Popen]
+
+    def _init_cancellable(self) -> None:
+        self._cancelled = False
+        self._process = None
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        if self._process:
+            self._process.terminate()
+
+    def _is_cancelled(self) -> bool:
+        return self._cancelled
+\end{lstlisting}
+\end{indentedlst}
+
+\paragraph{Step 2.3: 既存ワーカーへのMixin適用}
+
+以下のワーカークラスにMixinを適用する：
+
+\begin{itemize}
+\item ExportWorker
+\item YouTubeDownloadWorker
+\item CoverImageExportWorker
+\item SplitChaptersExportWorker
+\end{itemize}
+
+\paragraph{Step 2.4: Platform Abstraction Layer（PAL）}
+
+現在、プラットフォーム固有のコードが7ファイル以上に散在している。これを単一のモジュールに集約し、プラットフォーム抽象化レイヤーを構築する。
+
+\begin{decisionbox}[title={プラットフォーム抽象化}]
+\textbf{状況}: \texttt{platform.system() == "Darwin"} 等の条件分岐が複数ファイルに散在
+
+\textbf{選択肢}:
+\begin{itemize}
+\item[(A)] 現状維持: 各ファイルで個別に分岐
+\item[(B)] PAL導入: platform.pyに集約し、各ファイルはPALを参照
+\item[(C)] 設定ファイル: プラットフォーム固有値をYAML等で外部化
+\end{itemize}
+
+\textbf{決定}: (B) PAL導入
+
+\textbf{理由}:
+\begin{itemize}
+\item 新プラットフォーム対応時の変更箇所が明確
+\item テスト時のモック化が容易
+\item 標準化の観点：プラットフォーム間差異の可視化
+\end{itemize}
+\end{decisionbox}
+
+現在のプラットフォーム依存コードの分布：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+カテゴリ & 内容 \\
+\midrule
+フォント & システムフォントパス、等幅フォント、絵文字フォント \\
+ハードウェアエンコード & VideoToolbox (macOS) / NVENC, QSV (Windows) \\
+外部ツール & ffmpeg実行ファイル名、subprocess creationflags \\
+更新機能 & インストーラ形式 (DMG/ZIP)、ファイル表示コマンド \\
+UI & キーボード修飾キー表記 (Cmd/Ctrl)、アイコンパス \\
+通知 & OS通知コマンド (osascript / toast等) \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+PALの設計案：
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python]
+# rehearsal_workflow/ui/platform.py
+
+from abc import ABC, abstractmethod
+from pathlib import Path
+import platform
+
+class PlatformProvider(ABC):
+    """プラットフォーム抽象化の基底クラス"""
+
+    @abstractmethod
+    def get_system_fonts_dir(self) -> Path: ...
+
+    @abstractmethod
+    def get_monospace_fonts(self) -> list[str]: ...
+
+    @abstractmethod
+    def get_hardware_encoders(self) -> list[str]: ...
+
+    @abstractmethod
+    def get_modifier_key_name(self) -> str: ...
+
+    @abstractmethod
+    def get_subprocess_flags(self) -> int: ...
+
+    @abstractmethod
+    def reveal_in_file_manager(self, path: Path) -> None: ...
+
+
+class MacOSProvider(PlatformProvider):
+    def get_system_fonts_dir(self) -> Path:
+        return Path("/System/Library/Fonts")
+
+    def get_monospace_fonts(self) -> list[str]:
+        return ["SF Mono", "Menlo", "Monaco"]
+
+    def get_hardware_encoders(self) -> list[str]:
+        return ["h264_videotoolbox", "hevc_videotoolbox"]
+
+    def get_modifier_key_name(self) -> str:
+        return "Cmd"
+
+    # ... 以下略
+
+
+class WindowsProvider(PlatformProvider):
+    def get_system_fonts_dir(self) -> Path:
+        return Path("C:/Windows/Fonts")
+
+    def get_monospace_fonts(self) -> list[str]:
+        return ["Cascadia Code", "Consolas"]
+
+    def get_hardware_encoders(self) -> list[str]:
+        return ["h264_nvenc", "h264_qsv", "h264_amf"]
+
+    def get_modifier_key_name(self) -> str:
+        return "Ctrl"
+
+    # ... 以下略
+
+
+# シングルトンとして提供
+def get_platform() -> PlatformProvider:
+    system = platform.system()
+    if system == "Darwin":
+        return MacOSProvider()
+    elif system == "Windows":
+        return WindowsProvider()
+    raise RuntimeError(f"Unsupported: {system}")
+
+# グローバルインスタンス
+PLATFORM = get_platform()
+\end{lstlisting}
+\end{indentedlst}
+
+使用例：
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python]
+# Before (散在)
+if platform.system() == "Darwin":
+    fonts = ["SF Mono", "Menlo"]
+else:
+    fonts = ["Cascadia Code", "Consolas"]
+
+# After (PAL経由)
+from .platform import PLATFORM
+fonts = PLATFORM.get_monospace_fonts()
+\end{lstlisting}
+\end{indentedlst}
+
+PAL導入により、以下の効果が期待される：
+
+\begin{enumerate}
+\item \textbf{変更の局所化}: 新プラットフォーム対応時、platform.pyのみ修正
+\item \textbf{テスタビリティ}: MockProviderでプラットフォーム非依存テスト
+\item \textbf{可読性向上}: 意図が明確なメソッド名で自己文書化
+\item \textbf{型安全性}: 戻り値の型が明示され、IDEサポート向上
+\end{enumerate}
+
+\subsubsection{Phase 3: 責務分離（後日検討）}
+
+Phase 3では、main\_workspace.pyのGod Classを複数のクラスに分割する。Phase 1-2の完了後に再評価を行い、具体的な実装計画を策定する。
+
+\begin{decisionbox}[title={Phase 3 アーキテクチャ方針}]
+\textbf{状況}: God Class解消にあたり、分離の指針となるアーキテクチャパターンが必要
+
+\textbf{選択肢}:
+\begin{itemize}
+\item[(A)] アドホックな分離: 責務ごとに独自クラスを設計
+\item[(B)] Qt Model-View: Qtフレームワーク標準のModel-Viewパターンを採用
+\item[(C)] MVC/MVVM: 汎用的なアーキテクチャパターンを独自実装
+\end{itemize}
+
+\textbf{決定}: (B) Qt Model-View
+
+\textbf{理由}:
+\begin{itemize}
+\item Qtの設計思想に沿った「Qt流」の実装となる
+\item QAbstractItemModel等の豊富な基底クラスを活用可能
+\item シグナル/スロットによるModel-View間の自動バインディング
+\item 複数のViewが同一Modelを共有可能（将来の拡張性）
+\item Modelは単体テストが容易（UIから独立）
+\end{itemize}
+\end{decisionbox}
+
+\paragraph{Qt Model-Viewパターン}
+
+QtのModel-Viewは、古典的なMVCパターンを簡略化したアーキテクチャである\footnote{Qt Documentation: Model/View Programming \url{https://doc.qt.io/qt-6/model-view-programming.html}}。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+コンポーネント & 役割 \\
+\midrule
+Model & データの保持とビジネスロジック。QAbstractItemModel派生クラス \\
+View & データの表示。QListView, QTableView等、またはカスタムウィジェット \\
+Delegate & 項目の描画とエディタ提供。QStyledItemDelegate派生クラス \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+現在の実装では、MainWorkspaceクラスがデータ管理（Model）、表示（View）、ユーザー操作の処理（Controller）をすべて担っている。これをQt Model-Viewに沿って分離することで、各コンポーネントの責務が明確になる。
+
+\paragraph{適用計画}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+現在 → Model-View後 & 備考 \\
+\midrule
+チャプター管理 → ChapterListModel & QAbstractListModel継承 \\
+チャプター表示 → ChapterListView & カスタムウィジェット維持可 \\
+項目描画 → ChapterDelegate & サムネイル、時間表示 \\
+プロジェクト状態 → ProjectModel & 動画パス、設定の統合管理 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\begin{indentedlst}
+\begin{lstlisting}[language=python]
+class ChapterListModel(QAbstractListModel):
+    """チャプターデータのModel"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._chapters: list[Chapter] = []
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return len(self._chapters)
+
+    def data(self, index: QModelIndex,
+             role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        chapter = self._chapters[index.row()]
+        if role == Qt.DisplayRole:
+            return chapter.title
+        elif role == Qt.UserRole:
+            return chapter  # Chapter オブジェクト全体
+        return None
+
+    # CRUD操作
+    def add_chapter(self, chapter: Chapter) -> None:
+        row = len(self._chapters)
+        self.beginInsertRows(QModelIndex(), row, row)
+        self._chapters.append(chapter)
+        self.endInsertRows()
+
+    def remove_chapter(self, index: int) -> None:
+        self.beginRemoveRows(QModelIndex(), index, index)
+        del self._chapters[index]
+        self.endRemoveRows()
+\end{lstlisting}
+\end{indentedlst}
+
+\paragraph{Model-View適用の範囲}
+
+すべてのコンポーネントがModel-Viewに適合するわけではない。以下に適用範囲を整理する。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+機能 & 適用 & 備考 \\
+\midrule
+チャプター管理 & 適用 & 最優先で実施 \\
+動画再生制御 & 非適用 & QMediaPlayer独自アーキテクチャ \\
+YouTubeダウンロード & 部分 & 進捗状態のみModel分離 \\
+エクスポート & 部分 & 設定のみModel化 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\begin{decisionbox}[title={Phase 3 実施時期}]
+\textbf{状況}: God Class解消は技術的負債だが、現状で機能は安定動作
+
+\textbf{選択肢}:
+\begin{itemize}
+\item[(A)] 即座に着手: Phase 2完了後すぐに開始
+\item[(B)] 機能追加時に実施: 新機能追加のタイミングで段階的に分離
+\item[(C)] 問題発生時に実施: 保守性に問題が出た時点で対応
+\end{itemize}
+
+\textbf{決定}: (B) 機能追加時に実施
+
+\textbf{理由}:
+\begin{itemize}
+\item 現状で緊急性はない
+\item 新機能追加時に関連部分のみ分離することでリスクを限定
+\item 文字起こしUI実装時にChapterListModel導入を検討
+\end{itemize}
+\end{decisionbox}
+
+\paragraph{分離後のクラス構成}
+
+Model-View適用後の最終的なクラス構成を以下に示す。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+層 & クラス名 & 責務 \\
+\midrule
+Model & ChapterListModel & チャプターCRUD、順序管理、永続化 \\
+Model & ProjectModel & プロジェクト全体の状態管理 \\
+View & MainWorkspace & ウィンドウレイアウト、View統合 \\
+View & ChapterListView & チャプターリスト表示 \\
+Delegate & ChapterDelegate & チャプター項目の描画・編集 \\
+Controller & MediaController & 再生制御（QMediaPlayerラッパー） \\
+Worker & ExportWorker等 & バックグラウンド処理（既存維持） \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{リスク軽減策}
+
+リファクタリングにおけるリスク軽減のため、以下の方針を採用する：
+
+\begin{enumerate}
+\item \textbf{各Step完了後に動作確認}: アプリケーション起動と基本操作のテスト
+\item \textbf{git commitをStep単位で分割}: 問題発生時のロールバックを容易に
+\item \textbf{既存public APIの維持}: 外部から呼び出されるメソッドのシグネチャは変更しない
+\item \textbf{インポートパスの互換性維持}: 既存のimport文が動作し続けることを保証
+\end{enumerate}
+
+\subsection{ドキュメント}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+ドキュメント & 内容 \\
+\midrule
+README.md & プロジェクト概要、インストール \\
+CLAUDE.md & AI向け設計ガイド \\
+DEVELOPMENT\_LOG.md & 開発履歴 \\
+docs/ & 詳細設計文書 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+%% ========================================
+%% 第7章：今後の展望
+%% ========================================
+\section{今後の展望}
+
+\subsection{短期課題}
+
+\begin{enumerate}
+\item \textbf{相対時間方式のテスト}: Add/Remove Source、ソース並べ替え、エクスポートの動作確認
+\item \textbf{リファクタリング}: main\_workspace.pyの分割
+\item \textbf{テスト整備}: ユニットテストの追加
+\item \textbf{性能改善}: 大規模動画の処理最適化
+\end{enumerate}
+
+\subsection{中長期課題}
+
+\begin{enumerate}
+\item \textbf{文字起こしUI}: 設計完了、実装待ち
+\item \textbf{バッチ処理}: 複数動画の一括処理
+\item \textbf{プラグイン}: 拡張ポイントの整備
+\end{enumerate}
+
+%% ========================================
+%% 第8章：Claude Codeの所感
+%% ========================================
+\section{Claude Codeの所感}
+
+\subsection{設計判断の評価}
+
+本プロジェクトの設計判断について、以下の観点から評価を行う。
+
+\subsubsection{成功した設計判断}
+
+\begin{enumerate}
+\item \textbf{配管と陶器の分離}: 再利用性と保守性を向上させた。CLIツールは独立してテスト・使用可能であり、GUIはこれらを呼び出す薄いラッパーとして機能する。
+
+\item \textbf{モーダル分離パターン}: タブUIからの転換は正しい判断であった。単一の真実源を維持しつつ、必要な機能へのアクセスを確保した。グラフ理論的分析により、この判断の正当性が裏付けられた。
+
+\item \textbf{YAMLベース設定}: 再現性を確保し、バッチ処理への拡張を可能にした。TeX/LaTeXアナロジーは直感的で理解しやすく、ユーザーとの共通言語として機能した。
+
+\item \textbf{入力状態の明示的列挙}: 7状態（S1--S7）の定義により、ワークフロー境界が明確になり、責務の曖昧さが解消された。
+\end{enumerate}
+
+\subsubsection{課題のある設計判断}
+
+\begin{enumerate}
+\item \textbf{God Class}: main\_workspace.pyへの機能集中は、開発速度を優先した結果である。技術的負債として認識されており、リファクタリング計画が策定されている。
+
+\item \textbf{テスト不足}: 自動テストの整備が不十分であった。特にクロスプラットフォーム対応のテストは手動に依存している。
+
+\item \textbf{ドキュメント遅延}: 機能実装が先行し、ドキュメント整備が追いついていない箇所がある。
+\end{enumerate}
+
+\subsection{判断ポイントの振り返り}
+
+本文書で記録した判断ポイントの多くは、対話を通じて浮かび上がった問題に対する解決策であった。特に印象的だったのは以下の点である：
+
+\begin{enumerate}
+\item \textbf{制約による設計空間の縮小}: 「タイトル焼き込み必須」という制約が、むしろ設計を明確にした。制約は自由度を狭めるが、最適解を見つけやすくする効果がある。
+
+\item \textbf{ユーザーの直感の重視}: 「macOSの挙動を正として統一」「再生ヘッドが見づらいので青系に」など、技術的な正しさよりもユーザー体験を優先した判断が多かった。
+
+\item \textbf{試行錯誤の記録}: スペクトログラムのカラーマップ選択など、複数の選択肢を試行した過程が記録されており、将来の判断に活用できる。
+\end{enumerate}
+
+\subsection{技術的課題への対応}
+
+\subsubsection{クロスプラットフォーム対応}
+
+macOSとWindowsの差異（キーボードショートカット、フォント、ファイルパス、Unicode記号表示）への対応は、想定以上に工数を要した。プラットフォーム抽象化レイヤーの導入を検討すべきであった。
+
+\subsubsection{ffmpeg統合}
+
+ffmpegのオプション設定、特にカラースペース保持とエンコード品質に関する試行錯誤が多かった。これらの知見はドキュメント化されており、今後の保守に活用される。
+
+\subsubsection{Qtフレームワークの制約}
+
+QVideoWidgetのイベントブロック問題、QFileDialogのフィルタ問題、QGroupBoxのプレーンテキスト制限など、Qtフレームワーク固有の制約に対処する必要があった。これらの回避策は、将来同様の問題に直面した際の参考になる。
+
+\subsection{プロジェクト全体の評価}
+
+約2週間という短期間で、実用的なデスクトップアプリケーションが完成した。ユーザーの具体的なワークフロー（リハーサル動画の編集）に特化したツールとして、その目的を達成している。
+
+対話を通じた反復的な開発プロセスは、要件の明確化と迅速なフィードバックループを可能にし、最終的な成果物の品質向上に寄与した。特に、判断ポイントを明示的に記録することで、設計決定の根拠が追跡可能になった。
+
+ただし、本文書で指摘した技術的負債への対応は、今後の継続的な改善活動として計画されるべきである。特に、テスト整備とリファクタリングは、プロジェクトの長期的な保守性を確保するために不可欠である。
+
+\subsection{結語}
+
+本プロジェクトは、人間とAIの協働による開発の一つの形を示すものである。設計思想の共有、技術的課題への共同対処、そして継続的なフィードバックを通じて、単独では達成困難な成果を短期間で実現した。
+
+判断ポイントの詳細な記録は、単なる開発ログを超えて、将来の保守者や類似プロジェクトへの知見の継承を可能にする。この経験は、今後のソフトウェア開発のあり方に一つの示唆を与えるものと考える。
+
+\end{document}

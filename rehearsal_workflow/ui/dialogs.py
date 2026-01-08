@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 
 from .models import detect_video_duration, SourceFile
+from .styles import ButtonStyles
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -570,6 +571,7 @@ class SourceSelectionDialog(QDialog):
     # ファイル拡張子
     AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.flac'}
     VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv'}
+    CHAPTER_EXTENSIONS = {'.chapters', '.txt'}
 
     # ダイアログサイズ
     DEFAULT_WIDTH = 1000
@@ -579,11 +581,23 @@ class SourceSelectionDialog(QDialog):
     ASPECT_RATIO = DEFAULT_WIDTH / DEFAULT_HEIGHT
 
     def __init__(self, parent=None, initial_sources: Optional[List[SourceFile]] = None,
-                 work_dir: Optional[Path] = None):
+                 work_dir: Optional[Path] = None, mode: str = "source",
+                 initial_filter: Optional[str] = None, show_filter_buttons: bool = True):
+        """
+        Args:
+            parent: 親ウィジェット
+            initial_sources: 初期選択ソース
+            work_dir: 作業ディレクトリ
+            mode: "source" (動画/音声選択) or "chapter" (チャプターファイル選択)
+            initial_filter: 初期フィルタモード ("mp3" or "mp4", sourceモード時のみ)
+            show_filter_buttons: フィルタ切替ボタンを表示するか (sourceモード時のみ)
+        """
         super().__init__(parent)
         self._sources: List[SourceFile] = initial_sources or []
         self._work_dir = work_dir or Path.cwd()
-        self._filter_mode = "mp4"  # "mp3" or "mp4"
+        self._mode = mode  # "source" or "chapter"
+        self._filter_mode = initial_filter or "mp4"  # "mp3" or "mp4" (source mode only)
+        self._show_filter_buttons = show_filter_buttons
         self._resizing = False  # リサイズ中フラグ
         self._setup_ui()
         self._update_info()
@@ -595,7 +609,10 @@ class SourceSelectionDialog(QDialog):
         )
         from PySide6.QtCore import QSortFilterProxyModel, QDir, QFileInfo
 
-        self.setWindowTitle("Select Source")
+        if self._mode == "chapter":
+            self.setWindowTitle("Load Chapters")
+        else:
+            self.setWindowTitle("Select Source")
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
 
         # 親ウィンドウの75%のサイズに設定
@@ -635,24 +652,31 @@ class SourceSelectionDialog(QDialog):
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # フィルタトグルボタン
+        # フィルタトグルボタン（sourceモードかつshow_filter_buttons=Trueの場合のみ）
         filter_layout = QHBoxLayout()
 
-        self._mp4_btn = QPushButton("Video")
-        self._mp4_btn.setFixedHeight(40)
-        self._mp4_btn.setCheckable(True)
-        self._mp4_btn.setChecked(True)
-        self._mp4_btn.setStyleSheet(self._toggle_button_style())
-        self._mp4_btn.clicked.connect(lambda: self._set_filter_mode("mp4"))
-        filter_layout.addWidget(self._mp4_btn)
+        if self._mode == "source" and self._show_filter_buttons:
+            self._mp4_btn = QPushButton("Video")
+            self._mp4_btn.setFixedHeight(40)
+            self._mp4_btn.setCheckable(True)
+            self._mp4_btn.setChecked(self._filter_mode == "mp4")
+            self._mp4_btn.setStyleSheet(self._toggle_button_style())
+            self._mp4_btn.clicked.connect(lambda: self._set_filter_mode("mp4"))
+            filter_layout.addWidget(self._mp4_btn)
 
-        self._mp3_btn = QPushButton("Audio")
-        self._mp3_btn.setFixedHeight(40)
-        self._mp3_btn.setCheckable(True)
-        self._mp3_btn.setChecked(False)
-        self._mp3_btn.setStyleSheet(self._toggle_button_style())
-        self._mp3_btn.clicked.connect(lambda: self._set_filter_mode("mp3"))
-        filter_layout.addWidget(self._mp3_btn)
+            self._mp3_btn = QPushButton("Audio")
+            self._mp3_btn.setFixedHeight(40)
+            self._mp3_btn.setCheckable(True)
+            self._mp3_btn.setChecked(self._filter_mode == "mp3")
+            self._mp3_btn.setStyleSheet(self._toggle_button_style())
+            self._mp3_btn.clicked.connect(lambda: self._set_filter_mode("mp3"))
+            filter_layout.addWidget(self._mp3_btn)
+        elif self._mode == "chapter":
+            # chapterモード: ラベルのみ表示
+            chapter_label = QLabel("Chapter Files (*.chapters, *.txt)")
+            chapter_label.setStyleSheet("color: #a0a0a0; font-size: 14px;")
+            filter_layout.addWidget(chapter_label)
+        # sourceモードでshow_filter_buttons=Falseの場合はボタンもラベルも表示しない
 
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -735,16 +759,47 @@ class SourceSelectionDialog(QDialog):
                 suffix = file_info.suffix().lower()
                 return f'.{suffix}' in self._allowed_extensions
 
+            def lessThan(self, left, right):
+                """ファイルを先、フォルダを後にソート"""
+                model = self.sourceModel()
+                left_info = QFileInfo(model.filePath(left))
+                right_info = QFileInfo(model.filePath(right))
+
+                # ".." は常に先頭
+                if left_info.fileName() == "..":
+                    return True
+                if right_info.fileName() == "..":
+                    return False
+
+                left_is_dir = left_info.isDir()
+                right_is_dir = right_info.isDir()
+
+                # ファイル vs フォルダ: ファイルを先に
+                if left_is_dir != right_is_dir:
+                    return not left_is_dir  # ファイル(False) < フォルダ(True)
+
+                # 同種なら名前でソート（大文字小文字無視）
+                return left_info.fileName().lower() < right_info.fileName().lower()
+
         self._file_proxy = MediaFilterProxyModel(self)
         self._file_proxy.setSourceModel(self._file_model)
-        self._file_proxy.set_allowed_extensions(self.VIDEO_EXTENSIONS)
+        if self._mode == "chapter":
+            self._file_proxy.set_allowed_extensions(self.CHAPTER_EXTENSIONS)
+        else:
+            self._file_proxy.set_allowed_extensions(self.VIDEO_EXTENSIONS)
 
         self._file_tree = QTreeView()
         self._file_tree.setModel(self._file_proxy)
         self._file_tree.setRootIndex(
             self._file_proxy.mapFromSource(self._file_model.index(str(self._work_dir)))
         )
-        self._file_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._file_tree.setSortingEnabled(True)
+        self._file_proxy.sort(0, Qt.SortOrder.AscendingOrder)  # ファイル先、フォルダ後
+        if self._mode == "chapter":
+            # チャプターモードは単一選択
+            self._file_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        else:
+            self._file_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._file_tree.doubleClicked.connect(self._on_file_double_clicked)
         self._file_tree.setStyleSheet("""
             QTreeView {
@@ -799,13 +854,13 @@ class SourceSelectionDialog(QDialog):
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setFixedHeight(40)
-        cancel_btn.setStyleSheet(self._button_style())
+        cancel_btn.setStyleSheet(ButtonStyles.secondary())
         cancel_btn.clicked.connect(self.reject)
         bottom_layout.addWidget(cancel_btn)
 
         ok_btn = QPushButton("OK")
         ok_btn.setFixedHeight(40)
-        ok_btn.setStyleSheet(self._button_style(primary=True))
+        ok_btn.setStyleSheet(ButtonStyles.primary())
         ok_btn.clicked.connect(self.accept)
         bottom_layout.addWidget(ok_btn)
 
@@ -861,35 +916,6 @@ class SourceSelectionDialog(QDialog):
             }
             QListWidget::item:selected:hover {
                 background: #2563eb;
-            }
-        """
-
-    def _button_style(self, primary: bool = False) -> str:
-        """ボタンスタイル"""
-        if primary:
-            return """
-                QPushButton {
-                    background: #3b82f6;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 8px 16px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background: #2563eb;
-                }
-            """
-        return """
-            QPushButton {
-                background: #2d2d2d;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                border-radius: 6px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background: #363636;
             }
         """
 
@@ -1061,12 +1087,31 @@ class SourceSelectionDialog(QDialog):
         """ファイルリストにフォーカスを設定"""
         self._file_tree.setFocus()
 
+    def _select_first_file(self):
+        """「..」をスキップして最初のファイルを選択"""
+        root_index = self._file_tree.rootIndex()
+        model = self._file_tree.model()
+
+        if not model or model.rowCount(root_index) == 0:
+            return
+
+        # 「..」をスキップして最初のファイルを探す
+        for row in range(model.rowCount(root_index)):
+            index = model.index(row, 0, root_index)
+            if index.isValid():
+                file_name = index.data()
+                if file_name and file_name != "..":
+                    self._file_tree.setCurrentIndex(index)
+                    self._file_tree.scrollTo(index)
+                    break
+
     def showEvent(self, event):
         """ダイアログ表示時にファイルリストにフォーカス"""
         super().showEvent(event)
         # UIの初期化完了後に遅延実行
         from PySide6.QtCore import QTimer
         QTimer.singleShot(50, self._focus_file_tree)
+        QTimer.singleShot(100, self._select_first_file)
 
     def _update_selected_files_from_tree(self):
         """ツリービューの選択状態から_selected_filesを更新"""
@@ -1126,6 +1171,12 @@ class SourceSelectionDialog(QDialog):
         # ファイル名順でソート
         sources.sort(key=lambda s: s.path.name.lower())
         return sources
+
+    def get_selected_file(self) -> Optional[Path]:
+        """選択されたファイルを1つ取得（chapterモード用）"""
+        if self._selected_files:
+            return self._selected_files[0]
+        return None
 
     def accept(self):
         """OKボタン押下時: 選択を確定"""
@@ -1274,14 +1325,14 @@ class CoverImageDialog(QDialog):
         BUTTON_HEIGHT = 40
 
         select_btn = QPushButton("Select Image...")
-        select_btn.setStyleSheet(self._button_style())
+        select_btn.setStyleSheet(ButtonStyles.secondary())
         select_btn.setFixedWidth(BUTTON_WIDTH)
         select_btn.setFixedHeight(BUTTON_HEIGHT)
         select_btn.clicked.connect(self._select_image)
         image_buttons.addWidget(select_btn)
 
         paste_btn = QPushButton("Clipboard")
-        paste_btn.setStyleSheet(self._button_style())
+        paste_btn.setStyleSheet(ButtonStyles.secondary())
         paste_btn.setFixedWidth(BUTTON_WIDTH)
         paste_btn.setFixedHeight(BUTTON_HEIGHT)
         paste_btn.setToolTip("クリップボードから画像を貼り付け (Cmd+V / Ctrl+V)")
@@ -1298,7 +1349,7 @@ class CoverImageDialog(QDialog):
         image_buttons.addWidget(self._preview_btn)
 
         ok_btn = QPushButton("OK")
-        ok_btn.setStyleSheet(self._button_style(primary=True))
+        ok_btn.setStyleSheet(ButtonStyles.primary())
         ok_btn.setFixedWidth(BUTTON_WIDTH)
         ok_btn.setFixedHeight(BUTTON_HEIGHT)
         ok_btn.clicked.connect(self.accept)
@@ -1338,14 +1389,14 @@ class CoverImageDialog(QDialog):
 
         # 90度単位回転ボタン
         rotate_ccw_btn = QPushButton("↺ 90°")
-        rotate_ccw_btn.setStyleSheet(self._button_style())
+        rotate_ccw_btn.setStyleSheet(ButtonStyles.secondary())
         rotate_ccw_btn.setFixedWidth(80)
         rotate_ccw_btn.setFixedHeight(40)
         rotate_ccw_btn.clicked.connect(lambda: self._rotate_by(-90))
         rotation_layout.addWidget(rotate_ccw_btn)
 
         rotate_cw_btn = QPushButton("↻ 90°")
-        rotate_cw_btn.setStyleSheet(self._button_style())
+        rotate_cw_btn.setStyleSheet(ButtonStyles.secondary())
         rotate_cw_btn.setFixedWidth(80)
         rotate_cw_btn.setFixedHeight(40)
         rotate_cw_btn.clicked.connect(lambda: self._rotate_by(90))
@@ -1375,35 +1426,6 @@ class CoverImageDialog(QDialog):
         quality_layout.addWidget(self._quality_spin)
 
         layout.addLayout(quality_layout)
-
-    def _button_style(self, primary: bool = False) -> str:
-        """ボタンスタイル"""
-        if primary:
-            return """
-                QPushButton {
-                    background: #3b82f6;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 8px 16px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background: #2563eb;
-                }
-            """
-        return """
-            QPushButton {
-                background: #2d2d2d;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                border-radius: 6px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background: #363636;
-            }
-        """
 
     def _toggle_button_style(self) -> str:
         """トグルボタンスタイル"""
@@ -1573,7 +1595,6 @@ class ExportSettingsDialog(QDialog):
     SETTINGS_KEY_ENCODER = "export/encoder"
     SETTINGS_KEY_QUALITY = "export/quality_index"
     SETTINGS_KEY_EMBED_CHAPTERS = "export/embed_chapters"
-    SETTINGS_KEY_CUT_EXCLUDED = "export/cut_excluded"
     SETTINGS_KEY_SPLIT_CHAPTERS = "export/split_chapters"
 
     def __init__(self, parent=None, available_encoders=None, is_audio_only=False, cover_image=None):
@@ -1670,11 +1691,6 @@ class ExportSettingsDialog(QDialog):
         self._embed_chapters_cb.setToolTip("MP4ファイルにチャプターメタデータを埋め込み")
         options_layout.addWidget(self._embed_chapters_cb)
 
-        self._cut_excluded_cb = QCheckBox("Cut Excluded")
-        self._cut_excluded_cb.setStyleSheet(checkbox_style)
-        self._cut_excluded_cb.setToolTip("--で始まるチャプターの区間を切り取り")
-        options_layout.addWidget(self._cut_excluded_cb)
-
         self._split_chapters_cb = QCheckBox("Split Chapters")
         self._split_chapters_cb.setStyleSheet(checkbox_style)
         self._split_chapters_cb.setToolTip("チャプターごとに個別ファイルとして出力")
@@ -1707,7 +1723,7 @@ class ExportSettingsDialog(QDialog):
         # ボタン
         self._cover_btn = QPushButton("Select Image...")
         self._cover_btn.setFixedHeight(40)
-        self._cover_btn.setStyleSheet(self._button_style())
+        self._cover_btn.setStyleSheet(ButtonStyles.secondary())
         self._cover_btn.setToolTip("カバー画像を選択（16:9にクロップ）")
         self._cover_btn.clicked.connect(self._open_cover_dialog)
         cover_layout.addWidget(self._cover_btn)
@@ -1727,13 +1743,13 @@ class ExportSettingsDialog(QDialog):
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setFixedHeight(40)
-        cancel_btn.setStyleSheet(self._button_style())
+        cancel_btn.setStyleSheet(ButtonStyles.secondary())
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
 
         ok_btn = QPushButton("OK")
         ok_btn.setFixedHeight(40)
-        ok_btn.setStyleSheet(self._button_style(primary=True))
+        ok_btn.setStyleSheet(ButtonStyles.primary())
         ok_btn.clicked.connect(self._save_and_accept)
         btn_layout.addWidget(ok_btn)
 
@@ -1794,36 +1810,6 @@ class ExportSettingsDialog(QDialog):
             }
         """
 
-    def _button_style(self, primary: bool = False) -> str:
-        if primary:
-            return """
-                QPushButton {
-                    background: #3b82f6;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 10px 24px;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background: #2563eb;
-                }
-            """
-        return """
-            QPushButton {
-                background: #2d2d2d;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                border-radius: 6px;
-                padding: 10px 24px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background: #363636;
-            }
-        """
-
     def _load_settings(self):
         """QSettingsから設定を読み込み"""
         # Encoder
@@ -1842,9 +1828,6 @@ class ExportSettingsDialog(QDialog):
         self._embed_chapters_cb.setChecked(
             self._settings.value(self.SETTINGS_KEY_EMBED_CHAPTERS, True, type=bool)
         )
-        self._cut_excluded_cb.setChecked(
-            self._settings.value(self.SETTINGS_KEY_CUT_EXCLUDED, True, type=bool)
-        )
         self._split_chapters_cb.setChecked(
             self._settings.value(self.SETTINGS_KEY_SPLIT_CHAPTERS, False, type=bool)
         )
@@ -1854,7 +1837,6 @@ class ExportSettingsDialog(QDialog):
         self._settings.setValue(self.SETTINGS_KEY_ENCODER, self._encoder_combo.currentData())
         self._settings.setValue(self.SETTINGS_KEY_QUALITY, self._quality_combo.currentIndex())
         self._settings.setValue(self.SETTINGS_KEY_EMBED_CHAPTERS, self._embed_chapters_cb.isChecked())
-        self._settings.setValue(self.SETTINGS_KEY_CUT_EXCLUDED, self._cut_excluded_cb.isChecked())
         self._settings.setValue(self.SETTINGS_KEY_SPLIT_CHAPTERS, self._split_chapters_cb.isChecked())
         self.accept()
 
@@ -1869,10 +1851,6 @@ class ExportSettingsDialog(QDialog):
     def is_embed_chapters(self) -> bool:
         """チャプター埋め込みが有効か"""
         return self._embed_chapters_cb.isChecked()
-
-    def is_cut_excluded(self) -> bool:
-        """除外区間カットが有効か"""
-        return self._cut_excluded_cb.isChecked()
 
     def is_split_chapters(self) -> bool:
         """チャプター分割が有効か"""
@@ -1918,7 +1896,7 @@ class ExportSettingsDialog(QDialog):
             "encoder": settings.value(ExportSettingsDialog.SETTINGS_KEY_ENCODER, "copy"),
             "quality_index": settings.value(ExportSettingsDialog.SETTINGS_KEY_QUALITY, 0, type=int),
             "embed_chapters": settings.value(ExportSettingsDialog.SETTINGS_KEY_EMBED_CHAPTERS, True, type=bool),
-            "cut_excluded": settings.value(ExportSettingsDialog.SETTINGS_KEY_CUT_EXCLUDED, True, type=bool),
+            "cut_excluded": True,  # 常に除外区間をカット
             "split_chapters": settings.value(ExportSettingsDialog.SETTINGS_KEY_SPLIT_CHAPTERS, False, type=bool),
         }
 
@@ -1984,13 +1962,13 @@ class PlaylistVideoSelectionDialog(QDialog):
         btn_row = QHBoxLayout()
         select_all_btn = QPushButton("Select All")
         select_all_btn.setFixedHeight(32)
-        select_all_btn.setStyleSheet(self._button_style())
+        select_all_btn.setStyleSheet(ButtonStyles.secondary())
         select_all_btn.clicked.connect(self._select_all)
         btn_row.addWidget(select_all_btn)
 
         deselect_all_btn = QPushButton("Deselect All")
         deselect_all_btn.setFixedHeight(32)
-        deselect_all_btn.setStyleSheet(self._button_style())
+        deselect_all_btn.setStyleSheet(ButtonStyles.secondary())
         deselect_all_btn.clicked.connect(self._deselect_all)
         btn_row.addWidget(deselect_all_btn)
 
@@ -2122,13 +2100,13 @@ class PlaylistVideoSelectionDialog(QDialog):
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setFixedHeight(40)
-        cancel_btn.setStyleSheet(self._button_style())
+        cancel_btn.setStyleSheet(ButtonStyles.secondary())
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
 
         ok_btn = QPushButton("Download Selected")
         ok_btn.setFixedHeight(40)
-        ok_btn.setStyleSheet(self._button_style(primary=True))
+        ok_btn.setStyleSheet(ButtonStyles.primary())
         ok_btn.clicked.connect(self.accept)
         btn_layout.addWidget(ok_btn)
 
@@ -2154,35 +2132,6 @@ class PlaylistVideoSelectionDialog(QDialog):
             cb = self._table.cellWidget(current_row, 0)
             if cb:
                 cb.setChecked(not cb.isChecked())
-
-    def _button_style(self, primary: bool = False) -> str:
-        """ボタンスタイル"""
-        if primary:
-            return """
-                QPushButton {
-                    background: #3b82f6;
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 8px 20px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background: #2563eb;
-                }
-            """
-        return """
-            QPushButton {
-                background: #2d2d2d;
-                color: #f0f0f0;
-                border: 1px solid #3a3a3a;
-                border-radius: 6px;
-                padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background: #363636;
-            }
-        """
 
     def _get_playlist_type_info(self, playlist_id: str) -> tuple:
         """

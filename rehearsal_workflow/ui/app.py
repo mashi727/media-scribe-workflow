@@ -189,6 +189,11 @@ class VideoChapterEditor(QMainWindow):
         open_action.triggered.connect(self._open_folder)
         file_menu.addAction(open_action)
 
+        load_chapters_action = QAction("Load Chapters...", self)
+        load_chapters_action.setShortcut("Ctrl+L")
+        load_chapters_action.triggered.connect(self._load_chapters)
+        file_menu.addAction(load_chapters_action)
+
         file_menu.addSeparator()
 
         quit_action = QAction("Quit", self)
@@ -272,11 +277,6 @@ class VideoChapterEditor(QMainWindow):
         self._set_progress_style_processing()  # デフォルトは処理中スタイル
         right_layout.addWidget(self._progress_bar)
 
-        # 状態表示ラベル
-        self._status_label = QLabel("Ready")
-        self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
-        self._status_label.setMinimumWidth(200)
-        right_layout.addWidget(self._status_label)
 
         self._statusbar.addPermanentWidget(right_widget)
 
@@ -289,6 +289,10 @@ class VideoChapterEditor(QMainWindow):
     def _paste_chapters(self):
         """チャプターをペースト"""
         self._workspace.paste_chapters()
+
+    def _load_chapters(self):
+        """チャプターファイルを読み込む"""
+        self._workspace._load_chapters()
 
     def _toggle_chapter_overlay(self, checked: bool):
         """チャプターオーバーレイ表示切り替え"""
@@ -317,6 +321,7 @@ class VideoChapterEditor(QMainWindow):
 <tr><td><b>Enter</b></td><td>セルを編集モードに</td></tr>
 <tr><td><b>↑ (編集中)</b></td><td>カーソルを行頭へ</td></tr>
 <tr><td><b>↓ (編集中)</b></td><td>カーソルを行末へ</td></tr>
+<tr><td><b>Cmd+L / Ctrl+L</b></td><td>チャプターファイルを読み込み</td></tr>
 <tr><td><b>Cmd+V / Ctrl+V</b></td><td>チャプターをペースト</td></tr>
 </table>
 
@@ -369,32 +374,27 @@ class VideoChapterEditor(QMainWindow):
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(percent)
 
-        # ステータステキスト（処理中は赤）
-        self._status_label.setText(status)
-        self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
-
     def _on_export_finished(self, success: bool, message: str):
         """エクスポート完了表示"""
+        log = self._workspace.get_log_panel()
         if success:
             # 完了時は100%表示してから非表示
             self._progress_bar.setValue(100)
-            self._status_label.setText(f"Completed: {message}")
-            self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
-            # 3秒後にプログレスバーを非表示、Readyに戻す
-            QTimer.singleShot(3000, self._reset_status)
+            self._set_progress_style_complete()
+            log.info(f"Export completed: {message}", source="Export")
+            # 3秒後にプログレスバーを非表示
+            QTimer.singleShot(3000, self._reset_progress)
         else:
             self._progress_bar.setVisible(False)
-            self._status_label.setText(f"Failed: {message}")
-            self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
-            # 5秒後にReadyに戻す
-            QTimer.singleShot(5000, self._reset_status)
+            log.error(f"Export failed: {message}", source="Export")
+            # 5秒後にリセット
+            QTimer.singleShot(5000, self._reset_progress)
 
-    def _reset_status(self):
-        """ステータスを初期状態に戻す"""
+    def _reset_progress(self):
+        """プログレスバーを初期状態に戻す"""
         self._progress_bar.setVisible(False)
         self._progress_bar.setValue(0)
-        self._status_label.setText("Ready")
-        self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+        self._set_progress_style_processing()
 
     def _set_progress_style_processing(self):
         """プログレスバーを処理中スタイル（赤）に設定"""
@@ -406,6 +406,20 @@ class VideoChapterEditor(QMainWindow):
             }
             QProgressBar::chunk {
                 background: #ef4444;
+                border-radius: 3px;
+            }
+        """)
+
+    def _set_progress_style_complete(self):
+        """プログレスバーを完了スタイル（緑）に設定"""
+        self._progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: #2a2a2a;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background: #22c55e;
                 border-radius: 3px;
             }
         """)
@@ -452,19 +466,12 @@ class VideoChapterEditor(QMainWindow):
         self._pending_update_version = version
         self._pending_update_url = url
 
-        # ステータスバーに通知を表示
-        self._status_label.setText(f"🔄 v{version} available")
-        self._status_label.setStyleSheet(
-            "color: #f59e0b; font-weight: bold; font-size: 18px; cursor: pointer;"
-        )
-        self._status_label.setToolTip(f"Click to update to v{version}")
-
-        # クリックでダウンロード開始
-        self._status_label.mousePressEvent = lambda e: self._confirm_update()
-
-        # ログにも記録
+        # ログに記録
         log = self._workspace.get_log_panel()
         log.info(f"New version v{version} available", source="Updater")
+
+        # 確認ダイアログを表示
+        self._confirm_update()
 
     def _confirm_update(self):
         """アップデート確認ダイアログ"""
@@ -501,26 +508,26 @@ class VideoChapterEditor(QMainWindow):
         self._downloader.finished.connect(self._on_download_finished)
         self._downloader.error.connect(self._on_download_error)
 
-        # UI更新（処理中は赤）
+        # UI更新
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(0)
-        self._status_label.setText("Downloading update...")
-        self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
+        self._set_progress_style_processing()
+
+        log = self._workspace.get_log_panel()
+        log.info("Downloading update...", source="Updater")
 
         self._download_thread.start()
 
     def _on_download_progress(self, percent: int):
         """ダウンロード進捗"""
         self._progress_bar.setValue(percent)
-        self._status_label.setText(f"Downloading... {percent}%")
 
     def _on_download_finished(self, file_path: str):
         """ダウンロード完了"""
         self._cleanup_download()
 
-        self._progress_bar.setVisible(False)
-        self._status_label.setText("Download complete!")
-        self._status_label.setStyleSheet("color: #22c55e; font-weight: bold; font-size: 18px;")
+        self._progress_bar.setValue(100)
+        self._set_progress_style_complete()
 
         log = self._workspace.get_log_panel()
         log.info(f"Update downloaded: {file_path}", source="Updater")
@@ -548,16 +555,14 @@ class VideoChapterEditor(QMainWindow):
                 "Please extract and run the new version."
             )
 
-        # ステータスをリセット
-        QTimer.singleShot(5000, self._reset_status)
+        # プログレスバーをリセット
+        QTimer.singleShot(3000, self._reset_progress)
 
     def _on_download_error(self, error: str):
         """ダウンロードエラー"""
         self._cleanup_download()
 
         self._progress_bar.setVisible(False)
-        self._status_label.setText("Download failed")
-        self._status_label.setStyleSheet("color: #ef4444; font-weight: bold; font-size: 18px;")
 
         log = self._workspace.get_log_panel()
         log.error(f"Download failed: {error}", source="Updater")
@@ -567,8 +572,6 @@ class VideoChapterEditor(QMainWindow):
             "Download Failed",
             f"Failed to download update:\n{error}"
         )
-
-        QTimer.singleShot(5000, self._reset_status)
 
     def _cleanup_download(self):
         """ダウンロードスレッドをクリーンアップ"""

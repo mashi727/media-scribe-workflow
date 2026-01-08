@@ -5,7 +5,32 @@ file_dialog.py - カスタムファイルダイアログ
 """
 
 from PySide6.QtWidgets import QFileDialog, QDialog, QListView, QTreeView
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt, QSortFilterProxyModel, QFileInfo
+
+
+class FilesFirstProxyModel(QSortFilterProxyModel):
+    """ファイルを先、フォルダを後にソートするプロキシモデル"""
+
+    def lessThan(self, left, right):
+        model = self.sourceModel()
+        left_info = model.fileInfo(left)
+        right_info = model.fileInfo(right)
+
+        # ".." は常に先頭
+        if left_info.fileName() == "..":
+            return True
+        if right_info.fileName() == "..":
+            return False
+
+        left_is_dir = left_info.isDir()
+        right_is_dir = right_info.isDir()
+
+        # ファイル vs フォルダ: ファイルを先に
+        if left_is_dir != right_is_dir:
+            return not left_is_dir
+
+        # 同種なら名前でソート（大文字小文字無視）
+        return left_info.fileName().lower() < right_info.fileName().lower()
 
 
 class CenteredFileDialog(QFileDialog):
@@ -118,12 +143,37 @@ class CenteredFileDialog(QFileDialog):
         """表示時に親ウィンドウの中央に配置 + 拡張子フィルタ適用"""
         super().showEvent(event)
         self._apply_extension_filter()
+        self._apply_files_first_sort()
         self._center_on_parent()
         # ファイルリストにフォーカスを設定（初期化完了後に遅延実行）
         QTimer.singleShot(50, self._focus_file_list)
+        # 先頭ファイル選択（ソート完了後に遅延実行）
+        QTimer.singleShot(150, self._select_first_file)
+
+    def _apply_files_first_sort(self):
+        """ファイルを先、フォルダを後にソート"""
+        from PySide6.QtWidgets import QFileSystemModel, QAbstractItemView
+
+        # QFileDialogの内部ビューにプロキシモデルを適用
+        for view in self.findChildren(QAbstractItemView):
+            model = view.model()
+            # すでにプロキシが設定されている場合はスキップ
+            if isinstance(model, FilesFirstProxyModel):
+                continue
+            # QFileSystemModelの場合のみ処理
+            if isinstance(model, QFileSystemModel):
+                proxy = FilesFirstProxyModel(self)
+                proxy.setSourceModel(model)
+                root_index = view.rootIndex()
+                view.setModel(proxy)
+                # ルートインデックスをプロキシ経由に変換
+                if root_index.isValid():
+                    view.setRootIndex(proxy.mapFromSource(root_index))
+                view.setSortingEnabled(True)
+                proxy.sort(0, Qt.SortOrder.AscendingOrder)
 
     def _focus_file_list(self):
-        """ファイルリスト（QListView）にフォーカスを設定"""
+        """ファイルリスト（QListView）にフォーカスを設定し、先頭ファイルを選択"""
         # QFileDialogの内部ビューを探す
         # 1. QListView（アイコン表示モード）
         # 2. QTreeView（詳細表示モード）
@@ -142,6 +192,28 @@ class CenteredFileDialog(QFileDialog):
 
         if best_view:
             best_view.setFocus()
+
+    def _select_first_file(self):
+        """「..」をスキップして最初のファイルを選択（キーイベントで下に移動）"""
+        from PySide6.QtWidgets import QAbstractItemView
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+
+        # メインのファイルリストビューを探す
+        best_view = None
+        best_size = 0
+
+        for view in self.findChildren(QAbstractItemView):
+            if view.isVisible() and view.width() > 100:
+                size = view.width() * view.height()
+                if size > best_size:
+                    best_size = size
+                    best_view = view
+
+        if best_view:
+            # 下キーを送信して「..」から次のアイテムに移動
+            key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier)
+            best_view.keyPressEvent(key_event)
 
     def _center_on_parent(self):
         """親ウィンドウの中央に配置"""
