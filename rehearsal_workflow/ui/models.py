@@ -13,69 +13,140 @@ from dataclasses import dataclass, field
 from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
 
 
+def _format_time_ms(time_ms: int, include_ms: bool = True) -> str:
+    """ミリ秒を時間文字列に変換するヘルパー関数"""
+    total_sec = time_ms // 1000
+    ms = time_ms % 1000
+    h = total_sec // 3600
+    m = (total_sec % 3600) // 60
+    s = total_sec % 60
+    if include_ms:
+        return f"{h}:{m:02d}:{s:02d}.{ms:03d}"
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def _parse_time_str(time_str: str) -> int:
+    """時間文字列をミリ秒に変換するヘルパー関数
+
+    サポートする形式:
+    - HH:MM:SS.mmm (例: 1:23:45.678)
+    - HH:MM:SS (例: 1:23:45)
+    - MM:SS.mmm (例: 23:45.678)
+    - MM:SS (例: 23:45)
+    """
+    parts = time_str.replace('.', ':').split(':')
+    if len(parts) == 4:
+        h, m, s, ms = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+    elif len(parts) == 3:
+        if '.' in time_str:
+            h = 0
+            m, s, ms = int(parts[0]), int(parts[1]), int(parts[2])
+        else:
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+            ms = 0
+    elif len(parts) == 2:
+        h = 0
+        m, s = int(parts[0]), int(parts[1])
+        ms = 0
+    else:
+        h, m, s, ms = 0, 0, 0, 0
+    return ((h * 3600) + (m * 60) + s) * 1000 + ms
+
+
 @dataclass
 class ChapterInfo:
-    """チャプター情報"""
-    time_ms: int  # ミリ秒
+    """チャプター情報
+
+    相対時間方式: チャプターはソースファイル内のローカル時間を保持し、
+    表示時に累積時間（絶対時間）に変換する。
+    """
+    local_time_ms: int  # ソースファイル内のローカル時間（ミリ秒）
     title: str
     source_index: Optional[int] = None  # 所属するソースファイルのインデックス
 
     @property
-    def time_str(self) -> str:
-        """HH:MM:SS.mmm形式"""
-        total_sec = self.time_ms // 1000
-        ms = self.time_ms % 1000
-        h = total_sec // 3600
-        m = (total_sec % 3600) // 60
-        s = total_sec % 60
-        return f"{h}:{m:02d}:{s:02d}.{ms:03d}"
+    def local_time_str(self) -> str:
+        """ローカル時間 HH:MM:SS.mmm形式"""
+        return _format_time_ms(self.local_time_ms)
 
     @property
-    def time_str_youtube(self) -> str:
-        """YouTube用 HH:MM:SS形式（ミリ秒なし）"""
-        total_sec = self.time_ms // 1000
-        h = total_sec // 3600
-        m = (total_sec % 3600) // 60
-        s = total_sec % 60
-        return f"{h}:{m:02d}:{s:02d}"
+    def local_time_str_youtube(self) -> str:
+        """ローカル時間 YouTube用 HH:MM:SS形式（ミリ秒なし）"""
+        return _format_time_ms(self.local_time_ms, include_ms=False)
+
+    def get_absolute_time_ms(self, source_offsets: List[int]) -> int:
+        """累積時間（絶対時間）を計算
+
+        Args:
+            source_offsets: 各ソースファイルの開始オフセット（ミリ秒）のリスト
+
+        Returns:
+            累積時間（ミリ秒）
+        """
+        if self.source_index is not None and 0 <= self.source_index < len(source_offsets):
+            return source_offsets[self.source_index] + self.local_time_ms
+        return self.local_time_ms
+
+    def get_absolute_time_str(self, source_offsets: List[int]) -> str:
+        """累積時間を HH:MM:SS.mmm形式で取得"""
+        return _format_time_ms(self.get_absolute_time_ms(source_offsets))
+
+    def get_absolute_time_str_youtube(self, source_offsets: List[int]) -> str:
+        """累積時間を YouTube用 HH:MM:SS形式で取得"""
+        return _format_time_ms(self.get_absolute_time_ms(source_offsets), include_ms=False)
 
     @property
     def is_excluded(self) -> bool:
         """除外チャプターかどうか（--プレフィックス）"""
         return self.title.startswith("--")
 
+    # ============================================
+    # 後方互換性のためのプロパティ（非推奨）
+    # ============================================
+    @property
+    def time_ms(self) -> int:
+        """後方互換性: local_time_msを返す（非推奨）"""
+        return self.local_time_ms
+
+    @property
+    def time_str(self) -> str:
+        """後方互換性: local_time_strを返す（非推奨）"""
+        return self.local_time_str
+
+    @property
+    def time_str_youtube(self) -> str:
+        """後方互換性: local_time_str_youtubeを返す（非推奨）"""
+        return self.local_time_str_youtube
+
     @classmethod
-    def from_time_str(cls, time_str: str, title: str) -> "ChapterInfo":
-        """時間文字列からChapterInfoを生成
+    def from_time_str(cls, time_str: str, title: str, source_index: Optional[int] = None) -> "ChapterInfo":
+        """時間文字列からChapterInfoを生成（ローカル時間として解釈）"""
+        return cls(local_time_ms=_parse_time_str(time_str), title=title, source_index=source_index)
 
-        サポートする形式:
-        - HH:MM:SS.mmm (例: 1:23:45.678)
-        - HH:MM:SS (例: 1:23:45)
-        - MM:SS.mmm (例: 23:45.678)
-        - MM:SS (例: 23:45)
+    @classmethod
+    def from_absolute_time(
+        cls,
+        absolute_time_ms: int,
+        title: str,
+        source_index: int,
+        source_offsets: List[int]
+    ) -> "ChapterInfo":
+        """累積時間からChapterInfoを生成（ローカル時間に変換）
+
+        Args:
+            absolute_time_ms: 累積時間（ミリ秒）
+            title: チャプタータイトル
+            source_index: ソースファイルのインデックス
+            source_offsets: 各ソースファイルの開始オフセット（ミリ秒）のリスト
+
+        Returns:
+            ChapterInfo（ローカル時間に変換済み）
         """
-        parts = time_str.replace('.', ':').split(':')
-        if len(parts) == 4:
-            h, m, s, ms = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
-        elif len(parts) == 3:
-            if '.' in time_str:
-                # MM:SS.mmm
-                h = 0
-                m, s, ms = int(parts[0]), int(parts[1]), int(parts[2])
-            else:
-                # HH:MM:SS
-                h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
-                ms = 0
-        elif len(parts) == 2:
-            # MM:SS
-            h = 0
-            m, s = int(parts[0]), int(parts[1])
-            ms = 0
+        if 0 <= source_index < len(source_offsets):
+            local_time_ms = absolute_time_ms - source_offsets[source_index]
         else:
-            h, m, s, ms = 0, 0, 0, 0
-
-        time_ms = ((h * 3600) + (m * 60) + s) * 1000 + ms
-        return cls(time_ms=time_ms, title=title)
+            local_time_ms = absolute_time_ms
+        return cls(local_time_ms=max(0, local_time_ms), title=title, source_index=source_index)
 
 
 @dataclass

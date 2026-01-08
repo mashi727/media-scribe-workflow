@@ -22,6 +22,61 @@ from .models import (
 from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, get_subprocess_kwargs, get_popen_kwargs
 
 
+def build_drawtext_filter(
+    fontfile: str,
+    textfile: str,
+    fontsize_ratio: float = 0.04,
+    fontcolor: str = "white",
+    borderw: int = 2,
+    bordercolor: str = "black",
+    box: bool = True,
+    boxcolor: str = "black@0.6",
+    boxborderw: int = 15,
+    x: str = "(w-text_w)/2",
+    y: str = "h*0.325-th/2",
+    enable_start: Optional[float] = None,
+    enable_end: Optional[float] = None,
+) -> str:
+    """
+    ffmpeg drawtextフィルター文字列を生成
+
+    Args:
+        fontfile: フォントファイルパス
+        textfile: テキストファイルパス
+        fontsize_ratio: 映像高さに対するフォントサイズ比率 (デフォルト: 0.04)
+        fontcolor: フォント色
+        borderw: 縁取り幅
+        bordercolor: 縁取り色
+        box: 背景ボックス有効化
+        boxcolor: 背景ボックス色
+        boxborderw: 背景ボックスパディング
+        x: X座標式
+        y: Y座標式
+        enable_start: 表示開始時間（秒）
+        enable_end: 表示終了時間（秒）
+
+    Returns:
+        drawtextフィルター文字列
+    """
+    parts = [
+        f"drawtext=fontfile='{fontfile}'",
+        f":textfile='{textfile}'",
+        f":fontsize=h*{fontsize_ratio}",
+        f":fontcolor={fontcolor}",
+        f":borderw={borderw}:bordercolor={bordercolor}",
+    ]
+
+    if box:
+        parts.append(f":box=1:boxcolor={boxcolor}:boxborderw={boxborderw}")
+
+    parts.append(f":x={x}:y={y}")
+
+    if enable_start is not None and enable_end is not None:
+        parts.append(f":enable='between(t,{enable_start:.3f},{enable_end:.3f})'")
+
+    return "".join(parts)
+
+
 class MergeWorker(QThread):
     """音声ファイル結合の準備処理を行うワーカースレッド"""
 
@@ -67,7 +122,7 @@ class MergeWorker(QThread):
             current_time_ms = 0
             for f in self.ordered_files:
                 title = Path(f).stem
-                self.chapters.append(ChapterInfo(time_ms=current_time_ms, title=title))
+                self.chapters.append(ChapterInfo(local_time_ms=current_time_ms, title=title))
                 # ffprobeで長さを取得
                 try:
                     kwargs = get_subprocess_kwargs(timeout=30)
@@ -240,7 +295,7 @@ class ExportWorker(QThread):
 
             adjusted_time_ms = ch.time_ms - cut_before_this
             self._adjusted_chapters.append(ChapterInfo(
-                time_ms=adjusted_time_ms,
+                local_time_ms=adjusted_time_ms,
                 title=ch.title
             ))
 
@@ -379,15 +434,12 @@ class ExportWorker(QThread):
                 end_sec = duration_to_use / 1000.0 if duration_to_use > 0 else start_sec + 3600
 
             # drawtext フィルター
-            drawtext = (
-                f"drawtext=fontfile='{self.font_path}'"
-                f":textfile='{textfiles[i]}'"
-                f":fontsize=h*{self.FONT_SIZE_RATIO}"
-                f":fontcolor=white"
-                f":borderw=2:bordercolor=black"
-                f":box=1:boxcolor=black@0.6:boxborderw=15"
-                f":x=(w-text_w)/2:y=h*0.325-th/2"
-                f":enable='between(t,{start_sec:.3f},{end_sec:.3f})'"
+            drawtext = build_drawtext_filter(
+                fontfile=self.font_path,
+                textfile=textfiles[i],
+                fontsize_ratio=self.FONT_SIZE_RATIO,
+                enable_start=start_sec,
+                enable_end=end_sec,
             )
             filters.append(drawtext)
 
@@ -517,15 +569,12 @@ class ExportWorker(QThread):
                     else:
                         end_sec = duration_to_use / 1000.0 if duration_to_use > 0 else start_sec + 3600
 
-                    drawtext = (
-                        f"drawtext=fontfile='{self.font_path}'"
-                        f":textfile='{textfiles[i]}'"
-                        f":fontsize=h*{self.FONT_SIZE_RATIO}"
-                        f":fontcolor=white"
-                        f":borderw=2:bordercolor=black"
-                        f":box=1:boxcolor=black@0.6:boxborderw=15"
-                        f":x=(w-text_w)/2:y=h*0.325-th/2"
-                        f":enable='between(t,{start_sec:.3f},{end_sec:.3f})'"
+                    drawtext = build_drawtext_filter(
+                        fontfile=self.font_path,
+                        textfile=textfiles[i],
+                        fontsize_ratio=self.FONT_SIZE_RATIO,
+                        enable_start=start_sec,
+                        enable_end=end_sec,
                     )
                     vf_parts.append(drawtext)
 
@@ -565,15 +614,12 @@ class ExportWorker(QThread):
                     else:
                         end_sec = duration_to_use / 1000.0 if duration_to_use > 0 else start_sec + 3600
 
-                    drawtext = (
-                        f"drawtext=fontfile='{self.font_path}'"
-                        f":textfile='{textfiles[i]}'"
-                        f":fontsize=h*{self.FONT_SIZE_RATIO}"
-                        f":fontcolor=white"
-                        f":borderw=2:bordercolor=black"
-                        f":box=1:boxcolor=black@0.6:boxborderw=15"
-                        f":x=(w-text_w)/2:y=h*0.325-th/2"
-                        f":enable='between(t,{start_sec:.3f},{end_sec:.3f})'"
+                    drawtext = build_drawtext_filter(
+                        fontfile=self.font_path,
+                        textfile=textfiles[i],
+                        fontsize_ratio=self.FONT_SIZE_RATIO,
+                        enable_start=start_sec,
+                        enable_end=end_sec,
                     )
                     vf_parts.append(drawtext)
 
@@ -1409,15 +1455,12 @@ class SplitExportWorker(QThread):
         """チャプタータイトル焼き込み用のフィルターを生成"""
         textfile = self._create_title_textfile(title)
         # セグメント全体にタイトル表示
-        drawtext = (
-            f"drawtext=fontfile='{self.font_path}'"
-            f":textfile='{textfile}'"
-            f":fontsize=h*{self.FONT_SIZE_RATIO}"
-            f":fontcolor=white"
-            f":borderw=2:bordercolor=black"
-            f":box=1:boxcolor=black@0.6:boxborderw=15"
-            f":x=(w-text_w)/2:y=h*0.325-th/2"
-            f":enable='between(t,0,{duration_sec:.3f})'"
+        drawtext = build_drawtext_filter(
+            fontfile=self.font_path,
+            textfile=textfile,
+            fontsize_ratio=self.FONT_SIZE_RATIO,
+            enable_start=0,
+            enable_end=duration_sec,
         )
         # パディング追加（偶数サイズ保証）
         return f"{drawtext},pad=ceil(iw/2)*2:ceil(ih/2)*2"

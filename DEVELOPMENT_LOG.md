@@ -10,14 +10,298 @@
 
 ### video-chapter-editor
 
+#### 短期（リファクタリング）
+- Phase 1: 重複コード抽出
+  - `styles.py` 新規作成（色定数・ボタンスタイル）
+  - `dialogs.py` の `_button_style()` 統一
+  - `workers.py` の `build_drawtext_filter()` 追加
+- Phase 2: ユーティリティクラス
+  - `TempFileManagerMixin`
+  - `CancellableWorkerMixin`
+- Phase 3: God Class分割（main_workspace.py: 5000行超）
+  - テスト環境構築
+  - 責務分離（ChapterManager, MediaPlaybackController等）
+
+#### 中期（アーキテクチャ改善）
+- プロジェクトファイル（JSON）への移行 → 下記「設計検討事項」参照
+- バッチエンコード機能
+- 複数ソース時のチャプター操作改善
+
+#### 長期
 - UI大改造: スケルトン完成 → 機能実装へ
 - 単一エンコードパス実装
-- 既存コンポーネント（WaveformWidget等）の移植
 
 ### report-workflow
 
 - 配管のプロトタイプは完了
 - 陶器（GUI）の設計は video-chapter-editor 完成後
+
+---
+
+## 2026-01-08: 設計原則の明確化と今後の構想
+
+### 設計原則: 非破壊編集（Non-destructive Editing）
+
+```
+入力（不変）           処理              出力（新規作成）
+┌──────────┐                          ┌──────────────┐
+│SourceA   │──┐                    ┌─→│ merged.mp4   │
+│SourceB   │──┼─→ チャプター付加 ──┤  │ + chapters   │
+│SourceC   │──┘     (メタデータ)   │  └──────────────┘
+└──────────┘                       │
+     ↑                             └─→ chapters.txt
+   変更なし
+```
+
+**原則**:
+- ソースファイルは読み取り専用（アプリは一切変更しない）
+- チャプターはメタデータ（インデックス/ラベル）として存在
+- エクスポート時に新しいファイルを生成
+- ソース入れ替え時、チャプターはソースに紐付いて移動（実装済み）
+
+### 設計検討事項（要決定）
+
+#### 1. プロジェクトファイル（JSON）への移行
+
+**現状の課題**:
+- Saveボタンはチャプターテキストのみ保存
+- 履歴管理が複雑（メモリ内で管理）
+- エンコード設定が保持されない
+
+**提案**: JSONベースのプロジェクトファイル
+
+```json
+{
+  "version": "1.0",
+  "sources": [
+    {"path": "part1.mp4", "duration_ms": 1800000, "hash": "sha256:..."},
+    {"path": "part2.mp4", "duration_ms": 2400000, "hash": "sha256:..."}
+  ],
+  "chapters": [
+    {"source_index": 0, "local_time_ms": 0, "title": "イントロ"},
+    {"source_index": 0, "local_time_ms": 330000, "title": "本編"},
+    {"source_index": 1, "local_time_ms": 0, "title": "後半開始"}
+  ],
+  "export_settings": {
+    "encoder": "hevc_videotoolbox",
+    "quality": 65,
+    "audio_bitrate": "256k"
+  },
+  "output": "output/rehearsal_2024-01-08.mp4"
+}
+```
+
+**メリット**:
+- 履歴管理不要（プロジェクトファイル = 状態のスナップショット）
+- 複数ソースの紐付けが明示的
+- バッチ処理の基盤
+
+**決定が必要な項目**:
+- [ ] ファイル拡張子（`.vce.json`? `.vceproj`?）
+- [ ] 既存のチャプターテキスト形式との互換性維持方法
+- [ ] 自動保存の有無・タイミング
+
+#### 2. バッチエンコード機能
+
+**提案**: 編集とエンコードの分離
+
+```
+日中: 編集作業
+├─ プロジェクトA → project_a.vce.json 保存
+├─ プロジェクトB → project_b.vce.json 保存
+└─ プロジェクトC → project_c.vce.json 保存
+
+夜間: バッチエンコード
+$ vce-batch encode projects/*.vce.json
+```
+
+**UIイメージ**:
+```
+File メニュー
+├── New Project
+├── Open Project...
+├── Save Project
+├── Save Project As...
+├── ─────────────────
+├── Add to Queue...        ← 複数プロジェクト読み込み
+├── Process Queue          ← バッチエンコード
+└── ─────────────────
+    Export for YouTube     ← 既存のコピー機能（維持）
+```
+
+**決定が必要な項目**:
+- [ ] キューUIは別ウィンドウ？メイン画面内？
+- [ ] CLIツール（`vce-batch`）の提供有無
+- [ ] cron/launchdでのスケジュール実行対応
+
+#### 3. 複数ソース時のチャプター操作
+
+**課題**:
+- チャプターファイル読み込み時: 絶対時間をどのソースに紐付けるか
+- ペースト操作時: コピー元の`source_index`をどう扱うか
+
+**提案**: 時間からソースを自動判定
+
+```
+読み込み例:
+  00:12:00 エンディング
+  ↓
+  ソースA(10分) + ソースB(15分) の場合
+  → ソースBの local_time=2:00 として解釈
+```
+
+**決定が必要な項目**:
+- [ ] 自動判定で良いか、ユーザー確認を挟むか
+- [ ] チャプターファイル形式の拡張（メタデータヘッダー追加）
+
+#### 4. チャプターファイル形式の拡張（参考）
+
+```
+# VCE Chapter File v1
+# source: rehearsal_2024-01-08.mp4
+# duration: 3600000
+# created: 2024-01-08T15:30:00+09:00
+---
+00:00:00 イントロ
+00:05:30 本編
+00:45:00 エンディング
+```
+
+YouTube形式との互換性を維持しつつ、`#` コメント行でメタデータを追加。
+
+---
+
+## 2026-01-08: チャプター時間管理の相対時間方式への移行
+
+### 背景・課題
+
+**問題**: ソースファイルの追加・削除・並べ替え時に、チャプターの再生時間計算が正しく動作しない、または挙動が不安定（全チャプターがクリアされるなど）
+
+**原因分析**: 従来の「絶対時間方式」では、チャプターは累積時間（全ソースを通した位置）を保持していた。これにより:
+- ソース追加時: 既存チャプターの時間を全て再計算する必要
+- ソース削除時: 該当ソースのチャプターを削除後、後続の時間を再計算
+- ソース並べ替え時: 全チャプターの時間を再計算
+
+再計算ロジックが複雑になり、エラーが連鎖的に伝播しやすい構造だった。
+
+### 設計判断
+
+**相対時間方式（B案）を採用**:
+
+| 方式 | 保持データ | メリット | デメリット |
+|------|-----------|----------|-----------|
+| A. 絶対時間 | 累積時間 | 表示がそのまま使える | 操作時に全チャプター再計算 |
+| B. 相対時間 | ローカル時間 + source_index | 操作時の影響範囲が限定的 | 表示時に変換が必要 |
+
+**B案のメリット**:
+- ソース並べ替え: `source_index` のみ更新（時間は不変）
+- ソース挿入: 後続チャプターの `source_index` をシフト
+- ソース削除: 該当チャプターを削除、残りの `source_index` をシフト
+- エラーが連鎖しにくい
+
+### 実装変更
+
+#### 1. ChapterInfo dataclass（models.py）
+
+```python
+# Before
+@dataclass
+class ChapterInfo:
+    time_ms: int  # 累積時間（絶対時間）
+    title: str
+
+# After
+@dataclass
+class ChapterInfo:
+    local_time_ms: int  # ソースファイル内のローカル時間
+    title: str
+    source_index: Optional[int] = None  # 所属ソースのインデックス
+
+    def get_absolute_time_ms(self, source_offsets: List[int]) -> int:
+        """累積時間（絶対時間）を計算"""
+        if self.source_index is not None and 0 <= self.source_index < len(source_offsets):
+            return source_offsets[self.source_index] + self.local_time_ms
+        return self.local_time_ms
+
+    # 後方互換プロパティ
+    @property
+    def time_ms(self) -> int:
+        return self.local_time_ms
+```
+
+#### 2. テーブルのUserRoleデータ
+
+```python
+# 各セルに保持するデータ
+time_item.setData(Qt.ItemDataRole.UserRole, color)           # 色
+time_item.setData(Qt.ItemDataRole.UserRole + 1, source_idx)  # ソースインデックス
+time_item.setData(Qt.ItemDataRole.UserRole + 2, local_time_ms)  # ローカル時間 (NEW)
+```
+
+#### 3. ヘルパーメソッド追加
+
+- `_get_source_offsets()`: 各ソースの開始オフセット（累積時間）を計算
+- `_rebuild_chapter_table_from_data()`: チャプターデータからテーブルを再構築
+
+#### 4. 更新されたメソッド（main_workspace.py）
+
+| メソッド | 変更内容 |
+|----------|----------|
+| `_add_chapter()` | ローカル時間を計算してUserRole+2に保存 |
+| `_rebuild_chapters_after_insert()` | source_indexのシフトのみ（時間不変） |
+| `_rebuild_chapters_after_source_move()` | source_indexの再マッピング |
+| `_load_chapters()` | 絶対時間からローカル時間に変換 |
+| `_load_embedded_chapters()` | 相対時間として読み込み |
+| `_generate_chapters_from_sources()` | local_time_ms=0で生成 |
+
+#### 5. Workers（workers.py）
+
+`ChapterInfo(time_ms=...)` → `ChapterInfo(local_time_ms=...)` に全て更新
+
+### 動作原理
+
+```
+[ソース1: 10分] [ソース2: 15分] [ソース3: 20分]
+     ↓              ↓              ↓
+  offset=0      offset=10      offset=25
+
+チャプター例:
+  - "イントロ": local=0, source=0 → 絶対時間=0
+  - "サビ1": local=5分, source=0 → 絶対時間=5分
+  - "曲2開始": local=0, source=1 → 絶対時間=10分
+  - "サビ2": local=3分, source=1 → 絶対時間=13分
+
+ソース2を削除した場合:
+  - source=0 のチャプター: 変化なし
+  - source=1 のチャプター: 削除
+  - source=2 のチャプター: source_index を 2→1 にシフト
+  - ローカル時間は全て不変
+```
+
+### 後方互換性
+
+- `ChapterInfo.time_ms` プロパティは `local_time_ms` を返す
+- `ChapterInfo.from_time_str()` は従来通り動作
+- エクスポート時は絶対時間を使用（テーブル表示から取得）
+
+### テスト項目
+
+- [ ] Add Source でファイル追加後のチャプター時間が正しい
+- [ ] Remove Source でのチャプター再計算が正しい
+- [ ] ソースの順序変更時のチャプター時間更新
+- [ ] エクスポート機能が正常動作
+
+### 波形ハイライトのシンプル化
+
+選択中ソースの波形ハイライト表示を簡素化。
+
+**Before**:
+- 半透明青背景 + 斜線ハッチ + 四角縁取り
+
+**After**:
+- 半透明青背景のみ `QColor(100, 180, 255, 40)`
+
+**変更ファイル**: `rehearsal_workflow/ui/widgets/waveform.py`
 
 ---
 
@@ -852,4 +1136,4 @@ PADは構造化プログラミング時代の産物であり、実装レベル�
 
 ---
 
-**更新**: 2026-01-06 (v2.1.27)
+**更新**: 2026-01-08

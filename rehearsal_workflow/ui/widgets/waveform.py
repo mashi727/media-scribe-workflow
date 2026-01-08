@@ -449,15 +449,9 @@ class WaveformWidget(QWidget):
         if self._duration_ms > 0:
             excluded_regions = self._get_excluded_regions()
 
-            # 表示モードに応じた色設定
-            if self._display_mode == self.MODE_SPECTROGRAM:
-                # スペクトログラム: 黄色系
-                fill_color = QColor(255, 255, 0, 60)
-                hatch_color = QColor(255, 200, 0, 120)
-            else:
-                # 波形: 赤系
-                fill_color = QColor(255, 0, 0, 40)
-                hatch_color = QColor(255, 100, 100, 120)
+            # 除外区間: 赤系（両モード共通）
+            fill_color = QColor(255, 0, 0, 40)
+            hatch_color = QColor(255, 100, 100, 120)
 
             for start_ms, end_ms in excluded_regions:
                 start_x = int(start_ms * w / self._duration_ms)
@@ -493,7 +487,7 @@ class WaveformWidget(QWidget):
         is_multi_file = len(self._file_boundaries) > 0
         marker_height = 12  # 上下のマーカー高さ
 
-        # 選択されたソース範囲をハイライト（青系の背景 + 斜線 + 四角縁取り）
+        # 選択されたソース範囲をハイライト（半透明背景のみ）
         if self._selected_range and is_multi_file:
             start_norm, end_norm = self._selected_range
             start_x = int(start_norm * w)
@@ -504,36 +498,6 @@ class WaveformWidget(QWidget):
                 # 半透明の青い背景
                 fill_color = QColor(100, 180, 255, 40)
                 painter.fillRect(start_x, 0, region_width, h, fill_color)
-
-                # 斜線ハッチングパターン（逆方向）
-                hatch_color = QColor(100, 180, 255, 80)
-                pen = QPen(hatch_color)
-                pen.setWidthF(1.5)
-                painter.setPen(pen)
-                spacing = 15
-                for offset in range(-h, region_width + h, spacing):
-                    x1 = start_x + offset + h
-                    y1 = 0
-                    x2 = start_x + offset
-                    y2 = h
-
-                    if x1 > end_x:
-                        y1 = x1 - end_x
-                        x1 = end_x
-                    if x2 < start_x:
-                        y2 = h - (start_x - x2)
-                        x2 = start_x
-
-                    if x1 > start_x and x2 < end_x:
-                        painter.drawLine(x1, y1, x2, y2)
-
-                # 四角形の縁取り
-                border_color = QColor(100, 180, 255, 240)
-                pen = QPen(border_color)
-                pen.setWidthF(1.5)
-                painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(start_x + 1, 1, region_width - 2, h - 2)
 
         # ファイル境界を描画（仮想タイムライン用）- 上下の短い線
         if self._file_boundaries:
@@ -549,8 +513,9 @@ class WaveformWidget(QWidget):
 
         # チャプターマーカーを描画（ファイル境界と被らないように）
         if self._duration_ms > 0 and self._chapters:
-            pen = QPen(QColor(255, 193, 7))  # 黄色
-            pen.setWidth(1)
+            # チャプターマーカー: 黄色（両モード共通）
+            pen = QPen(QColor(255, 193, 7))
+            pen.setWidthF(1.5)
             painter.setPen(pen)
             for ch in self._chapters:
                 x = int(ch.time_ms * w / self._duration_ms)
@@ -561,10 +526,10 @@ class WaveformWidget(QWidget):
                     # 単一ファイル: 全高の線
                     painter.drawLine(x, 0, x, h)
 
-        # 再生位置インジケータ（黄色、太め）
+        # 再生位置インジケータ（明るい黄色、太め）
         if self._duration_ms > 0:
             pos_x = int(self._playback_position * w)
-            pen = QPen(QColor(255, 235, 59))  # 黄色
+            pen = QPen(QColor(253, 224, 71))  # 明るい黄色 #fde047
             pen.setWidth(3)  # 太さ3px
             painter.setPen(pen)
             painter.drawLine(pos_x, 0, pos_x, h)
