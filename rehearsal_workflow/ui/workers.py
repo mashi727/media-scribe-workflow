@@ -271,7 +271,7 @@ class MergeWorker(QThread):
             self.error_occurred.emit(str(e))
 
 
-class ExportWorker(QThread):
+class ExportWorker(QThread, TempFileManagerMixin, CancellableWorkerMixin):
     """動画書出ワーカー"""
 
     progress_update = Signal(str)  # 進捗メッセージ
@@ -315,10 +315,9 @@ class ExportWorker(QThread):
         self.cut_excluded = cut_excluded  # 除外区間をカットするかどうか
         self.cover_image = cover_image  # カバー画像パス（音声のみの場合）
         self.is_audio_only = is_audio_only  # 音声のみ入力フラグ
-        self._temp_files: List[str] = []  # 一時ファイル管理
+        self._init_temp_manager()  # TempFileManagerMixin
+        self._init_cancellable()  # CancellableWorkerMixin
         self.font_path = detect_system_font()  # プラットフォーム別フォント
-        self._cancelled = False  # キャンセルフラグ
-        self._process: Optional[subprocess.Popen] = None  # ffmpegプロセス
 
         # 除外チャプターの処理
         self._excluded_segments: List[Tuple[int, int]] = []  # (start_ms, end_ms)
@@ -332,13 +331,6 @@ class ExportWorker(QThread):
             self._keep_segments = [(0, self.total_duration_ms)] if self.total_duration_ms > 0 else []
             self._adjusted_chapters = self.chapters.copy()
             self._adjusted_duration_ms = self.total_duration_ms
-
-    def cancel(self):
-        """エクスポートをキャンセル"""
-        self._cancelled = True
-        # プロセスが動作中なら強制終了
-        if self._process and self._process.poll() is None:
-            self._process.kill()
 
     def _process_excluded_chapters(self):
         """除外チャプター（--で始まる）を処理し、保持区間と調整後チャプターを計算"""
@@ -546,16 +538,6 @@ class ExportWorker(QThread):
         filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
 
         return ",".join(filters)
-
-    def _cleanup_temp_files(self):
-        """一時ファイルを削除"""
-        for f in self._temp_files:
-            try:
-                if os.path.exists(f):
-                    os.remove(f)
-            except Exception:
-                pass
-        self._temp_files.clear()
 
     def _create_audio_trim_filter(self) -> str:
         """音声の除外区間をカットして結合するffmpegフィルターを生成"""
@@ -1470,7 +1452,7 @@ def sanitize_filename(name: str) -> str:
     return sanitized if sanitized else "chapter"
 
 
-class SplitExportWorker(QThread):
+class SplitExportWorker(QThread, TempFileManagerMixin, CancellableWorkerMixin):
     """チャプターごとに分割エクスポートするワーカー"""
 
     progress_update = Signal(str)  # 進捗メッセージ
@@ -1504,16 +1486,9 @@ class SplitExportWorker(QThread):
         self.colorspace = colorspace or ColorspaceInfo()
         self.is_audio_only = is_audio_only
         self.overlay_title = overlay_title
-        self._cancelled = False
-        self._process: Optional[subprocess.Popen] = None
-        self._temp_files: List[str] = []
+        self._init_cancellable()  # CancellableWorkerMixin
+        self._init_temp_manager()  # TempFileManagerMixin
         self.font_path = detect_system_font()
-
-    def cancel(self):
-        """エクスポートをキャンセル"""
-        self._cancelled = True
-        if self._process and self._process.poll() is None:
-            self._process.kill()
 
     def _get_chapter_segments(self) -> List[Tuple[int, int, int, str]]:
         """
@@ -1563,16 +1538,6 @@ class SplitExportWorker(QThread):
         )
         # パディング追加（偶数サイズ保証）
         return f"{drawtext},pad=ceil(iw/2)*2:ceil(ih/2)*2"
-
-    def _cleanup_temp_files(self):
-        """一時ファイルを削除"""
-        for f in self._temp_files:
-            try:
-                if os.path.exists(f):
-                    os.remove(f)
-            except Exception:
-                pass
-        self._temp_files.clear()
 
     def run(self):
         """チャプターごとに分割エクスポート"""
@@ -1678,7 +1643,7 @@ def _get_ytdlp_install_hint() -> str:
         return "pip install -U yt-dlp"
 
 
-class YouTubeDownloadWorker(QThread):
+class YouTubeDownloadWorker(QThread, CancellableWorkerMixin):
     """YouTube動画ダウンロードワーカー
 
     yt-dlpを使用してYouTube動画をダウンロードする。
@@ -1699,17 +1664,9 @@ class YouTubeDownloadWorker(QThread):
         self.output_dir = output_dir
         self.download_subs = download_subs
         self.sub_lang = sub_lang
-        self._cancelled = False
-        self._process: Optional[subprocess.Popen] = None
+        self._init_cancellable()  # CancellableWorkerMixin
         self._ydl = None  # ライブラリ使用時
         self._using_bundled = False  # 同梱版使用中フラグ
-
-    def cancel(self):
-        """ダウンロードをキャンセル"""
-        self._cancelled = True
-        if self._process:
-            self._process.terminate()
-        # ライブラリモードのキャンセルは progress_hook 内で処理
 
     @staticmethod
     def get_ytdlp_strategy() -> Tuple[str, str, str]:
