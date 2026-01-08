@@ -77,6 +77,105 @@ def build_drawtext_filter(
     return "".join(parts)
 
 
+# ====================
+# Mixin クラス
+# ====================
+
+
+class TempFileManagerMixin:
+    """一時ファイルの作成・クリーンアップを管理するMixin
+
+    使用方法:
+        class MyWorker(QThread, TempFileManagerMixin):
+            def __init__(self):
+                super().__init__()
+                self._init_temp_manager()
+
+            def run(self):
+                try:
+                    tmpfile = self._create_temp_file('.txt', 'myprefix_')
+                    # ... 処理 ...
+                finally:
+                    self._cleanup_temp_files()
+    """
+
+    _temp_files: List[str]
+
+    def _init_temp_manager(self) -> None:
+        """一時ファイルマネージャを初期化"""
+        self._temp_files = []
+
+    def _create_temp_file(self, suffix: str = '', prefix: str = 'vce_') -> str:
+        """一時ファイルを作成し、パスを返す
+
+        Args:
+            suffix: ファイル拡張子 (例: '.txt', '.jpg')
+            prefix: ファイル名プレフィックス
+
+        Returns:
+            作成した一時ファイルのパス
+        """
+        fd, tmpfile = tempfile.mkstemp(suffix=suffix, prefix=prefix)
+        os.close(fd)
+        self._temp_files.append(tmpfile)
+        return tmpfile
+
+    def _add_temp_file(self, path: str) -> None:
+        """既存のファイルを一時ファイルリストに追加（クリーンアップ対象に）"""
+        self._temp_files.append(path)
+
+    def _cleanup_temp_files(self) -> None:
+        """一時ファイルを全て削除"""
+        for f in self._temp_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except OSError:
+                pass  # 削除失敗は無視
+        self._temp_files.clear()
+
+
+class CancellableWorkerMixin:
+    """キャンセル可能なワーカーのMixin
+
+    使用方法:
+        class MyWorker(QThread, CancellableWorkerMixin):
+            def __init__(self):
+                super().__init__()
+                self._init_cancellable()
+
+            def run(self):
+                while not self._is_cancelled():
+                    # ... 処理 ...
+                    pass
+    """
+
+    _cancelled: bool
+    _process: Optional[subprocess.Popen]
+
+    def _init_cancellable(self) -> None:
+        """キャンセル機能を初期化"""
+        self._cancelled = False
+        self._process = None
+
+    def cancel(self) -> None:
+        """処理をキャンセル"""
+        self._cancelled = True
+        if self._process and self._process.poll() is None:
+            try:
+                self._process.kill()
+            except OSError:
+                pass
+
+    def _is_cancelled(self) -> bool:
+        """キャンセルされたかチェック"""
+        return self._cancelled
+
+    def _set_process(self, process: subprocess.Popen) -> None:
+        """監視対象のプロセスを設定"""
+        self._process = process
+
+
 class MergeWorker(QThread):
     """音声ファイル結合の準備処理を行うワーカースレッド"""
 
