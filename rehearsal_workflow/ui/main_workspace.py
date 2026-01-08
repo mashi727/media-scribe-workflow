@@ -147,10 +147,13 @@ class DropOverlay(QWidget):
         # 透明にしてマウスイベントはドロップのみ受け取る
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background: transparent;")
+        # クリックでフォーカスを取得可能にする
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
     def mousePressEvent(self, event):
         # 左クリックで再生/停止シグナルを発行
         if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()  # フォーカスを取得
             self.clicked.emit()
             event.accept()
         else:
@@ -234,19 +237,6 @@ class DropOverlay(QWidget):
             """)
         else:
             self.setStyleSheet("background: transparent;")
-
-    def mousePressEvent(self, event):
-        # マウスクリックは下のウィジェットに透過
-        event.ignore()
-
-    def mouseReleaseEvent(self, event):
-        event.ignore()
-
-    def mouseMoveEvent(self, event):
-        event.ignore()
-
-    def mouseDoubleClickEvent(self, event):
-        event.ignore()
 
 
 class AudioDeviceComboBox(QComboBox):
@@ -2963,6 +2953,9 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         # ソースがあれば自動的にメディアプレーヤーに読み込み
         if self._state.sources:
             self._load_source_media()
+            # 単一ソースの場合、同名.txtチャプターファイルを自動読み込み
+            if len(self._state.sources) == 1:
+                self._try_load_chapter_file(self._state.sources[0].path)
 
     def _add_sources(self):
         """ソースファイルを追加（選択位置の後に挿入）"""
@@ -3078,13 +3071,38 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                     'color': color
                 })
 
-        # 新しいソースのチャプターを作成（ファイル名、ローカル時間0）
+        # 新しいソースのチャプターを作成
+        # 同名.txtファイルがあればそこからチャプターを読み込み、なければファイル名でデフォルト作成
         new_chapters = []
         for i in range(num_inserted):
             src = self._state.sources[insert_index + i]
+            source_index = insert_index + i
+            chapter_path = src.path.with_suffix('.txt')
+
+            if chapter_path.exists():
+                # チャプターファイルから読み込み
+                try:
+                    parsed_chapters = self._parse_chapter_file(str(chapter_path))
+                    if parsed_chapters:
+                        for ch in parsed_chapters:
+                            new_chapters.append({
+                                'title': ch.title,
+                                'source_index': source_index,
+                                'local_time_ms': ch.local_time_ms,
+                                'color': QColor("#f0f0f0")
+                            })
+                        self._log_panel.info(
+                            f"Auto-loaded chapters from: {chapter_path.name}",
+                            source="Add"
+                        )
+                        continue
+                except Exception as e:
+                    self._log_panel.debug(f"Failed to load chapter file: {e}", source="Add")
+
+            # チャプターファイルがない場合はデフォルト（ファイル名、ローカル時間0）
             new_chapters.append({
                 'title': src.path.stem,
-                'source_index': insert_index + i,
+                'source_index': source_index,
                 'local_time_ms': 0,
                 'color': QColor("#f0f0f0")
             })
@@ -3163,6 +3181,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         # 波形にチャプターを反映
         self._update_waveform_chapters()
+        # チャプタースキップボタンを更新
+        self._update_chapter_buttons()
 
     def _update_source_info(self):
         """ソース情報表示を更新"""
@@ -3435,6 +3455,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._source_list.set_sources(self._state.sources)
             # 波形を再生成
             self._start_waveform_generation(self._state.sources[0].path)
+            # ベースファイル名を更新
+            self._update_base_filename_from_first_source()
 
             # 再生中のソースが削除された場合、先頭から再生を開始
             if need_reload_media:
@@ -3507,6 +3529,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._source_list.set_sources(self._state.sources)
             # 波形を再生成
             self._start_waveform_generation(self._state.sources[0].path)
+            # ベースファイル名を更新
+            self._update_base_filename_from_first_source()
 
             # 再生中のソースが削除された場合、先頭から再生を開始
             if need_reload_media:
@@ -3537,6 +3561,14 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             f"Removed {len(source_indices_to_remove)} source(s) with all their chapters",
             source="UI"
         )
+
+    def _update_base_filename_from_first_source(self):
+        """先頭ソースのファイル名でベースファイル名を更新"""
+        if self._state.sources:
+            first_file = self._state.sources[0].path
+            base_name = first_file.stem
+            self._output_edit.setText(base_name)
+            self._log_panel.debug(f"Base filename updated: {base_name}", source="UI")
 
     def _update_position_after_removal(self):
         """削除後の波形位置と時間表示を更新"""
@@ -5438,8 +5470,15 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._state.work_dir = video_path.parent
             self.work_dir_changed.emit(self._state.work_dir)
             self._log_panel.info(f"Working directory: {video_path.parent}", source="Drop")
-            # ソースを設定（複数動画対応）
-            self._state.sources = [SourceFile(path=p) for p in videos]
+            # ソースを設定（複数動画対応、duration_msを取得）
+            self._state.sources = [
+                SourceFile(
+                    path=p,
+                    duration_ms=detect_video_duration(str(p)) or 0,
+                    file_type=p.suffix[1:].lower()
+                )
+                for p in videos
+            ]
             self._prepare_for_new_source()
             self._load_source_media()
             if len(videos) == 1:
@@ -5453,8 +5492,15 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._state.work_dir = audios[0].parent
             self.work_dir_changed.emit(self._state.work_dir)
             self._log_panel.info(f"Working directory: {audios[0].parent}", source="Drop")
-            # 音声ファイル: ソースとして設定
-            self._state.sources = [SourceFile(path=p) for p in audios]
+            # 音声ファイル: ソースとして設定（duration_msを取得）
+            self._state.sources = [
+                SourceFile(
+                    path=p,
+                    duration_ms=detect_video_duration(str(p)) or 0,
+                    file_type=p.suffix[1:].lower()
+                )
+                for p in audios
+            ]
             self._prepare_for_new_source()
             # 複数MP3の場合、チャプターを自動生成
             if len(audios) > 1:
@@ -5468,27 +5514,47 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 self._log_panel.info(f"Dropped {len(audios)} audio files", source="Drop")
 
     def _add_sources_to_existing(self, new_paths: list, chapter_files: list):
-        """既存ソースに追加"""
-        added_count = 0
+        """既存ソースに追加（再生中ソースの後に挿入、チャプターファイル自動読み込み）"""
+        # 重複を除外
+        paths_to_add = []
         for path in new_paths:
-            # 重複チェック
             if any(s.path == path for s in self._state.sources):
                 self._log_panel.debug(f"Skipped duplicate: {path.name}", source="Drop")
                 continue
-            # ソースを追加
-            self._state.sources.append(SourceFile(path=path))
-            added_count += 1
-            # チャプターを自動生成（ソース追加時）
-            self._add_chapter_for_source(len(self._state.sources) - 1)
+            paths_to_add.append(path)
 
-        if added_count > 0:
-            # UIを更新
-            self._source_list.set_sources(self._state.sources)
-            self._update_waveform_chapters()
-            self._update_chapter_buttons()
-            self._update_chapter_drag_enabled()
-            self._update_output_preview()
-            self._log_panel.info(f"Added {added_count} file(s)", source="Drop")
+        if not paths_to_add:
+            return
+
+        # 挿入位置を決定（再生中ソースの後）
+        current_idx = self._source_list.get_current_index()
+        insert_index = current_idx + 1 if current_idx >= 0 else len(self._state.sources)
+
+        # ソースを挿入（duration_msを取得して設定）
+        for i, path in enumerate(paths_to_add):
+            duration_ms = detect_video_duration(str(path)) or 0
+            self._state.sources.insert(
+                insert_index + i,
+                SourceFile(path=path, duration_ms=duration_ms, file_type=path.suffix[1:].lower())
+            )
+
+        # チャプターを再構築（_rebuild_chapters_after_insertがチャプターファイルも読み込む）
+        self._rebuild_chapters_after_insert(insert_index, len(paths_to_add))
+
+        # UIを更新
+        self._source_list.set_sources(self._state.sources)
+        self._update_waveform_chapters()
+        self._update_chapter_buttons()
+        self._update_chapter_drag_enabled()
+        self._update_output_preview()
+
+        # 波形を再生成
+        self._start_waveform_generation(self._state.sources[0].path)
+
+        self._log_panel.info(
+            f"Added {len(paths_to_add)} file(s) after position {insert_index}",
+            source="Drop"
+        )
 
     def _try_load_chapter_file(self, source_path: Path):
         """同名.txtチャプターファイルがあれば自動読み込み"""
