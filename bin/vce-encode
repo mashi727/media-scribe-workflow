@@ -1,0 +1,829 @@
+#!/usr/bin/env python3
+"""
+vce-encode - Video Chapter Editor プロジェクトファイルをエンコード
+
+Usage:
+    vce-encode <project.vce.json> [options]
+
+Options:
+    -o, --output PATH     出力ファイルパス（デフォルト: プロジェクト設定に従う）
+    -e, --encoder ID      エンコーダ (libx264, h264_videotoolbox, hevc_videotoolbox)
+    -q, --quality INDEX   品質インデックス (0=最高, 1=高, 2=中, 3=低)
+    --no-chapters         チャプター埋め込みを無効化
+    --no-cut              除外チャプター（--で始まる）をカットしない
+    --dry-run             実行せずに計画を表示
+    -v, --verbose         詳細ログを表示
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Tuple, Dict, Any
+
+# ffmpegパス検出
+def get_ffmpeg_path() -> str:
+    """ffmpegパスを取得"""
+    import shutil
+
+    # static-ffmpegを試行
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except ImportError:
+        pass
+
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+
+    raise RuntimeError("ffmpeg not found. Install ffmpeg or static-ffmpeg package.")
+
+
+def get_ffprobe_path() -> str:
+    """ffprobeパスを取得"""
+    import shutil
+
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except ImportError:
+        pass
+
+    path = shutil.which("ffprobe")
+    if path:
+        return path
+
+    raise RuntimeError("ffprobe not found.")
+
+
+@dataclass
+class SourceFile:
+    """ソースファイル情報"""
+    path: Path
+    duration_ms: int = 0
+    video_params: Optional['VideoParams'] = None
+
+
+@dataclass
+class ChapterInfo:
+    """チャプター情報"""
+    local_time_ms: int
+    title: str
+    source_index: int = 0
+
+
+@dataclass
+class SegmentInfo:
+    """抽出するセグメント情報"""
+    source_index: int
+    start_ms: int
+    end_ms: int
+    output_start_ms: int
+
+    @property
+    def duration_ms(self) -> int:
+        return self.end_ms - self.start_ms
+
+
+def detect_duration_ms(path: Path) -> int:
+    """ffprobeで動画の長さを検出（ミリ秒）"""
+    ffprobe = get_ffprobe_path()
+    cmd = [
+        ffprobe, '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'json',
+        str(path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        duration = float(data.get('format', {}).get('duration', 0))
+        return int(duration * 1000)
+    return 0
+
+
+def detect_stream_durations(path: Path) -> Tuple[int, int]:
+    """映像と音声の長さを個別に検出（ミリ秒）"""
+    ffprobe = get_ffprobe_path()
+    cmd = [
+        ffprobe, '-v', 'error',
+        '-show_entries', 'stream=codec_type,duration',
+        '-of', 'json',
+        str(path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    video_ms = 0
+    audio_ms = 0
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        for stream in data.get('streams', []):
+            duration = float(stream.get('duration', 0))
+            if stream.get('codec_type') == 'video':
+                video_ms = int(duration * 1000)
+            elif stream.get('codec_type') == 'audio':
+                audio_ms = int(duration * 1000)
+    return video_ms, audio_ms
+
+
+@dataclass
+class VideoParams:
+    """映像パラメータ"""
+    width: int
+    height: int
+    fps_num: int  # フレームレート分子
+    fps_den: int  # フレームレート分母
+
+    @property
+    def fps(self) -> float:
+        return self.fps_num / self.fps_den if self.fps_den else 0
+
+    def __str__(self) -> str:
+        return f"{self.width}x{self.height}@{self.fps:.2f}fps"
+
+
+def detect_video_params(path: Path) -> Optional[VideoParams]:
+    """動画の解像度とフレームレートを検出"""
+    ffprobe = get_ffprobe_path()
+    cmd = [
+        ffprobe, '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,r_frame_rate',
+        '-of', 'json',
+        str(path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        streams = data.get('streams', [])
+        if streams:
+            s = streams[0]
+            width = s.get('width', 0)
+            height = s.get('height', 0)
+            fps_str = s.get('r_frame_rate', '30/1')
+            if '/' in fps_str:
+                fps_num, fps_den = map(int, fps_str.split('/'))
+            else:
+                fps_num, fps_den = int(float(fps_str)), 1
+            return VideoParams(width, height, fps_num, fps_den)
+    return None
+
+
+def calculate_extraction_plan(
+    sources: List[SourceFile],
+    chapters: List[ChapterInfo],
+    cut_excluded: bool = True
+) -> Tuple[List[SegmentInfo], List[ChapterInfo], int]:
+    """
+    各ソースから抽出すべきセグメントと、調整後チャプターを計算
+    """
+    if not sources:
+        return [], [], 0
+
+    EXCLUDE_PREFIX = "--"
+
+    # カットしない場合は全ソースをそのまま使用
+    if not cut_excluded:
+        segments = []
+        adjusted_chapters = []
+        output_offset = 0
+
+        for i, source in enumerate(sources):
+            segments.append(SegmentInfo(
+                source_index=i,
+                start_ms=0,
+                end_ms=source.duration_ms,
+                output_start_ms=output_offset
+            ))
+            for ch in chapters:
+                src_idx = ch.source_index if ch.source_index is not None else 0
+                if src_idx == i:
+                    adjusted_chapters.append(ChapterInfo(
+                        local_time_ms=output_offset + ch.local_time_ms,
+                        title=ch.title,
+                        source_index=i
+                    ))
+            output_offset += source.duration_ms
+
+        return segments, adjusted_chapters, output_offset
+
+    # ソースごとにチャプターをグループ化
+    chapters_by_source: Dict[int, List[ChapterInfo]] = {}
+    for ch in chapters:
+        idx = ch.source_index if ch.source_index is not None else 0
+        if idx not in chapters_by_source:
+            chapters_by_source[idx] = []
+        chapters_by_source[idx].append(ch)
+
+    # 各ソースのチャプターをローカル時間でソート
+    for idx in chapters_by_source:
+        chapters_by_source[idx].sort(key=lambda c: c.local_time_ms)
+
+    segments = []
+    adjusted_chapters = []
+    output_offset = 0
+
+    for source_idx, source in enumerate(sources):
+        source_chapters = chapters_by_source.get(source_idx, [])
+        source_duration = source.duration_ms
+
+        if not source_chapters:
+            segments.append(SegmentInfo(
+                source_index=source_idx,
+                start_ms=0,
+                end_ms=source_duration,
+                output_start_ms=output_offset
+            ))
+            output_offset += source_duration
+            continue
+
+        # 除外区間を特定
+        excluded_ranges: List[Tuple[int, int]] = []
+        for i, ch in enumerate(source_chapters):
+            if ch.title.startswith(EXCLUDE_PREFIX):
+                start_ms = ch.local_time_ms
+                if i + 1 < len(source_chapters):
+                    end_ms = source_chapters[i + 1].local_time_ms
+                else:
+                    end_ms = source_duration
+                excluded_ranges.append((start_ms, end_ms))
+
+        # 保持区間を計算
+        keep_ranges: List[Tuple[int, int]] = []
+        current_pos = 0
+        for ex_start, ex_end in sorted(excluded_ranges):
+            if current_pos < ex_start:
+                keep_ranges.append((current_pos, ex_start))
+            current_pos = ex_end
+        if current_pos < source_duration:
+            keep_ranges.append((current_pos, source_duration))
+
+        if not keep_ranges:
+            keep_ranges = [(0, source_duration)]
+
+        # セグメントに追加
+        for keep_start, keep_end in keep_ranges:
+            segment_output_start = output_offset
+
+            segments.append(SegmentInfo(
+                source_index=source_idx,
+                start_ms=keep_start,
+                end_ms=keep_end,
+                output_start_ms=segment_output_start
+            ))
+
+            for ch in source_chapters:
+                if not ch.title.startswith(EXCLUDE_PREFIX) and keep_start <= ch.local_time_ms < keep_end:
+                    adjusted_time = segment_output_start + (ch.local_time_ms - keep_start)
+                    adjusted_chapters.append(ChapterInfo(
+                        local_time_ms=adjusted_time,
+                        title=ch.title,
+                        source_index=source_idx
+                    ))
+
+            output_offset += (keep_end - keep_start)
+
+    return segments, adjusted_chapters, output_offset
+
+
+def format_time(ms: int) -> str:
+    """ミリ秒を HH:MM:SS.mmm 形式に変換"""
+    total_sec = ms // 1000
+    millis = ms % 1000
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+    seconds = total_sec % 60
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def format_time_short(ms: int) -> str:
+    """ミリ秒を H:MM:SS 形式に変換（短縮）"""
+    total_sec = ms // 1000
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+    seconds = total_sec % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def detect_bitrate_kbps(path: Path) -> int:
+    """ffprobeで動画のビットレートを検出（kbps）"""
+    ffprobe = get_ffprobe_path()
+    cmd = [
+        ffprobe, '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=bit_rate',
+        '-of', 'json',
+        str(path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        streams = data.get('streams', [])
+        if streams:
+            bitrate = streams[0].get('bit_rate')
+            if bitrate:
+                return int(bitrate) // 1000
+    # フォールバック: format全体のビットレート
+    cmd = [
+        ffprobe, '-v', 'error',
+        '-show_entries', 'format=bit_rate',
+        '-of', 'json',
+        str(path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        bitrate = data.get('format', {}).get('bit_rate')
+        if bitrate:
+            return int(bitrate) // 1000
+    return 4000  # デフォルト
+
+
+def get_encoder_args(encoder_id: str, bitrate_kbps: int, crf: int) -> List[str]:
+    """エンコーダ引数を取得"""
+    if encoder_id == "libx264":
+        return ['-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium']
+    elif encoder_id == "h264_videotoolbox":
+        return ['-c:v', 'h264_videotoolbox', '-b:v', f'{bitrate_kbps}k']
+    elif encoder_id == "hevc_videotoolbox":
+        return ['-c:v', 'hevc_videotoolbox', '-b:v', f'{bitrate_kbps}k', '-tag:v', 'hvc1']
+    else:
+        return ['-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium']
+
+
+class ProjectEncoder:
+    """プロジェクトファイルのエンコーダ"""
+
+    QUALITY_PRESETS = [
+        ("最高", 8000, 18),
+        ("高", 6000, 21),
+        ("中", 4000, 23),
+        ("低", 2000, 28),
+    ]
+
+    def __init__(self, project_path: Path, verbose: bool = False):
+        self.project_path = project_path
+        self.project_dir = project_path.parent
+        self.verbose = verbose
+        self.temp_files: List[Path] = []
+
+        # プロジェクト読み込み
+        with open(project_path, 'r', encoding='utf-8') as f:
+            self.project = json.load(f)
+
+        self.sources: List[SourceFile] = []
+        self.chapters: List[ChapterInfo] = []
+
+    def log(self, msg: str):
+        """ログ出力"""
+        print(msg, flush=True)
+
+    def debug(self, msg: str):
+        """デバッグログ"""
+        if self.verbose:
+            print(f"  [DEBUG] {msg}", flush=True)
+
+    def load_sources(self):
+        """ソースファイルを読み込み、duration・映像パラメータを検出"""
+        self.log("Loading sources...")
+        for i, source_name in enumerate(self.project.get('sources', [])):
+            source_path = self.project_dir / source_name
+            if not source_path.exists():
+                raise FileNotFoundError(f"Source not found: {source_path}")
+
+            self.debug(f"Detecting duration: {source_name}")
+            duration_ms = detect_duration_ms(source_path)
+            video_params = detect_video_params(source_path)
+            self.sources.append(SourceFile(
+                path=source_path,
+                duration_ms=duration_ms,
+                video_params=video_params
+            ))
+            params_str = f", {video_params}" if video_params else ""
+            self.log(f"  [{i+1}] {source_name} ({format_time_short(duration_ms)}{params_str})")
+
+    def load_chapters(self):
+        """チャプターを読み込み"""
+        for ch_data in self.project.get('chapters', []):
+            self.chapters.append(ChapterInfo(
+                local_time_ms=ch_data.get('local_time_ms', 0),
+                title=ch_data.get('title', ''),
+                source_index=ch_data.get('source_index', 0)
+            ))
+        self.log(f"Loaded {len(self.chapters)} chapters")
+
+    def extract_segment(self, source: SourceFile, segment: SegmentInfo,
+                        output_path: Path, encoder_id: str,
+                        bitrate_kbps: int, crf: int,
+                        target_params: Optional[VideoParams] = None,
+                        source_params: Optional[VideoParams] = None) -> bool:
+        """セグメントを抽出（異なる解像度・FPSはtarget_paramsに正規化）"""
+        start_sec = segment.start_ms / 1000.0
+        end_sec = segment.end_ms / 1000.0
+
+        ffmpeg = get_ffmpeg_path()
+
+        # フィルタチェーン構築
+        video_filters = [
+            f"trim=start={start_sec:.6f}:end={end_sec:.6f}",
+            "setpts=PTS-STARTPTS"
+        ]
+
+        # 解像度・FPSが異なる場合は正規化
+        needs_scale = False
+        needs_fps = False
+
+        if target_params and source_params:
+            if source_params.width != target_params.width or source_params.height != target_params.height:
+                needs_scale = True
+                self.debug(f"Scale: {source_params.width}x{source_params.height} → "
+                          f"{target_params.width}x{target_params.height}")
+            if source_params.fps_num != target_params.fps_num or source_params.fps_den != target_params.fps_den:
+                needs_fps = True
+                self.debug(f"FPS: {source_params.fps:.2f} → {target_params.fps:.2f}")
+
+        if needs_scale:
+            # scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2
+            # アスペクト比を維持してスケーリング、余白は黒で埋める
+            video_filters.append(
+                f"scale={target_params.width}:{target_params.height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"pad={target_params.width}:{target_params.height}:(ow-iw)/2:(oh-ih)/2"
+            )
+
+        if needs_fps:
+            video_filters.append(f"fps={target_params.fps_num}/{target_params.fps_den}")
+
+        video_filter_str = ",".join(video_filters)
+        filter_complex = (
+            f"[0:v]{video_filter_str}[v];"
+            f"[0:a]atrim=start={start_sec:.6f}:end={end_sec:.6f},"
+            f"asetpts=PTS-STARTPTS[a]"
+        )
+
+        encoder_args = get_encoder_args(encoder_id, bitrate_kbps, crf)
+
+        cmd = [
+            ffmpeg, '-y', '-hide_banner', '-loglevel', 'warning',
+            '-i', str(source.path),
+            '-filter_complex', filter_complex,
+            '-map', '[v]', '-map', '[a]',
+        ]
+        cmd.extend(encoder_args)
+        cmd.extend([
+            '-c:a', 'aac', '-b:a', '192k',
+            '-movflags', '+faststart',
+            str(output_path)
+        ])
+
+        self.debug(f"Running: {' '.join(cmd[:10])}...")
+        self.debug(f"Full cmd: {cmd}")
+        self.debug(f"Output path: {output_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "(no error message)"
+            print(f"ERROR: {error_msg[:1000]}", file=sys.stderr, flush=True)
+            print(f"Command was: {' '.join(cmd)}", file=sys.stderr, flush=True)
+            return False
+        return True
+
+    def concat_segments(self, segment_files: List[Path], output_path: Path) -> bool:
+        """セグメントを結合"""
+        if len(segment_files) == 1:
+            # 1ファイルならコピー
+            import shutil
+            shutil.copy(segment_files[0], output_path)
+            return True
+
+        ffmpeg = get_ffmpeg_path()
+
+        # concat demuxer用リスト
+        list_file = Path(tempfile.gettempdir()) / "concat_list.txt"
+        with open(list_file, 'w', encoding='utf-8') as f:
+            for seg_file in segment_files:
+                escaped = str(seg_file).replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+        self.temp_files.append(list_file)
+
+        # concat demuxerを使用（既にエンコード済みファイルの結合）
+        # -fflags +genctsでタイムスタンプを再生成
+        cmd = [
+            ffmpeg, '-y', '-hide_banner', '-loglevel', 'warning',
+            '-f', 'concat', '-safe', '0',
+            '-i', str(list_file),
+            '-c', 'copy',
+            '-fflags', '+genpts',
+            '-movflags', '+faststart',
+            str(output_path)
+        ]
+
+        self.debug(f"Concatenating {len(segment_files)} segments...")
+        self.debug(f"Concat list: {list_file}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "(no error message)"
+            print(f"ERROR: {error_msg[:1000]}", file=sys.stderr, flush=True)
+            return False
+        return True
+
+    def embed_chapters(self, input_path: Path, output_path: Path,
+                       chapters: List[ChapterInfo], total_duration_ms: int) -> bool:
+        """チャプターを埋め込み"""
+        ffmpeg = get_ffmpeg_path()
+
+        # FFmpegメタデータ形式
+        metadata_file = Path(tempfile.gettempdir()) / "chapters_metadata.txt"
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            f.write(";FFMETADATA1\n")
+            for i, ch in enumerate(chapters):
+                start_ms = ch.local_time_ms
+                if i + 1 < len(chapters):
+                    end_ms = chapters[i + 1].local_time_ms
+                else:
+                    end_ms = total_duration_ms
+                # ミリ秒→マイクロ秒×1000
+                f.write(f"\n[CHAPTER]\nTIMEBASE=1/1000\n")
+                f.write(f"START={start_ms}\n")
+                f.write(f"END={end_ms}\n")
+                f.write(f"title={ch.title}\n")
+        self.temp_files.append(metadata_file)
+
+        cmd = [
+            ffmpeg, '-y', '-hide_banner', '-loglevel', 'warning',
+            '-i', str(input_path),
+            '-i', str(metadata_file),
+            '-map_metadata', '1',
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            str(output_path)
+        ]
+
+        self.debug("Embedding chapters...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"ERROR: {result.stderr[:500]}", file=sys.stderr)
+            return False
+        return True
+
+    def cleanup(self):
+        """一時ファイルを削除"""
+        for f in self.temp_files:
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
+    def encode(self, output_path: Optional[Path] = None,
+               encoder_id: Optional[str] = None,
+               quality_index: Optional[int] = None,
+               bitrate_kbps: Optional[int] = None,
+               auto_bitrate: bool = False,
+               embed_chapters: bool = True,
+               cut_excluded: bool = True,
+               dry_run: bool = False) -> bool:
+        """エンコード実行"""
+        try:
+            # ソースとチャプター読み込み
+            self.load_sources()
+            self.load_chapters()
+
+            # 設定取得
+            settings = self.project.get('encode_settings', {})
+            if encoder_id is None:
+                encoder_id = settings.get('encoder', 'libx264')
+
+            # ビットレート決定
+            if bitrate_kbps is not None:
+                # 明示的に指定
+                bitrate = bitrate_kbps
+                crf = 23
+            elif auto_bitrate:
+                # ソースから自動検出（最初のソースを基準）
+                detected = detect_bitrate_kbps(self.sources[0].path)
+                bitrate = detected
+                crf = 23
+                self.log(f"Auto-detected bitrate: {bitrate} kbps")
+            elif quality_index is not None:
+                _, bitrate, crf = self.QUALITY_PRESETS[min(quality_index, len(self.QUALITY_PRESETS)-1)]
+            else:
+                # プロジェクト設定またはデフォルト
+                qi = settings.get('quality_index', 2)  # デフォルトは「中」
+                _, bitrate, crf = self.QUALITY_PRESETS[min(qi, len(self.QUALITY_PRESETS)-1)]
+
+            # 出力パス決定
+            if output_path is None:
+                output_dir = Path(self.project.get('output_dir', str(self.project_dir)))
+                output_base = self.project.get('output_base', self.project_path.stem)
+                output_path = output_dir / f"{output_base}_encoded.mp4"
+
+            # 抽出プラン計算
+            segments, adjusted_chapters, total_duration = calculate_extraction_plan(
+                self.sources, self.chapters, cut_excluded
+            )
+
+            # サマリー表示
+            total_source = sum(s.duration_ms for s in self.sources)
+            reduction = 100 - (total_duration / total_source * 100) if total_source > 0 else 0
+
+            self.log("")
+            self.log(f"=== Extraction Plan ===")
+            self.log(f"Segments: {len(segments)}")
+            self.log(f"Duration: {format_time_short(total_source)} → {format_time_short(total_duration)}")
+            if reduction > 1:
+                self.log(f"Reduction: {reduction:.1f}%")
+            self.log(f"Chapters: {len(adjusted_chapters)}")
+            self.log(f"Encoder: {encoder_id}, Bitrate: {bitrate} kbps")
+            self.log(f"Output: {output_path}")
+            self.log("")
+
+            if dry_run:
+                self.log("=== Segments ===")
+                for i, seg in enumerate(segments):
+                    src = self.sources[seg.source_index]
+                    self.log(f"  [{i+1}] {src.path.name}")
+                    self.log(f"      {format_time_short(seg.start_ms)} - {format_time_short(seg.end_ms)} "
+                             f"({format_time_short(seg.duration_ms)})")
+                self.log("")
+                self.log("=== Adjusted Chapters ===")
+                for ch in adjusted_chapters:
+                    self.log(f"  {format_time_short(ch.local_time_ms)} {ch.title}")
+                return True
+
+            # セグメント抽出
+            temp_dir = Path(tempfile.gettempdir())
+            extracted_files: List[Path] = []
+
+            # 最初のソースのパラメータを基準にする
+            target_params = self.sources[0].video_params if self.sources else None
+
+            # 異なるパラメータのソースがあるかチェック
+            has_different_params = False
+            if target_params:
+                for src in self.sources[1:]:
+                    if src.video_params and (
+                        src.video_params.width != target_params.width or
+                        src.video_params.height != target_params.height or
+                        src.video_params.fps_num != target_params.fps_num or
+                        src.video_params.fps_den != target_params.fps_den
+                    ):
+                        has_different_params = True
+                        self.log(f"Note: Multiple source formats detected, normalizing to {target_params}")
+                        break
+
+            self.log("=== Extracting Segments ===")
+            for i, segment in enumerate(segments):
+                source = self.sources[segment.source_index]
+
+                # ソース全体でかつパラメータが統一されていれば抽出不要
+                # ただし異なるパラメータがある場合は再エンコードが必要
+                can_skip = (
+                    segment.start_ms == 0 and
+                    segment.end_ms >= source.duration_ms - 100 and
+                    not has_different_params
+                )
+                if can_skip:
+                    self.log(f"  [{i+1}/{len(segments)}] {source.path.name} (full, skip extraction)")
+                    extracted_files.append(source.path)
+                    continue
+
+                temp_file = temp_dir / f"segment_{i:03d}.mp4"
+                self.temp_files.append(temp_file)
+
+                self.log(f"  [{i+1}/{len(segments)}] {source.path.name} "
+                         f"({format_time_short(segment.start_ms)}-{format_time_short(segment.end_ms)})")
+
+                if not self.extract_segment(
+                    source, segment, temp_file, encoder_id, bitrate, crf,
+                    target_params=target_params,
+                    source_params=source.video_params
+                ):
+                    return False
+
+                # セグメントファイルの検証（映像・音声を個別にチェック）
+                video_ms, audio_ms = detect_stream_durations(temp_file)
+                expected = segment.duration_ms
+
+                video_diff = abs(video_ms - expected)
+                audio_diff = abs(audio_ms - expected)
+
+                if video_diff > 1000:
+                    self.log(f"    WARNING: Video duration mismatch! Expected {format_time_short(expected)}, "
+                             f"got {format_time_short(video_ms)}")
+                if audio_diff > 1000:
+                    self.log(f"    WARNING: Audio duration mismatch! Expected {format_time_short(expected)}, "
+                             f"got {format_time_short(audio_ms)}")
+                if abs(video_ms - audio_ms) > 1000:
+                    self.log(f"    WARNING: Video/Audio mismatch! Video={format_time_short(video_ms)}, "
+                             f"Audio={format_time_short(audio_ms)}")
+
+                if video_diff <= 1000 and audio_diff <= 1000:
+                    self.debug(f"Segment verified: V={format_time_short(video_ms)}, A={format_time_short(audio_ms)}")
+
+                extracted_files.append(temp_file)
+
+            # 結合
+            self.log("")
+            self.log("=== Concatenating ===")
+            concat_output = temp_dir / "concat_output.mp4"
+            self.temp_files.append(concat_output)
+
+            if not self.concat_segments(extracted_files, concat_output):
+                return False
+            self.log(f"  Concatenated {len(extracted_files)} segments")
+
+            # 結合結果の検証（映像・音声を個別にチェック）
+            video_ms, audio_ms = detect_stream_durations(concat_output)
+            expected_total = sum(seg.duration_ms for seg in segments)
+
+            video_diff = abs(video_ms - expected_total)
+            audio_diff = abs(audio_ms - expected_total)
+
+            if video_diff > 2000:
+                self.log(f"  WARNING: Video duration mismatch! Expected {format_time_short(expected_total)}, "
+                         f"got {format_time_short(video_ms)}")
+            if audio_diff > 2000:
+                self.log(f"  WARNING: Audio duration mismatch! Expected {format_time_short(expected_total)}, "
+                         f"got {format_time_short(audio_ms)}")
+            if abs(video_ms - audio_ms) > 2000:
+                self.log(f"  WARNING: Video/Audio mismatch! Video={format_time_short(video_ms)}, "
+                         f"Audio={format_time_short(audio_ms)}")
+            else:
+                self.debug(f"Concat verified: V={format_time_short(video_ms)}, A={format_time_short(audio_ms)}")
+
+            # チャプター埋め込み
+            if embed_chapters and adjusted_chapters:
+                self.log("")
+                self.log("=== Embedding Chapters ===")
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if not self.embed_chapters(concat_output, output_path, adjusted_chapters, total_duration):
+                    return False
+                self.log(f"  Embedded {len(adjusted_chapters)} chapters")
+            else:
+                import shutil
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(concat_output), str(output_path))
+
+            self.log("")
+            self.log(f"=== Complete ===")
+            self.log(f"Output: {output_path}")
+            self.log(f"Size: {output_path.stat().st_size / 1024 / 1024:.1f} MB")
+
+            return True
+
+        finally:
+            self.cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Video Chapter Editor プロジェクトファイルをエンコード',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    vce-encode project.vce.json
+    vce-encode project.vce.json -o output.mp4
+    vce-encode project.vce.json --dry-run
+    vce-encode project.vce.json -e libx264 -q 1
+        """
+    )
+    parser.add_argument('project', type=Path, help='プロジェクトファイル (.vce.json)')
+    parser.add_argument('-o', '--output', type=Path, help='出力ファイルパス')
+    parser.add_argument('-e', '--encoder', choices=['libx264', 'h264_videotoolbox', 'hevc_videotoolbox'],
+                        help='エンコーダ')
+    parser.add_argument('-q', '--quality', type=int, choices=[0, 1, 2, 3], default=None,
+                        help='品質 (0=最高, 1=高, 2=中, 3=低)')
+    parser.add_argument('-b', '--bitrate', type=int, help='ビットレート (kbps)')
+    parser.add_argument('--auto', action='store_true', help='ソースのビットレートを自動検出して使用')
+    parser.add_argument('--no-chapters', action='store_true', help='チャプター埋め込みを無効化')
+    parser.add_argument('--no-cut', action='store_true', help='除外チャプターをカットしない')
+    parser.add_argument('--dry-run', action='store_true', help='実行せずに計画を表示')
+    parser.add_argument('-v', '--verbose', action='store_true', help='詳細ログを表示')
+
+    args = parser.parse_args()
+
+    if not args.project.exists():
+        print(f"Error: Project file not found: {args.project}", file=sys.stderr)
+        sys.exit(1)
+
+    encoder = ProjectEncoder(args.project, verbose=args.verbose)
+    success = encoder.encode(
+        output_path=args.output,
+        encoder_id=args.encoder,
+        quality_index=args.quality,
+        bitrate_kbps=args.bitrate,
+        auto_bitrate=args.auto,
+        embed_chapters=not args.no_chapters,
+        cut_excluded=not args.no_cut,
+        dry_run=args.dry_run
+    )
+
+    sys.exit(0 if success else 1)
+
+
+if __name__ == '__main__':
+    main()
