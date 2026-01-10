@@ -116,8 +116,8 @@ whisper-remote --help
 ### ステップ1: リポジトリのクローン
 
 ```bash
-git clone https://github.com/mashi727/rehearsal-workflow.git
-cd rehearsal-workflow
+git clone https://github.com/mashi727/media-scribe-workflow.git
+cd media-scribe-workflow
 ```
 
 ### ステップ2: インストールスクリプトの実行

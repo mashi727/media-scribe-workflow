@@ -12,7 +12,7 @@ Claude Codeでは、スラッシュコマンド（`/rehearsal`など）を定義
 ### プロジェクトローカル
 
 ```
-rehearsal-workflow/
+media-scribe-workflow/
 └── claude/
     └── commands/
         └── rehearsal.md

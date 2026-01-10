@@ -264,7 +264,7 @@ glossary: "music_terms.yaml"
 ## 5. ファイル構成
 
 ```
-~/.config/rehearsal-workflow/          # ユーザー設定（グローバル）
+~/.config/media-scribe-workflow/          # ユーザー設定（グローバル）
 ├── profiles/
 │   ├── orchestral_rehearsal.yaml      # オーケストラリハーサル
 │   ├── horn_lesson.yaml               # ホルンレッスン
@@ -417,4 +417,4 @@ glossary: "music_terms.yaml"
 
 - 既存カスタムコマンド: `~/.claude/commands/`
 - PAD図: `docs/pad/transcription-*.spd`
-- Video Chapter Editor: `rehearsal_workflow/ui/main_workspace.py`
+- Video Chapter Editor: `media_scribe_workflow/ui/main_workspace.py`

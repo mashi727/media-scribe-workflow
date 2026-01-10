@@ -147,8 +147,8 @@ Makefileは「ビルドツール」として設計されており、ファイル
 
 ```bash
 #!/usr/bin/env zsh
-# rehearsal-workflow.zsh - リハーサル記録作成ワークフロー
-# Usage: rehearsal-workflow.zsh <YouTube_URL>
+# media-scribe-workflow.zsh - リハーサル記録作成ワークフロー
+# Usage: media-scribe-workflow.zsh <YouTube_URL>
 
 set -euo pipefail
 
@@ -687,11 +687,11 @@ $ rehearsal-finalize "リハーサル記録.tex"
 ### 🥈 第2位: Zshスクリプト単体（Claude手動介入）
 
 #### 構成
-- `~/bin/rehearsal-workflow.zsh` - 上述の完全版zshスクリプト
+- `~/bin/media-scribe-workflow.zsh` - 上述の完全版zshスクリプト
 
 #### 使用方法
 ```bash
-$ rehearsal-workflow.zsh "https://youtu.be/VIDEO_ID"
+$ media-scribe-workflow.zsh "https://youtu.be/VIDEO_ID"
 # ダウンロード → Whisper → 【Claude手動介入】→ PDF → チャプター
 ```
 

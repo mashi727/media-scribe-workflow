@@ -714,7 +714,7 @@ graph TD
         OUTPUT["output/*.tex"]
     end
 
-    subgraph CONFIG["~/.config/rehearsal-workflow/"]
+    subgraph CONFIG["~/.config/media-scribe-workflow/"]
         subgraph PROFILES["profiles/"]
             P1["orchestral_rehearsal.yaml"]
             P2["horn_lesson.yaml"]

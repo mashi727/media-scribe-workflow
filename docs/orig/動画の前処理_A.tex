@@ -1,0 +1,232 @@
+% 動画などの前処理アプリについて
+% LuaLaTeX用ドキュメント
+\documentclass[a4paper,10pt,twocolumn]{ltjsarticle}
+
+% LuaLaTeX用フォント設定パッケージ
+\usepackage{luatexja-fontspec}
+\usepackage{amsmath,amssymb}
+\usepackage{unicode-math}
+
+% ====================
+% 欧文フォント設定 (Libertinus)
+% ====================
+\setmainfont{Libertinus Serif}[
+    BoldFont = {Libertinus Serif Bold},
+    ItalicFont = {Libertinus Serif Italic},
+    BoldItalicFont = {Libertinus Serif Bold Italic}
+]
+\setsansfont{Libertinus Sans}[
+    BoldFont = {Libertinus Sans Bold},
+    ItalicFont = {Libertinus Sans Italic}
+]
+\setmonofont{Libertinus Mono}
+
+% ====================
+% 日本語フォント設定 (原ノ味フォント)
+% ====================
+\setmainjfont{HaranoAjiMincho-Regular}[
+    BoldFont = {HaranoAjiGothic-Medium},
+    ItalicFont = {HaranoAjiMincho-Regular},
+    BoldItalicFont = {HaranoAjiGothic-Bold}
+]
+\setsansjfont{HaranoAjiGothic-Regular}[
+    BoldFont = {HaranoAjiGothic-Bold}
+]
+\setmonojfont{HaranoAjiGothic-Regular}
+
+% ====================
+% 数式フォント設定 (Libertinus Math)
+% ====================
+\setmathfont{Libertinus Math}
+
+% ファイル生成日時（JST）
+\newcommand{\generatedDate}{2026-01-07}
+\newcommand{\generatedTime}{--:--}
+
+% ヘッダー・フッター設定
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[R]{\small \generatedDate\ \generatedTime\ JST (\thepage/\pageref{LastPage})}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% その他のパッケージ
+\usepackage[margin=20mm]{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+
+\usepackage{listings}
+\usepackage{DejaVuSansMono}
+
+\lstset{
+  basicstyle=\footnotesize\ttfamily,
+  columns=fixed,
+  basewidth=0.5em,
+  keepspaces=true
+}
+
+
+
+% ハイパーリンクの色設定
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\title{動画などの前処理アプリ(\texttt{VCE})について}
+\author{massy\\{}mashi.zzz@gmail.com}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\thispagestyle{empty}
+\newpage
+
+\abstract{
+  本アプリは、video-chapter-editorというもので、
+  PCってどういうものかと申しますと、入力に対して処理\footnote{計算}を行い、結果を出力するものです。ここにユーザーとの関わりを含めて記述を行いますと、ユーザーが意図したコトを、PCが処理可能なモノにあつらえ、ユーザーが意図した処理を行い、ユーザーが意図した結果をモノとして出力する。ということになるでしょう。
+
+  本稿では、このような基本的な事項からユーザーがギャップを感じることなく、
+}
+
+
+\section{前処理とは}
+
+前処理とは、端末の中にある\textbf{動画}や\textbf{音声ファイル}を自分が扱いやすいようにする処理のことである。
+
+\section{本アプリの概要}
+
+\subsection{どのようなアプリか}
+
+本アプリは、メディアファイルに対して以下の処理を行うツールである：
+
+\begin{itemize}
+  \item メディアファイルを\textbf{標準化}（再利用性と相互運用性の確保）する
+  \item メディアファイルを編集し、有意義な単位で動画の切り出しを行う
+\end{itemize}
+
+\subsection{今後の展望}
+
+最終的には動画の\textbf{文字起こし}を行い、さらなる標準化を実現する。
+
+\section{本アプリの設計上の前提}
+
+\subsection{想定するメディアファイル}
+
+本アプリが処理対象とするメディアファイルは以下の2種類である：
+
+\begin{enumerate}
+  \item 必要な部分だけ抽出された（もしくは複数に分割された）動画・音声ファイル
+  \item 未編集の長時間動画もしくは音声ファイル
+\end{enumerate}
+
+\subsection{編集の定義}
+
+本アプリにおける「編集」とは、メディアファイルのうち：
+
+\begin{itemize}
+  \item \textbf{不要な部分}にマーキングを付与する
+  \item \textbf{必要な部分}にチャプター名を付与する
+\end{itemize}
+
+という処理を指す。
+
+\subsection{想定しているファイル処理}
+
+\begin{itemize}
+  \item 複数の画角のカットの同期
+  \item 音声のノーマライズ処理
+\end{itemize}
+
+\section{本アプリの最終的なアウトプット}
+
+\subsection{出力形式}
+
+本アプリの最終的なアウトプットは、\textbf{チャプター対応付きの動画ファイル}である。
+
+\subsection{互換性}
+
+他のアプリでもチャプター再生が可能である：
+
+\begin{itemize}
+  \item VLC media player
+  \item mplayer
+  \item iPhoneのMusic.app
+  \item その他チャプター対応プレイヤー
+\end{itemize}
+
+\section{標準化の具体例}
+
+\subsection{Video Chapter Editorによる編集}
+
+本アプリでは、Video Chapter Editor\footnote{本プロジェクトで開発したチャプター編集アプリケーション}を使用して、動画にチャプター情報を付与する。
+
+\subsubsection{主な機能}
+
+\begin{itemize}
+  \item 動画ファイルの読み込み
+  \item チャプターの追加・編集・削除
+  \item タイムスタンプの設定
+  \item チャプター情報の埋め込み
+\end{itemize}
+
+\subsection{YouTubeへのアップロード}
+
+YouTubeにアップロードすることにより、チャプター再生が可能となる。
+
+\subsubsection{チャプター再生の利点}
+
+\begin{itemize}
+  \item 視聴者が目的のセクションに直接ジャンプ可能
+  \item コメント欄にタイムスタンプを記載することで検索性向上
+  \item 動画の構造が視覚的に把握可能
+\end{itemize}
+
+\subsection{リハーサル記録への応用例}
+
+創価大学新世紀管弦楽団定期演奏会リハーサル記録を例として、以下のようなチャプター構成が可能である：
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+タイムスタンプ & 内容 \\
+\midrule
+00:00:12 & リハーサル概要 \\
+00:00:46 & 演奏開始前の準備 \\
+00:01:41 & 音量バランスの調整 \\
+00:01:55 & 呼吸法の指導 \\
+00:02:35 & 楽譜を見ずに指揮を見る \\
+00:03:24 & 音の方向性・落とし方 \\
+00:03:53 & テンション・緊張感の維持 \\
+00:04:32 & 内的聴取の重要性 \\
+00:05:39 & テンポの取り方 \\
+00:05:41 & 暗い音色の表現 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{まとめ：標準化の意義}
+
+\textbf{標準化}（再利用性と相互運用性の確保）により、以下の効果が期待できる：
+
+\begin{enumerate}
+  \item \textbf{再利用性の向上}：一度作成したコンテンツを様々な場面で活用可能
+  \item \textbf{相互運用性の確保}：異なるプラットフォーム・アプリケーション間での互換性
+  \item \textbf{検索性の向上}：チャプター情報による構造化で目的の箇所への素早いアクセス
+  \item \textbf{アーカイブ価値の向上}：メタデータ付与による長期保存と再発見の容易化
+\end{enumerate}
+
+\vspace{1em}
+\noindent
+\textit{標準化（再利用性×相互運用性の確保）って、なかなかステキでしょ！}
+
+\end{document}

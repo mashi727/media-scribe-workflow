@@ -43,7 +43,7 @@
 
 1. **専用化**: 汎用的なGUIから、リハーサル記録作成に特化
 2. **シンプル化**: 不要な機能を削除し、必要な機能に集中
-3. **統合**: 既存の`rehearsal-workflow`コマンドと直接統合
+3. **統合**: 既存の`media-scribe-workflow`コマンドと直接統合
 4. **可視化**: 3ステップワークフローの進行状況を明確化
 5. **自動化**: ファイル検出、ステータス更新を自動化
 
@@ -135,7 +135,7 @@
 
 ### 4. **統合 (Integration)**
 
-**方針**: 既存の`rehearsal-workflow`コマンドを直接呼び出し、重複を避ける
+**方針**: 既存の`media-scribe-workflow`コマンドを直接呼び出し、重複を避ける
 
 **統合されたコマンド**:
 - `rehearsal-download` - YouTube動画ダウンロード + Whisper起動
@@ -345,7 +345,7 @@ RehearsalWorkflowGUI
 └─────────────────────────────────────────┘
          ↓ 直接呼び出し
 ┌─────────────────────────────────────────┐
-│  rehearsal-workflow (既存コマンド)       │
+│  media-scribe-workflow (既存コマンド)       │
 │    ├── rehearsal-download (Zsh)        │
 │    ├── /rehearsal (Claude AI)          │
 │    └── rehearsal-finalize (Zsh)        │
@@ -613,6 +613,6 @@ def execute_step1(self):
 
 ---
 
-**作成者**: rehearsal-workflow contributors
+**作成者**: media-scribe-workflow contributors
 **更新日**: 2025-11-06
 **バージョン**: 1.0.0

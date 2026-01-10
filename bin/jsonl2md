@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""
+JSONL to Markdown converter for Claude Code session logs.
+
+Usage:
+    jsonl2md <session.jsonl> [output.md]
+    jsonl2md --date 2026-01-07  # Convert sessions from specific date
+"""
+
+import json
+import sys
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+import argparse
+
+
+def parse_timestamp(ts: str) -> Optional[datetime]:
+    """Parse ISO timestamp to datetime."""
+    try:
+        # Handle 'Z' suffix
+        ts = ts.replace('Z', '+00:00')
+        return datetime.fromisoformat(ts)
+    except:
+        return None
+
+
+def format_time(dt: datetime) -> str:
+    """Format datetime as HH:MM:SS."""
+    # Convert to JST (UTC+9)
+    jst = dt + timedelta(hours=9)
+    return jst.strftime("%H:%M:%S")
+
+
+def extract_text_content(content) -> str:
+    """Extract text from message content."""
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                block_type = block.get('type', '')
+                if block_type == 'text':
+                    parts.append(block.get('text', ''))
+                elif block_type == 'tool_use':
+                    tool_name = block.get('name', 'unknown')
+                    tool_input = block.get('input', {})
+                    # Format tool call
+                    if tool_name == 'Bash':
+                        cmd = tool_input.get('command', '')
+                        parts.append(f"[Tool: Bash] {cmd[:200]}")
+                    elif tool_name == 'Read':
+                        path = tool_input.get('file_path', '')
+                        parts.append(f"[Tool: Read] {path}")
+                    elif tool_name == 'Write':
+                        path = tool_input.get('file_path', '')
+                        parts.append(f"[Tool: Write] {path}")
+                    elif tool_name == 'Edit':
+                        path = tool_input.get('file_path', '')
+                        parts.append(f"[Tool: Edit] {path}")
+                    elif tool_name == 'Glob':
+                        pattern = tool_input.get('pattern', '')
+                        parts.append(f"[Tool: Glob] {pattern}")
+                    elif tool_name == 'Grep':
+                        pattern = tool_input.get('pattern', '')
+                        parts.append(f"[Tool: Grep] {pattern}")
+                    elif tool_name == 'Task':
+                        desc = tool_input.get('description', '')
+                        parts.append(f"[Tool: Task] {desc}")
+                    elif tool_name == 'TodoWrite':
+                        parts.append(f"[Tool: TodoWrite]")
+                    else:
+                        parts.append(f"[Tool: {tool_name}]")
+                elif block_type == 'tool_result':
+                    # Skip tool results for brevity
+                    pass
+            elif isinstance(block, str):
+                parts.append(block)
+        return '\n'.join(parts)
+
+    return str(content)
+
+
+def convert_jsonl_to_markdown(jsonl_path: Path, output_path: Optional[Path] = None) -> str:
+    """Convert JSONL session log to Markdown."""
+    messages = []
+
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+                msg_type = obj.get('type')
+
+                if msg_type == 'user':
+                    timestamp = obj.get('timestamp', '')
+                    dt = parse_timestamp(timestamp)
+                    content = obj.get('message', {}).get('content', '')
+                    if isinstance(content, list):
+                        # Extract text from content blocks
+                        text_parts = []
+                        for block in content:
+                            if isinstance(block, dict) and block.get('type') == 'text':
+                                text_parts.append(block.get('text', ''))
+                            elif isinstance(block, str):
+                                text_parts.append(block)
+                        content = '\n'.join(text_parts)
+                    messages.append({
+                        'role': 'user',
+                        'time': format_time(dt) if dt else '??:??:??',
+                        'content': content
+                    })
+
+                elif msg_type == 'assistant':
+                    msg = obj.get('message', {})
+                    content = msg.get('content', [])
+                    text = extract_text_content(content)
+                    if text.strip():
+                        # Get timestamp from parent or estimate
+                        messages.append({
+                            'role': 'assistant',
+                            'time': '',  # Assistant messages don't have timestamps
+                            'content': text
+                        })
+
+            except json.JSONDecodeError:
+                continue
+
+    # Build markdown
+    lines = []
+
+    # Determine date from first message
+    date_str = "Unknown"
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+                if obj.get('type') == 'user' and obj.get('timestamp'):
+                    dt = parse_timestamp(obj['timestamp'])
+                    if dt:
+                        jst = dt + timedelta(hours=9)
+                        date_str = jst.strftime("%Y-%m-%d")
+                    break
+            except:
+                continue
+
+    lines.append(f"# 開発ログ {date_str}")
+    lines.append("")
+    lines.append(f"メッセージ数: {len(messages)}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    last_user_time = ""
+    for msg in messages:
+        if msg['role'] == 'user':
+            last_user_time = msg['time']
+            lines.append(f"## 👤 User ({msg['time']})")
+            lines.append("")
+            lines.append(msg['content'])
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+        else:
+            time_str = last_user_time if last_user_time else "??:??:??"
+            lines.append(f"## 🤖 Assistant ({time_str})")
+            lines.append("")
+            lines.append(msg['content'])
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+    markdown = '\n'.join(lines)
+
+    if output_path:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(markdown)
+        print(f"Written: {output_path}")
+
+    return markdown
+
+
+def find_sessions_by_date(project_dir: Path, target_date: str) -> list:
+    """Find session files that contain messages from target date."""
+    sessions = []
+    target = datetime.strptime(target_date, "%Y-%m-%d")
+
+    for jsonl_file in project_dir.glob("*.jsonl"):
+        if jsonl_file.name.startswith("agent-"):
+            continue  # Skip agent sub-sessions
+
+        try:
+            with open(jsonl_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        if obj.get('type') == 'user' and obj.get('timestamp'):
+                            dt = parse_timestamp(obj['timestamp'])
+                            if dt:
+                                jst = dt + timedelta(hours=9)
+                                if jst.date() == target.date():
+                                    sessions.append(jsonl_file)
+                                    break
+                    except:
+                        continue
+        except:
+            continue
+
+    return sessions
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Convert Claude Code JSONL to Markdown')
+    parser.add_argument('input', nargs='?', help='Input JSONL file')
+    parser.add_argument('output', nargs='?', help='Output Markdown file')
+    parser.add_argument('--date', help='Convert sessions from specific date (YYYY-MM-DD)')
+    parser.add_argument('--project', help='Project directory in ~/.claude/projects/')
+
+    args = parser.parse_args()
+
+    if args.date:
+        # Find and convert sessions by date
+        if args.project:
+            project_dir = Path(os.path.expanduser(f"~/.claude/projects/{args.project}"))
+        else:
+            # Try to find current project
+            cwd = os.getcwd()
+            project_name = cwd.replace('/', '-').replace(' ', '-')
+            if project_name.startswith('-'):
+                project_name = project_name[1:]
+            project_dir = Path(os.path.expanduser(f"~/.claude/projects/{project_name}"))
+
+        if not project_dir.exists():
+            print(f"Project directory not found: {project_dir}")
+            sys.exit(1)
+
+        sessions = find_sessions_by_date(project_dir, args.date)
+        if not sessions:
+            print(f"No sessions found for date: {args.date}")
+            sys.exit(1)
+
+        for session in sessions:
+            output = Path(f"conversation_{args.date}.md")
+            convert_jsonl_to_markdown(session, output)
+
+    elif args.input:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            print(f"File not found: {input_path}")
+            sys.exit(1)
+
+        output_path = Path(args.output) if args.output else None
+        markdown = convert_jsonl_to_markdown(input_path, output_path)
+
+        if not output_path:
+            print(markdown)
+
+    else:
+        parser.print_help()
+
+
+if __name__ == '__main__':
+    main()

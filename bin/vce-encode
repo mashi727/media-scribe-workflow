@@ -131,27 +131,52 @@ def detect_stream_durations(path: Path) -> Tuple[int, int]:
 
 @dataclass
 class VideoParams:
-    """映像パラメータ"""
-    width: int
-    height: int
-    fps_num: int  # フレームレート分子
-    fps_den: int  # フレームレート分母
+    """映像パラメータ（SAR/DAR/インターレース対応）"""
+    width: int              # 格納解像度（幅）
+    height: int             # 格納解像度（高さ）
+    fps_num: int            # フレームレート分子
+    fps_den: int            # フレームレート分母
+    sar_num: int = 1        # Sample Aspect Ratio 分子
+    sar_den: int = 1        # Sample Aspect Ratio 分母
+    is_interlaced: bool = False  # インターレース
+    field_order: str = "progressive"  # field_order
 
     @property
     def fps(self) -> float:
         return self.fps_num / self.fps_den if self.fps_den else 0
 
+    @property
+    def display_width(self) -> int:
+        """SAR適用後の表示幅"""
+        if self.sar_den > 0:
+            return int(self.width * self.sar_num / self.sar_den)
+        return self.width
+
+    @property
+    def display_height(self) -> int:
+        """表示高さ（通常はheightと同じ）"""
+        return self.height
+
+    @property
+    def pixel_count(self) -> int:
+        """総ピクセル数（表示解像度ベース）"""
+        return self.display_width * self.display_height
+
     def __str__(self) -> str:
-        return f"{self.width}x{self.height}@{self.fps:.2f}fps"
+        interlace_str = "i" if self.is_interlaced else "p"
+        if self.sar_num != 1 or self.sar_den != 1:
+            return (f"{self.width}x{self.height} (display: {self.display_width}x{self.display_height}) "
+                    f"@{self.fps:.2f}fps{interlace_str}")
+        return f"{self.width}x{self.height}@{self.fps:.2f}fps{interlace_str}"
 
 
 def detect_video_params(path: Path) -> Optional[VideoParams]:
-    """動画の解像度とフレームレートを検出"""
+    """動画の解像度、フレームレート、SAR、インターレースを検出"""
     ffprobe = get_ffprobe_path()
     cmd = [
         ffprobe, '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,r_frame_rate',
+        '-show_entries', 'stream=width,height,r_frame_rate,sample_aspect_ratio,field_order',
         '-of', 'json',
         str(path)
     ]
@@ -163,13 +188,77 @@ def detect_video_params(path: Path) -> Optional[VideoParams]:
             s = streams[0]
             width = s.get('width', 0)
             height = s.get('height', 0)
+
+            # フレームレート
             fps_str = s.get('r_frame_rate', '30/1')
             if '/' in fps_str:
                 fps_num, fps_den = map(int, fps_str.split('/'))
             else:
                 fps_num, fps_den = int(float(fps_str)), 1
-            return VideoParams(width, height, fps_num, fps_den)
+
+            # SAR (Sample Aspect Ratio / Pixel Aspect Ratio)
+            sar_str = s.get('sample_aspect_ratio', '1:1')
+            sar_num, sar_den = 1, 1
+            if sar_str and sar_str != 'N/A' and ':' in sar_str:
+                try:
+                    sar_num, sar_den = map(int, sar_str.split(':'))
+                except ValueError:
+                    pass
+
+            # インターレース検出
+            field_order = s.get('field_order', 'progressive')
+            is_interlaced = field_order not in ('progressive', 'unknown', '')
+
+            return VideoParams(
+                width, height, fps_num, fps_den,
+                sar_num, sar_den, is_interlaced, field_order
+            )
     return None
+
+
+def calculate_target_params(sources: List[SourceFile]) -> Optional[VideoParams]:
+    """
+    複数ソースの結合時のターゲットパラメータを計算
+
+    方針:
+    - 解像度: 最小ピクセル数（表示解像度ベース）のソースに合わせる
+    - フレームレート: 最小fpsに合わせる
+    - インターレース: 常にプログレッシブ（デインターレース）
+    - SAR: 1:1（正方形ピクセル）
+    """
+    params_list = [s.video_params for s in sources if s.video_params]
+    if not params_list:
+        return None
+
+    if len(params_list) == 1:
+        p = params_list[0]
+        return VideoParams(
+            width=p.display_width,
+            height=p.display_height,
+            fps_num=p.fps_num,
+            fps_den=p.fps_den,
+            sar_num=1,
+            sar_den=1,
+            is_interlaced=False,
+            field_order="progressive"
+        )
+
+    # 最小ピクセル数のソースを見つける
+    min_params = min(params_list, key=lambda p: p.pixel_count)
+
+    # 最小fpsを見つける
+    min_fps_params = min(params_list, key=lambda p: p.fps)
+
+    return VideoParams(
+        width=min_params.display_width,
+        height=min_params.display_height,
+        fps_num=min_fps_params.fps_num,
+        fps_den=min_fps_params.fps_den,
+        sar_num=1,
+        sar_den=1,
+        is_interlaced=False,
+        field_order="progressive"
+    )
 
 
 def calculate_extraction_plan(
@@ -422,7 +511,7 @@ class ProjectEncoder:
                         bitrate_kbps: int, crf: int,
                         target_params: Optional[VideoParams] = None,
                         source_params: Optional[VideoParams] = None) -> bool:
-        """セグメントを抽出（異なる解像度・FPSはtarget_paramsに正規化）"""
+        """セグメントを抽出（異なる解像度・FPS・インターレースはtarget_paramsに正規化）"""
         start_sec = segment.start_ms / 1000.0
         end_sec = segment.end_ms / 1000.0
 
@@ -434,28 +523,46 @@ class ProjectEncoder:
             "setpts=PTS-STARTPTS"
         ]
 
-        # 解像度・FPSが異なる場合は正規化
+        # スケーリング・デインターレース・FPS変換の判定
+        needs_deinterlace = False
         needs_scale = False
         needs_fps = False
 
         if target_params and source_params:
-            if source_params.width != target_params.width or source_params.height != target_params.height:
+            # デインターレース判定
+            if source_params.is_interlaced:
+                needs_deinterlace = True
+                self.debug(f"Deinterlace: {source_params.field_order} → progressive")
+
+            # スケーリング判定（表示解像度ベースで比較）
+            if (source_params.display_width != target_params.width or
+                source_params.display_height != target_params.height):
                 needs_scale = True
-                self.debug(f"Scale: {source_params.width}x{source_params.height} → "
+                self.debug(f"Scale: {source_params.display_width}x{source_params.display_height} → "
                           f"{target_params.width}x{target_params.height}")
+
+            # FPS変換判定
             if source_params.fps_num != target_params.fps_num or source_params.fps_den != target_params.fps_den:
                 needs_fps = True
                 self.debug(f"FPS: {source_params.fps:.2f} → {target_params.fps:.2f}")
 
+        # 1. デインターレース（インターレースソースの場合）
+        if needs_deinterlace:
+            video_filters.append("yadif=mode=1")
+
+        # 2. スケーリング（アスペクト比を維持してパディング）
         if needs_scale:
-            # scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2
-            # アスペクト比を維持してスケーリング、余白は黒で埋める
             video_filters.append(
                 f"scale={target_params.width}:{target_params.height}:"
                 f"force_original_aspect_ratio=decrease,"
                 f"pad={target_params.width}:{target_params.height}:(ow-iw)/2:(oh-ih)/2"
             )
 
+        # 3. SAR=1:1に設定（正方形ピクセル）- スケーリング時は必須
+        if needs_scale or needs_deinterlace:
+            video_filters.append("setsar=1")
+
+        # 4. フレームレート変換
         if needs_fps:
             video_filters.append(f"fps={target_params.fps_num}/{target_params.fps_den}")
 
@@ -626,6 +733,9 @@ class ProjectEncoder:
                 self.sources, self.chapters, cut_excluded
             )
 
+            # ターゲットパラメータを計算（最小解像度・最小fps・プログレッシブ）
+            target_params = calculate_target_params(self.sources)
+
             # サマリー表示
             total_source = sum(s.duration_ms for s in self.sources)
             reduction = 100 - (total_duration / total_source * 100) if total_source > 0 else 0
@@ -637,6 +747,8 @@ class ProjectEncoder:
             if reduction > 1:
                 self.log(f"Reduction: {reduction:.1f}%")
             self.log(f"Chapters: {len(adjusted_chapters)}")
+            if target_params:
+                self.log(f"Target: {target_params}")
             self.log(f"Encoder: {encoder_id}, Bitrate: {bitrate} kbps")
             self.log(f"Output: {output_path}")
             self.log("")
@@ -658,33 +770,45 @@ class ProjectEncoder:
             temp_dir = Path(tempfile.gettempdir())
             extracted_files: List[Path] = []
 
-            # 最初のソースのパラメータを基準にする
-            target_params = self.sources[0].video_params if self.sources else None
-
             # 異なるパラメータのソースがあるかチェック
             has_different_params = False
-            if target_params:
-                for src in self.sources[1:]:
+            if target_params and len(self.sources) > 1:
+                for src in self.sources:
                     if src.video_params and (
-                        src.video_params.width != target_params.width or
-                        src.video_params.height != target_params.height or
+                        src.video_params.display_width != target_params.width or
+                        src.video_params.display_height != target_params.height or
                         src.video_params.fps_num != target_params.fps_num or
-                        src.video_params.fps_den != target_params.fps_den
+                        src.video_params.fps_den != target_params.fps_den or
+                        src.video_params.is_interlaced
                     ):
                         has_different_params = True
-                        self.log(f"Note: Multiple source formats detected, normalizing to {target_params}")
                         break
+
+                if has_different_params:
+                    self.log(f"Note: Sources will be normalized to target format")
 
             self.log("=== Extracting Segments ===")
             for i, segment in enumerate(segments):
                 source = self.sources[segment.source_index]
 
                 # ソース全体でかつパラメータが統一されていれば抽出不要
-                # ただし異なるパラメータがある場合は再エンコードが必要
+                # ただし以下の場合は再エンコードが必要:
+                # - 異なるパラメータのソースがある
+                # - ソースがインターレース
+                # - SAR != 1:1 (アナモルフィック)
+                source_needs_processing = False
+                if source.video_params:
+                    source_needs_processing = (
+                        source.video_params.is_interlaced or
+                        source.video_params.sar_num != 1 or
+                        source.video_params.sar_den != 1
+                    )
+
                 can_skip = (
                     segment.start_ms == 0 and
                     segment.end_ms >= source.duration_ms - 100 and
-                    not has_different_params
+                    not has_different_params and
+                    not source_needs_processing
                 )
                 if can_skip:
                     self.log(f"  [{i+1}/{len(segments)}] {source.path.name} (full, skip extraction)")
