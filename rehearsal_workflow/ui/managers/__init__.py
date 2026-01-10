@@ -5,15 +5,16 @@ managers - MainWorkspaceから抽出されたマネージャークラス群
 """
 
 from .playback_manager import PlaybackManager
+from .chapter_manager import ChapterManager, ChapterData
 
 # 以下は順次実装予定
-# from .chapter_manager import ChapterManager
 # from .export_orchestrator import ExportOrchestrator
 # from .source_manager import SourceFileManager
 
 __all__ = [
     "PlaybackManager",
-    # "ChapterManager",
+    "ChapterManager",
+    "ChapterData",
     # "ExportOrchestrator",
     # "SourceFileManager",
 ]
