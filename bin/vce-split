@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""
+vce-split - Video Chapter Editor プロジェクトをチャプターごとに分割
+
+Usage:
+    vce-split <project.vce.json> [options]
+
+Options:
+    -o, --output-dir PATH  出力ディレクトリ（デフォルト: プロジェクト設定に従う）
+    -e, --encoder ID       エンコーダ (libx264, h264_videotoolbox, hevc_videotoolbox)
+    -q, --quality INDEX    品質インデックス (0=最高, 1=高, 2=中, 3=低)
+    --audio-only           音声のみ出力（MP3）
+    --overlay-title        チャプタータイトルを映像に焼き込み
+    --dry-run              実行せずに計画を表示
+    -v, --verbose          詳細ログを表示
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+
+def get_ffmpeg_path() -> str:
+    """ffmpegパスを取得"""
+    import shutil
+
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except ImportError:
+        pass
+
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+
+    raise RuntimeError("ffmpeg not found. Install ffmpeg or static-ffmpeg package.")
+
+
+def get_ffprobe_path() -> str:
+    """ffprobeパスを取得"""
+    import shutil
+
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except ImportError:
+        pass
+
+    path = shutil.which("ffprobe")
+    if path:
+        return path
+
+    raise RuntimeError("ffprobe not found.")
+
+
+@dataclass
+class ChapterInfo:
+    """チャプター情報"""
+    local_time_ms: int
+    title: str
+    source_index: int = 0
+
+
+@dataclass
+class SourceFile:
+    """ソースファイル情報"""
+    path: Path
+    duration_ms: int = 0
+
+
+def detect_duration_ms(path: Path) -> int:
+    """ffprobeで動画の長さを検出（ミリ秒）"""
+    ffprobe = get_ffprobe_path()
+    cmd = [
+        ffprobe, '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'json',
+        str(path)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        duration = float(data.get('format', {}).get('duration', 0))
+        return int(duration * 1000)
+    return 0
+
+
+def format_time(ms: int) -> str:
+    """ミリ秒を HH:MM:SS.mmm 形式に変換"""
+    total_sec = ms // 1000
+    millis = ms % 1000
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+    seconds = total_sec % 60
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
+def format_time_short(ms: int) -> str:
+    """ミリ秒を H:MM:SS 形式に変換（短縮）"""
+    total_sec = ms // 1000
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+    seconds = total_sec % 60
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def sanitize_filename(name: str) -> str:
+    """ファイル名に使えない文字を除去"""
+    # 特殊文字を置換
+    invalid_chars = '<>:"/\\|?*'
+    for ch in invalid_chars:
+        name = name.replace(ch, '_')
+    # 連続するアンダースコアを1つに
+    name = re.sub(r'_+', '_', name)
+    # 前後の空白とアンダースコアを除去
+    name = name.strip(' _')
+    return name[:100]  # 長さ制限
+
+
+def get_encoder_args(encoder_id: str, bitrate_kbps: int, crf: int) -> List[str]:
+    """エンコーダ引数を取得"""
+    if encoder_id == "libx264":
+        return ['-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium']
+    elif encoder_id == "h264_videotoolbox":
+        return ['-c:v', 'h264_videotoolbox', '-b:v', f'{bitrate_kbps}k']
+    elif encoder_id == "hevc_videotoolbox":
+        return ['-c:v', 'hevc_videotoolbox', '-b:v', f'{bitrate_kbps}k', '-tag:v', 'hvc1']
+    else:
+        return ['-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium']
+
+
+def detect_system_font() -> Optional[str]:
+    """システムフォントを検出"""
+    import platform
+
+    system = platform.system()
+    if system == "Darwin":
+        # macOS
+        candidates = [
+            "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+        ]
+    elif system == "Windows":
+        candidates = [
+            "C:\\Windows\\Fonts\\meiryo.ttc",
+            "C:\\Windows\\Fonts\\msgothic.ttc",
+        ]
+    else:
+        # Linux
+        candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ]
+
+    for font in candidates:
+        if Path(font).exists():
+            return font
+    return None
+
+
+class ProjectSplitter:
+    """プロジェクトファイルのチャプター分割"""
+
+    EXCLUDE_PREFIX = "--"
+    QUALITY_PRESETS = [
+        ("最高", 8000, 18),
+        ("高", 6000, 21),
+        ("中", 4000, 23),
+        ("低", 2000, 28),
+    ]
+    FONT_SIZE_RATIO = 0.054
+
+    def __init__(self, project_path: Path, verbose: bool = False):
+        self.project_path = project_path
+        self.project_dir = project_path.parent
+        self.verbose = verbose
+        self.temp_files: List[Path] = []
+
+        # プロジェクト読み込み
+        with open(project_path, 'r', encoding='utf-8') as f:
+            self.project = json.load(f)
+
+        self.sources: List[SourceFile] = []
+        self.chapters: List[ChapterInfo] = []
+        self.font_path = detect_system_font()
+
+    def log(self, msg: str):
+        """ログ出力"""
+        print(msg, flush=True)
+
+    def debug(self, msg: str):
+        """デバッグログ"""
+        if self.verbose:
+            print(f"  [DEBUG] {msg}", flush=True)
+
+    def load_sources(self):
+        """ソースファイルを読み込み、durationを検出"""
+        self.log("Loading sources...")
+        for i, source_name in enumerate(self.project.get('sources', [])):
+            source_path = self.project_dir / source_name
+            if not source_path.exists():
+                raise FileNotFoundError(f"Source not found: {source_path}")
+
+            self.debug(f"Detecting duration: {source_name}")
+            duration_ms = detect_duration_ms(source_path)
+            self.sources.append(SourceFile(path=source_path, duration_ms=duration_ms))
+            self.log(f"  [{i+1}] {source_name} ({format_time_short(duration_ms)})")
+
+    def load_chapters(self):
+        """チャプターを読み込み"""
+        for ch_data in self.project.get('chapters', []):
+            self.chapters.append(ChapterInfo(
+                local_time_ms=ch_data.get('local_time_ms', 0),
+                title=ch_data.get('title', ''),
+                source_index=ch_data.get('source_index', 0)
+            ))
+        self.log(f"Loaded {len(self.chapters)} chapters")
+
+    def get_chapter_segments(self) -> List[Tuple[int, int, int, str, int]]:
+        """
+        有効なチャプターセグメントのリストを返す
+        Returns: List of (index, start_ms, end_ms, title, source_index)
+        """
+        segments = []
+        valid_index = 0
+        use_local_time = len(self.sources) > 1
+
+        for i, chapter in enumerate(self.chapters):
+            # 除外チャプターはスキップ
+            if chapter.title.startswith(self.EXCLUDE_PREFIX):
+                continue
+
+            source_idx = chapter.source_index
+
+            if use_local_time:
+                # 複数ソースモード: ローカル時間を使用
+                start_ms = chapter.local_time_ms
+                end_ms = None
+                for j in range(i + 1, len(self.chapters)):
+                    next_ch = self.chapters[j]
+                    if next_ch.title.startswith(self.EXCLUDE_PREFIX):
+                        continue
+                    if next_ch.source_index == source_idx:
+                        end_ms = next_ch.local_time_ms
+                        break
+                    else:
+                        break
+                if end_ms is None:
+                    if source_idx < len(self.sources):
+                        end_ms = self.sources[source_idx].duration_ms
+                    else:
+                        end_ms = start_ms + 60000
+            else:
+                # 単一ソースモード
+                start_ms = chapter.local_time_ms
+                if i + 1 < len(self.chapters):
+                    for j in range(i + 1, len(self.chapters)):
+                        if not self.chapters[j].title.startswith(self.EXCLUDE_PREFIX):
+                            end_ms = self.chapters[j].local_time_ms
+                            break
+                    else:
+                        end_ms = self.sources[0].duration_ms if self.sources else start_ms + 60000
+                else:
+                    end_ms = self.sources[0].duration_ms if self.sources else start_ms + 60000
+
+            if end_ms > start_ms:
+                segments.append((valid_index, start_ms, end_ms, chapter.title, source_idx))
+                valid_index += 1
+
+        return segments
+
+    def _create_title_textfile(self, title: str) -> str:
+        """タイトル用の一時テキストファイルを作成"""
+        fd, tmpfile = tempfile.mkstemp(suffix='.txt', prefix='chapter_title_')
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(title)
+        self.temp_files.append(Path(tmpfile))
+        return tmpfile
+
+    def _create_title_overlay_filter(self, title: str, duration_sec: float) -> str:
+        """チャプタータイトル焼き込み用のフィルターを生成"""
+        if not self.font_path:
+            return "pad=ceil(iw/2)*2:ceil(ih/2)*2"
+
+        textfile = self._create_title_textfile(title)
+        # 安全なパス形式（ffmpegのdrawtextフィルター用）
+        escaped_font = self.font_path.replace("\\", "/").replace(":", "\\:")
+        escaped_textfile = textfile.replace("\\", "/").replace(":", "\\:")
+
+        drawtext = (
+            f"drawtext=fontfile='{escaped_font}':"
+            f"textfile='{escaped_textfile}':"
+            f"fontsize=h*{self.FONT_SIZE_RATIO}:"
+            f"fontcolor=white:"
+            f"borderw=2:bordercolor=black:"
+            f"box=1:boxcolor=black@0.6:boxborderw=15:"
+            f"x=(w-text_w)/2:y=h*0.325-th/2:"
+            f"enable='between(t,0,{duration_sec})'"
+        )
+        return f"{drawtext},pad=ceil(iw/2)*2:ceil(ih/2)*2"
+
+    def cleanup(self):
+        """一時ファイルを削除"""
+        for f in self.temp_files:
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
+    def split(self, output_dir: Optional[Path] = None,
+              encoder_id: Optional[str] = None,
+              quality_index: Optional[int] = None,
+              audio_only: bool = False,
+              overlay_title: bool = False,
+              dry_run: bool = False) -> bool:
+        """チャプターごとに分割出力"""
+        try:
+            # ソースとチャプター読み込み
+            self.load_sources()
+            self.load_chapters()
+
+            # 設定取得
+            settings = self.project.get('encode_settings', {})
+            if encoder_id is None:
+                encoder_id = settings.get('encoder', 'libx264')
+
+            # 品質設定
+            if quality_index is not None:
+                _, bitrate, crf = self.QUALITY_PRESETS[min(quality_index, len(self.QUALITY_PRESETS)-1)]
+            else:
+                qi = settings.get('quality_index', 2)
+                _, bitrate, crf = self.QUALITY_PRESETS[min(qi, len(self.QUALITY_PRESETS)-1)]
+
+            # 出力ディレクトリ決定
+            if output_dir is None:
+                output_dir = Path(self.project.get('output_dir', str(self.project_dir)))
+
+            output_base = self.project.get('output_base', self.project_path.stem)
+
+            # セグメント取得
+            segments = self.get_chapter_segments()
+            if not segments:
+                self.log("Error: No valid chapters to export")
+                return False
+
+            # サマリー表示
+            self.log("")
+            self.log(f"=== Split Plan ===")
+            self.log(f"Chapters: {len(segments)}")
+            self.log(f"Output format: {'MP3 (audio only)' if audio_only else 'MP4'}")
+            if not audio_only:
+                self.log(f"Encoder: {encoder_id}, Bitrate: {bitrate} kbps")
+                if overlay_title:
+                    self.log(f"Title overlay: enabled")
+            self.log(f"Output dir: {output_dir}")
+            self.log("")
+
+            if dry_run:
+                self.log("=== Planned Output Files ===")
+                for idx, start_ms, end_ms, title, source_idx in segments:
+                    safe_title = sanitize_filename(title)
+                    ext = ".mp3" if audio_only else ".mp4"
+                    if len(self.sources) > 1:
+                        base = self.sources[source_idx].path.stem
+                    else:
+                        base = output_base
+                    output_name = f"{base}_{idx + 1:02d}_{safe_title}{ext}"
+                    duration = format_time_short(end_ms - start_ms)
+                    source_name = self.sources[source_idx].path.name if source_idx < len(self.sources) else "?"
+                    self.log(f"  [{idx + 1}] {output_name}")
+                    self.log(f"      Source: {source_name} ({format_time_short(start_ms)}-{format_time_short(end_ms)}, {duration})")
+                return True
+
+            # 出力ディレクトリ作成
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # 分割エクスポート
+            self.log("=== Exporting Chapters ===")
+            completed = 0
+            total_segments = len(segments)
+
+            for idx, start_ms, end_ms, title, source_idx in segments:
+                # ファイル名生成
+                safe_title = sanitize_filename(title)
+                ext = ".mp3" if audio_only else ".mp4"
+                if len(self.sources) > 1:
+                    base = self.sources[source_idx].path.stem
+                else:
+                    base = output_base
+                output_name = f"{base}_{idx + 1:02d}_{safe_title}{ext}"
+                output_path = output_dir / output_name
+
+                self.log(f"  [{idx + 1}/{total_segments}] {title}")
+
+                # 入力ファイル
+                input_file = self.sources[source_idx].path
+
+                # ffmpegコマンド構築
+                start_sec = start_ms / 1000.0
+                duration_sec = (end_ms - start_ms) / 1000.0
+
+                cmd = [get_ffmpeg_path(), '-y', '-hide_banner', '-loglevel', 'warning']
+                cmd += ['-ss', str(start_sec)]
+                cmd += ['-i', str(input_file)]
+                cmd += ['-t', str(duration_sec)]
+
+                if audio_only:
+                    cmd += ['-vn', '-c:a', 'libmp3lame', '-q:a', '2']
+                else:
+                    encoder_args = get_encoder_args(encoder_id, bitrate, crf)
+
+                    if overlay_title:
+                        vf = self._create_title_overlay_filter(title, duration_sec)
+                        cmd += ['-vf', vf]
+
+                    cmd += encoder_args
+                    cmd += ['-c:a', 'aac', '-b:a', '192k']
+                    cmd += ['-movflags', '+faststart']
+
+                cmd.append(str(output_path))
+
+                self.debug(f"Running: {' '.join(cmd[:15])}...")
+
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    error_msg = result.stderr[:500] if result.stderr else "(no error message)"
+                    self.log(f"      ERROR: {error_msg}")
+                else:
+                    completed += 1
+                    size_mb = output_path.stat().st_size / 1024 / 1024
+                    self.log(f"      -> {output_name} ({size_mb:.1f} MB)")
+
+            self.log("")
+            self.log(f"=== Complete ===")
+            self.log(f"Exported: {completed}/{total_segments} chapters")
+
+            return completed == total_segments
+
+        finally:
+            self.cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Video Chapter Editor プロジェクトをチャプターごとに分割',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    vce-split project.vce.json
+    vce-split project.vce.json -o ./output
+    vce-split project.vce.json --dry-run
+    vce-split project.vce.json --audio-only
+    vce-split project.vce.json --overlay-title
+        """
+    )
+    parser.add_argument('project', type=Path, help='プロジェクトファイル (.vce.json)')
+    parser.add_argument('-o', '--output-dir', type=Path, help='出力ディレクトリ')
+    parser.add_argument('-e', '--encoder', choices=['libx264', 'h264_videotoolbox', 'hevc_videotoolbox'],
+                        help='エンコーダ')
+    parser.add_argument('-q', '--quality', type=int, choices=[0, 1, 2, 3], default=None,
+                        help='品質 (0=最高, 1=高, 2=中, 3=低)')
+    parser.add_argument('--audio-only', action='store_true', help='音声のみ出力（MP3）')
+    parser.add_argument('--overlay-title', action='store_true', help='チャプタータイトルを映像に焼き込み')
+    parser.add_argument('--dry-run', action='store_true', help='実行せずに計画を表示')
+    parser.add_argument('-v', '--verbose', action='store_true', help='詳細ログを表示')
+
+    args = parser.parse_args()
+
+    if not args.project.exists():
+        print(f"Error: Project file not found: {args.project}", file=sys.stderr)
+        sys.exit(1)
+
+    splitter = ProjectSplitter(args.project, verbose=args.verbose)
+    success = splitter.split(
+        output_dir=args.output_dir,
+        encoder_id=args.encoder,
+        quality_index=args.quality,
+        audio_only=args.audio_only,
+        overlay_title=args.overlay_title,
+        dry_run=args.dry_run
+    )
+
+    sys.exit(0 if success else 1)
+
+
+if __name__ == '__main__':
+    main()
