@@ -1,0 +1,175 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e3f2fd', 'secondaryColor': '#f3e5f5', 'tertiaryColor': '#e8f5e9'}}}%%
+flowchart LR
+    subgraph Activity["Activity（ユーザー活動）"]
+        direction TB
+        A1["動画入手"]
+        A2["素材準備"]
+        A3["編集作業"]
+    end
+
+    subgraph External["外部（ここまで外部）"]
+        direction TB
+        subgraph YouTube["YouTube"]
+            Y1["YouTube URL"]
+            Y2["YouTube再生リスト"]
+        end
+        subgraph Local["ローカルファイル"]
+            L1["単一MP4"]
+            L2["複数MP4"]
+            L3["単一MP3"]
+            L4["複数MP3"]
+        end
+        subgraph PreProcess["前処理ツール"]
+            P1["yt-dlp"]
+            P2["video-trim"]
+            P3["ffmpeg\n（カバー画像付加）"]
+        end
+    end
+
+    subgraph VCE["VCE（Video Chapter Editor）"]
+        direction TB
+        subgraph UI["UI操作"]
+            direction TB
+            U1["Open（単一）"]
+            U2["Open（複数）"]
+            U3["Add Source"]
+            U4["Remove Source"]
+            U5["ドラッグ&ドロップ"]
+            U6["ソース並べ替え"]
+        end
+        subgraph Display["表示機能"]
+            direction TB
+            D1["動画プレビュー再生"]
+            D2["波形表示"]
+            D3["スペクトログラム"]
+            D4["仮想タイムライン"]
+            D5["チャプターマーカー"]
+            D6["ファイル番号\n（00, 01...）"]
+        end
+        subgraph Edit["編集機能"]
+            direction TB
+            E1["チャプター追加"]
+            E2["チャプター編集"]
+            E3["チャプター削除"]
+            E4["除外区間設定"]
+            E5["チャプター移動"]
+        end
+        subgraph Manager["内部Manager"]
+            direction TB
+            M1["PlaybackManager\n再生制御"]
+            M2["ChapterManager\nチャプター管理"]
+            M3["ExportOrchestrator\nエクスポート制御"]
+            M4["SourceFileManager\nソース管理"]
+        end
+    end
+
+    subgraph Output["出力（成果物）"]
+        direction TB
+        subgraph Project["プロジェクト"]
+            PJ1[".vce.json\n（意思決定の記録）"]
+        end
+        subgraph Video["動画出力"]
+            V1["チャプター付きMP4"]
+            V2["分割動画\n（チャプター単位）"]
+            V3["音声のみ抽出\n（MP3）"]
+        end
+        subgraph Text["テキスト出力"]
+            T1["YouTubeチャプター\nリスト"]
+            T2["MovieViewer用\nチャプター"]
+        end
+    end
+
+    subgraph CLI["CLI（夜間バッチ）"]
+        direction TB
+        C1["vce-encode"]
+        C2["vce-split"]
+    end
+
+    %% Activity → External
+    A1 --> Y1
+    A1 --> Y2
+    A2 --> L1
+    A2 --> L2
+    A2 --> L3
+    A2 --> L4
+
+    %% External preprocessing
+    Y1 --> P1
+    Y2 --> P1
+    L1 --> P2
+    L2 --> P2
+    L3 --> P3
+    L4 --> P3
+
+    %% External → VCE UI
+    P1 --> U1
+    P1 --> U2
+    P2 --> U1
+    P2 --> U2
+    P3 --> U1
+    P3 --> U2
+
+    %% Direct input to VCE
+    L1 -.-> U1
+    L2 -.-> U2
+    L1 -.-> U5
+    L2 -.-> U5
+
+    %% UI → Display/Edit
+    U1 --> D1
+    U2 --> D4
+    U3 --> D4
+    U5 --> D4
+    U6 --> D4
+
+    %% Display connections
+    D1 --> D2
+    D1 --> D3
+    D4 --> D5
+    D4 --> D6
+
+    %% Edit connections
+    D5 --> E1
+    D5 --> E2
+    D5 --> E3
+    D5 --> E4
+    D5 --> E5
+
+    %% Manager integration
+    D1 --> M1
+    D4 --> M4
+    E1 --> M2
+    E2 --> M2
+
+    %% VCE → Output
+    M2 --> PJ1
+    M4 --> PJ1
+    M3 --> V1
+    M3 --> V2
+    M3 --> V3
+    M2 --> T1
+    M2 --> T2
+
+    %% Project → CLI
+    PJ1 --> C1
+    PJ1 --> C2
+
+    %% CLI → Output
+    C1 --> V1
+    C2 --> V2
+    C2 --> V3
+
+    %% Styling
+    classDef activity fill:#fff9c4,stroke:#f9a825,stroke-width:2px
+    classDef external fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef vce fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef output fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    classDef cli fill:#ffecb3,stroke:#ff8f00,stroke-width:2px
+    classDef manager fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px
+
+    class A1,A2,A3 activity
+    class Y1,Y2,L1,L2,L3,L4,P1,P2,P3 external
+    class U1,U2,U3,U4,U5,U6,D1,D2,D3,D4,D5,D6,E1,E2,E3,E4,E5 vce
+    class M1,M2,M3,M4 manager
+    class PJ1,V1,V2,V3,T1,T2 output
+    class C1,C2 cli

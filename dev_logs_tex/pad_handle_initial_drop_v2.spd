@@ -1,0 +1,36 @@
+# pad_handle_initial_drop_v2.spd
+# リファクタリング後の _handle_initial_drop フロー
+
+:terminal 開始
+
+:comment SourceFileManagerでソース構築
+result = _source_manager.handle_initial_load(classified)
+
+:if result is None
+	:comment チャプターファイルのみの場合
+	:if classified.has_chapter_only
+		:call _handle_chapter_file_drop(chapters, is_audio=None)
+	:terminal 終了
+:else
+	:comment work_dir更新
+	_state.work_dir = result.work_dir
+	work_dir_changed.emit()
+	ログ: "Working directory: ..."
+
+	:comment ソース同期
+	_state.sources = result.sources
+
+	:comment UI更新
+	:call _prepare_for_new_source()
+	:call _load_source_media()
+	:call _update_base_filename_from_first_source()
+
+	:comment ログとチャプター読み込み
+	:if result.is_single
+		ログ: "Dropped {media_type}: {filename}"
+		:call _try_load_chapter_file(first_path)
+	:else
+		ログ: "Dropped N {media_type} files"
+		:call _load_chapters_for_all_sources()
+
+:terminal 終了

@@ -1,0 +1,60 @@
+# pad_load_source_media.spd
+# VCE _load_source_media フロー
+
+:terminal 開始
+
+:comment ソース存在チェック
+:if sources が空
+	:terminal 終了（何もしない）
+:else
+	_source_list.set_sources(sources)
+	first_source = sources[0]
+	ext = first_source.path.suffix.lower()
+
+	:comment ファイルタイプ判定
+	:switch ext
+	:case 動画拡張子（.mp4/.mov/.avi/.mkv）
+		_update_quality_combo_for_mode(is_audio=False)
+		:if 単一動画（len(sources) == 1）
+			:comment 単一動画処理
+			video_path = file_path
+			media_player.setSource(url)
+			play_btn.setEnabled(True)
+			_update_seek_buttons(True)
+			log: "Video loaded: filename"
+			_start_waveform_generation(file_path)
+			_load_embedded_chapters(file_path)
+		:else
+			:comment 複数動画処理（仮想タイムライン）
+			video_path = file_path（最初のファイル）
+			media_player.setSource(url)（最初のファイル）
+			play_btn.setEnabled(True)
+			_update_seek_buttons(True)
+			log: "N video files loaded (Virtual Timeline)"
+			_start_waveform_generation(file_path)
+			_load_all_embedded_chapters()
+
+	:case 音声拡張子（.mp3/.m4a/.wav）
+		_update_quality_combo_for_mode(is_audio=True)
+		:if 単一音声（len(sources) == 1）
+			:comment 単一音声処理
+			video_path = file_path
+			media_player.setSource(url)
+			play_btn.setEnabled(True)
+			_update_seek_buttons(True)
+			log: "Audio loaded: filename"
+			_start_waveform_generation(file_path)
+		:else
+			:comment 複数音声処理（仮想タイムライン）
+			video_path = file_path（最初のファイル）
+			media_player.setSource(url)（最初のファイル）
+			play_btn.setEnabled(True)
+			_update_seek_buttons(True)
+			log: "N audio files loaded (Virtual Timeline)"
+			_start_waveform_generation(file_path)
+			_load_all_embedded_chapters()
+
+	:case その他
+		警告: Unknown file type
+
+:terminal 終了

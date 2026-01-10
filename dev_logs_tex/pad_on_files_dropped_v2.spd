@@ -1,0 +1,49 @@
+# pad_on_files_dropped_v2.spd
+# リファクタリング後の _on_files_dropped フロー
+
+:terminal 開始
+
+:if file_paths が空
+	:terminal 終了（何もしない）
+:else
+	:comment Phase 1: SourceFileManagerで分類
+	classified = SourceFileManager.classify_dropped_files(file_paths)
+
+	:comment プロジェクトファイル判定
+	:if classified.has_project
+		:call _load_project(projects[0])
+		:if len(projects) > 1
+			警告ログ: "Multiple project files"
+		:terminal 終了
+
+	:comment 初回 vs 追加モード判定
+	:if self._state.sources が空
+		:call _handle_initial_drop(classified)
+		:terminal 終了
+	:else
+		:comment 追加モード（型チェック）
+		current_is_audio = self._is_audio_only
+
+		:if current_is_audio（音声モード中）
+			:if classified.has_video
+				警告: "Cannot add video in audio mode"
+				:terminal 終了
+			:else
+				:if classified.has_audio
+					:call _add_sources_to_existing(audios, chapters)
+				:else
+					:if classified.has_chapter_only
+						:call _handle_chapter_file_drop(chapters, is_audio=True)
+		:else
+			:comment 動画モード中
+			:if classified.has_audio AND NOT classified.has_video
+				警告: "Cannot add audio in video mode"
+				:terminal 終了
+			:else
+				:if classified.has_video
+					:call _add_sources_to_existing(videos, chapters)
+				:else
+					:if classified.has_chapter_only
+						:call _handle_chapter_file_drop(chapters, is_audio=False)
+
+:terminal 終了

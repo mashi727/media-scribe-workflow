@@ -1,0 +1,70 @@
+# pad_input_processing.spd
+# VCE 入力処理フロー（_on_files_dropped）
+
+:terminal 開始
+
+:comment ファイル分類
+ドロップされたファイルを分類
+project_files: .vce.json
+videos: .mp4/.mov/.avi/.mkv
+audios: .mp3/.m4a/.wav
+chapter_files: .txt
+
+:comment プロジェクトファイル判定
+:if project_files が存在
+	_load_project(project_files[0])
+	:terminal 終了（早期リターン）
+:else
+	:comment 既存ソース判定
+	:if sources が空（初回ドロップ）
+		:call _handle_initial_drop
+			:comment メディアタイプ判定
+			:switch 入力タイプ
+			:case 動画あり
+				work_dir = videos[0].parent
+				sources = [SourceFile(p) for p in videos]
+				_sync_source_manager()
+				_prepare_for_new_source()
+				_load_source_media()
+				_update_base_filename_from_first_source()
+				:if 単一動画
+					_try_load_chapter_file(video_path)
+				:else
+					_load_chapters_for_all_sources()
+			:case 音声あり（動画なし）
+				work_dir = audios[0].parent
+				sources = [SourceFile(p) for p in audios]
+				_sync_source_manager()
+				_prepare_for_new_source()
+				_load_source_media()
+				_update_base_filename_from_first_source()
+				:if 単一音声
+					_try_load_chapter_file(audio_path)
+				:else
+					_load_chapters_for_all_sources()
+			:case チャプターのみ
+				_handle_chapter_file_drop(chapter_files)
+	:else
+		:call _add_sources_to_existing
+			:comment 追加モード（型チェック）
+			:if 音声モード中
+				:if 動画ドロップ
+					警告: 音声モードに動画追加不可
+					:terminal 終了（エラー）
+				:else
+					:if 音声ドロップ
+						_add_sources_to_existing(audios, chapter_files)
+					:else
+						_handle_chapter_file_drop(chapter_files, is_audio=True)
+			:else
+				:comment 動画モード中
+				:if 音声のみドロップ
+					警告: 動画モードに音声追加不可
+					:terminal 終了（エラー）
+				:else
+					:if 動画ドロップ
+						_add_sources_to_existing(videos, chapter_files)
+					:else
+						_handle_chapter_file_drop(chapter_files, is_audio=False)
+
+:terminal 終了

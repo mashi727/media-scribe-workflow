@@ -1,0 +1,32 @@
+# pad_source_manager_handle_initial_load.spd
+# SourceFileManager.handle_initial_load() フロー
+
+:terminal 開始
+
+:comment チャプターファイルのみの場合
+:if classified.has_chapter_only
+	:terminal return None
+
+:comment 動画優先でメディアタイプ決定
+:if classified.has_video
+	media_paths = classified.videos
+	media_type = "video"
+:else
+	:if classified.has_audio
+		media_paths = classified.audios
+		media_type = "audio"
+	:else
+		:terminal return None
+
+:comment work_dir設定
+work_dir = media_paths[0].parent
+self._work_dir = work_dir
+
+:comment 各パスに対してSourceFile作成（duration検出）
+sources = [SourceFile(...) for p in media_paths]
+
+:comment 内部リスト更新
+self._sources = sources
+sources_changed.emit()
+
+:terminal return InitialLoadResult(work_dir, sources, media_type, is_single)

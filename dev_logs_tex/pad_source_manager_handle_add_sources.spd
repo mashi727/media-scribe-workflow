@@ -1,0 +1,30 @@
+# pad_source_manager_handle_add_sources.spd
+# SourceFileManager.handle_add_sources() フロー
+
+:terminal 開始
+
+:if new_paths が空
+	:terminal return None
+
+:comment 重複フィルタリング（各パスをチェック）
+paths_to_add, skipped = filter_duplicates(new_paths)
+
+:if paths_to_add が空
+	:terminal return AddSourcesResult(0, [], skipped)
+
+:comment 挿入位置決定
+:if insert_after_index >= 0
+	insert_index = insert_after_index + 1
+:else
+	insert_index = len(self._sources)
+
+:comment 各パスに対してSourceFile作成（duration検出）
+sources_to_add = [SourceFile(...) for p in paths_to_add]
+
+:comment リストに挿入（各ソースを順番に）
+self._sources.insert(insert_index + i, source)
+
+:comment シグナル発火
+sources_changed.emit()
+
+:terminal return AddSourcesResult(insert_index, sources_to_add, skipped)
