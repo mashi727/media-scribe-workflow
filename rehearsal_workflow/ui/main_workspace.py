@@ -35,6 +35,7 @@ import tempfile
 import os
 
 from .log_panel import LogPanel, LogLevel
+from .theme import ColorRole, get_theme_manager
 from .models import (
     ChapterInfo,
     ColorspaceInfo,
@@ -47,13 +48,16 @@ from .models import (
 )
 from .workers import (
     WaveformWorker, SpectrogramWorker, ExportWorker, SplitExportWorker,
-    YouTubeDownloadWorker, PlaylistInfoWorker, PlaylistDownloadWorker
+    YouTubeDownloadWorker, PlaylistInfoWorker, PlaylistDownloadWorker,
+    DurationDetectWorker, MergeWorker, CLIEncodeWorker,
+    calculate_extraction_plan, SegmentInfo
 )
-from .widgets import WaveformWidget, CenteredFileDialog
+from .widgets import WaveformWidget
 from .styles import ButtonStyles
 from .ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path, extract_chapters_with_ffmpeg, get_subprocess_kwargs
 from .dialogs import ExportSettingsDialog, PlaylistVideoSelectionDialog, ReorderSourcesDialog
 from .youtube_mixin import YouTubeDownloadMixin
+from .managers import PlaybackManager, ChapterManager, ChapterData, SourceFileManager
 
 
 # ファイル拡張子定義
@@ -181,7 +185,8 @@ class DropOverlay(QWidget):
                         self._update_style(True)
                         return
                     ext = path.suffix.lower()
-                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                    # 動画、音声、チャプターファイル(.txt)を受け付ける
+                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS or ext == '.txt':
                         event.acceptProposedAction()
                         self._drag_active = True
                         self._update_style(True)
@@ -218,7 +223,8 @@ class DropOverlay(QWidget):
                         folder = str(path)
                 else:
                     ext = path.suffix.lower()
-                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                    # 動画、音声、チャプターファイル(.txt)を収集
+                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS or ext == '.txt':
                         files.append(str(path))
 
         if folder:
@@ -232,7 +238,7 @@ class DropOverlay(QWidget):
         if active:
             self.setStyleSheet("""
                 background: rgba(59, 130, 246, 0.2);
-                border: 2px solid #3b82f6;
+                border: 2px solid #1e50a2;
                 border-radius: 4px;
             """)
         else:
@@ -267,18 +273,125 @@ class DragDropTableWidget(QTableWidget):
 
     デフォルトの行ハイライト表示ではなく、
     挿入位置を示す水平線を描画する。
+    外部ファイル（.txt）のドロップにも対応。
+
+    外部ファイルドロップ時は、ソース境界（source_indexが変わる位置）
+    にのみインジケーターを表示し、挿入位置も通知する。
     """
+
+    # 外部ファイルドロップ用シグナル: (ファイルリスト, 挿入先source_index)
+    external_files_dropped = Signal(list, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drop_indicator_row = -1  # 挿入位置（-1: 非表示）
         self._drop_indicator_above = True  # True: 行の上、False: 行の下
+        self._is_external_drag = False  # 外部ファイルドラッグ中フラグ
+        self._source_boundary_rows = []  # ソース境界の行番号リスト（各ソースの先頭行）
+        self._drop_source_index = 0  # 外部ドロップ時の挿入先source_index
         # デフォルトのドロップインジケーターを非表示
         self.setDropIndicatorShown(False)
 
+    def set_source_boundary_rows(self, boundary_rows: list):
+        """ソース境界の行番号リストを設定
+
+        Args:
+            boundary_rows: 各ソースの先頭行のリスト
+                例: [0, 3, 5] → ソース0は行0-2、ソース1は行3-4、ソース2は行5以降
+        """
+        self._source_boundary_rows = boundary_rows
+
+    def _is_external_file_drop(self, mime_data) -> bool:
+        """外部ファイルドロップかどうかを判定"""
+        if not mime_data.hasUrls():
+            return False
+        for url in mime_data.urls():
+            if url.isLocalFile():
+                path = Path(url.toLocalFile())
+                ext = path.suffix.lower()
+                if ext == '.txt':
+                    return True
+        return False
+
+    def dragEnterEvent(self, event):
+        """ドラッグ進入時: 外部ファイルまたは内部ドラッグを受け入れ"""
+        mime_data = event.mimeData()
+        if self._is_external_file_drop(mime_data):
+            self._is_external_drag = True
+            event.acceptProposedAction()
+            return
+        # 内部ドラッグの場合は親クラスに委譲
+        self._is_external_drag = False
+        super().dragEnterEvent(event)
+
+    def _find_nearest_source_boundary(self, y_pos: int) -> tuple:
+        """カーソル位置に最も近いソース境界を見つける
+
+        Args:
+            y_pos: カーソルのY座標
+
+        Returns:
+            (boundary_row, is_above, source_index): 境界の行、上/下、挿入先source_index
+        """
+        if not self._source_boundary_rows:
+            # 境界がない場合は末尾
+            return (self.rowCount() - 1, False, 0)
+
+        # 各境界の位置を計算
+        boundary_positions = []
+
+        # 先頭（最初のソースの前）
+        if self.rowCount() > 0:
+            first_row_rect = self.visualRect(self.model().index(0, 0))
+            boundary_positions.append((0, True, 0, first_row_rect.top()))
+
+        # ソース境界（各ソースの先頭行の上）
+        for i, boundary_row in enumerate(self._source_boundary_rows[1:], start=1):
+            if boundary_row < self.rowCount():
+                row_rect = self.visualRect(self.model().index(boundary_row, 0))
+                boundary_positions.append((boundary_row, True, i, row_rect.top()))
+
+        # 末尾（最後のソースの後）
+        if self.rowCount() > 0:
+            last_row_rect = self.visualRect(self.model().index(self.rowCount() - 1, 0))
+            source_count = len(self._source_boundary_rows)
+            boundary_positions.append((self.rowCount() - 1, False, source_count, last_row_rect.bottom()))
+
+        # 最も近い境界を選択
+        min_distance = float('inf')
+        nearest = (0, True, 0)
+
+        for row, is_above, source_idx, pos_y in boundary_positions:
+            distance = abs(y_pos - pos_y)
+            if distance < min_distance:
+                min_distance = distance
+                nearest = (row, is_above, source_idx)
+
+        return nearest
+
     def dragMoveEvent(self, event):
         """ドラッグ中の挿入位置を計算"""
+        mime_data = event.mimeData()
         pos = event.position().toPoint()
+
+        # 外部ファイルドロップの場合: ソース境界にインジケーター表示
+        if self._is_external_file_drop(mime_data):
+            self._is_external_drag = True
+            if self.rowCount() > 0 and self._source_boundary_rows:
+                row, is_above, source_idx = self._find_nearest_source_boundary(pos.y())
+                self._drop_indicator_row = row
+                self._drop_indicator_above = is_above
+                self._drop_source_index = source_idx
+            else:
+                # テーブルが空の場合は先頭に挿入
+                self._drop_indicator_row = -1
+                self._drop_source_index = 0
+            self.viewport().update()
+            event.acceptProposedAction()
+            return
+
+        # 内部ドラッグの場合
+        self._is_external_drag = False
         index = self.indexAt(pos)
 
         if index.isValid():
@@ -303,12 +416,35 @@ class DragDropTableWidget(QTableWidget):
     def dragLeaveEvent(self, event):
         """ドラッグ終了時にインジケーターを非表示"""
         self._drop_indicator_row = -1
+        self._is_external_drag = False
         self.viewport().update()
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
-        """ドロップ時にインジケーターを非表示"""
+        """ドロップ時の処理"""
+        mime_data = event.mimeData()
+
+        # 外部ファイルドロップの場合
+        if self._is_external_file_drop(mime_data):
+            files = []
+            for url in mime_data.urls():
+                if url.isLocalFile():
+                    path = Path(url.toLocalFile())
+                    ext = path.suffix.lower()
+                    if ext == '.txt':
+                        files.append(str(path))
+            if files:
+                # 挿入位置（source_index）も通知
+                self.external_files_dropped.emit(files, self._drop_source_index)
+            self._drop_indicator_row = -1
+            self._is_external_drag = False
+            self.viewport().update()
+            event.acceptProposedAction()
+            return
+
+        # 内部ドラッグの場合
         self._drop_indicator_row = -1
+        self._is_external_drag = False
         self.viewport().update()
         super().dropEvent(event)
 
@@ -339,8 +475,10 @@ class DragDropTableWidget(QTableWidget):
 
         # 水平線を描画
         painter = QPainter(self.viewport())
-        pen = QPen(QColor("#ef4444"))  # 赤色
-        pen.setWidth(3)
+        # 外部ドロップは青、内部ドラッグは赤
+        indicator_color = QColor("#1e50a2") if self._is_external_drag else QColor("#ef4444")
+        pen = QPen(indicator_color)
+        pen.setWidth(5)
         painter.setPen(pen)
 
         # 左端から右端まで線を引く
@@ -349,7 +487,7 @@ class DragDropTableWidget(QTableWidget):
 
         # 両端に小さな三角形を描画（挿入位置を強調）
         triangle_size = 6
-        painter.setBrush(QBrush(QColor("#ef4444")))
+        painter.setBrush(QBrush(indicator_color))
         painter.setPen(Qt.PenStyle.NoPen)
 
         # 左側の三角形
@@ -404,7 +542,8 @@ class DropVideoFrame(QFrame):
                             self._update_drag_style(True)
                             return
                         ext = path.suffix.lower()
-                        if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                        # 動画、音声、チャプターファイル(.txt)を受け付ける
+                        if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS or ext == '.txt':
                             event.acceptProposedAction()
                             self._drag_active = True
                             self._update_drag_style(True)
@@ -440,7 +579,8 @@ class DropVideoFrame(QFrame):
                         folder = str(path)
                 else:
                     ext = path.suffix.lower()
-                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS:
+                    # 動画、音声、チャプターファイル(.txt)を収集
+                    if ext in VIDEO_EXTENSIONS or ext in AUDIO_EXTENSIONS or ext == '.txt':
                         files.append(str(path))
 
         # フォルダが優先（フォルダがあればファイルは無視）
@@ -457,7 +597,7 @@ class DropVideoFrame(QFrame):
             self.setStyleSheet("""
                 QFrame {
                     background: #1a1a1a;
-                    border: 2px solid #3b82f6;
+                    border: 2px solid #1e50a2;
                     border-radius: 8px;
                 }
             """)
@@ -525,7 +665,7 @@ class SourceListWidget(QWidget):
 
         btn_style = """
             QPushButton {
-                background: #3b82f6;
+                background: #1e50a2;
                 color: white;
                 border: none;
                 border-radius: 6px;
@@ -534,7 +674,7 @@ class SourceListWidget(QWidget):
                 font-size: 12px;
             }
             QPushButton:hover {
-                background: #2563eb;
+                background: #3a6cb5;
             }
         """
 
@@ -566,7 +706,7 @@ class SourceListWidget(QWidget):
         if is_current:
             return """
                 QLabel {
-                    background: #fde047;
+                    background: #c3d825;
                     color: #000000;
                     padding: 4px 8px;
                     border-radius: 4px;
@@ -695,6 +835,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
     source_changed = Signal(list)  # List[SourceFile]
     chapter_changed = Signal(list)  # List[Chapter]
     work_dir_changed = Signal(object)  # Path - 作業ディレクトリ変更
+    output_dir_changed = Signal(object)  # Path - 出力先ディレクトリ変更
+    project_complete_changed = Signal(bool)  # 編集完了フラグ変更
 
     # プラットフォーム別等幅フォント
     MONO_FONTS = {
@@ -722,8 +864,19 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         super().__init__(parent)
         self._state = ProjectState(work_dir=work_dir or Path.cwd())
         self._log_panel: Optional[LogPanel] = None
-        self._media_player: Optional[QMediaPlayer] = None
-        self._audio_output: Optional[QAudioOutput] = None
+
+        # PlaybackManager（再生制御を委譲）
+        self._playback_manager = PlaybackManager(self)
+        # 後方互換性のためのエイリアス（段階的に削除予定）
+        self._media_player: Optional[QMediaPlayer] = self._playback_manager.media_player
+        self._audio_output: Optional[QAudioOutput] = self._playback_manager.audio_output
+
+        # ChapterManager（チャプター管理を委譲）
+        self._chapter_manager = ChapterManager(self)
+
+        # SourceFileManager（ソース管理を委譲）
+        self._source_manager = SourceFileManager(self)
+        self._source_manager.work_dir = self._state.work_dir
 
         # 波形生成スレッド
         self._waveform_thread: Optional[QThread] = None
@@ -748,6 +901,19 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         self._playlist_info_worker: Optional[PlaylistInfoWorker] = None
         self._playlist_worker: Optional[PlaylistDownloadWorker] = None
 
+        # Duration検出ワーカー（プロジェクト読み込み時の非同期処理）
+        self._duration_detect_worker: Optional[DurationDetectWorker] = None
+        self._pending_project_chapters: Optional[list] = None  # duration検出後に読み込むチャプター
+
+        # マージワーカー（複数ファイル結合の非同期処理）
+        self._merge_worker: Optional[MergeWorker] = None
+        # セグメント抽出ワーカー（必要部分のみ抽出）- 非推奨、CLIEncodeWorkerを使用
+        self._segment_extract_worker = None
+        # CLIエンコードワーカー（複数ソースのエンコード）
+        self._cli_encode_worker: Optional[CLIEncodeWorker] = None
+        # 抽出プランで計算された調整済みチャプター
+        self._extraction_adjusted_chapters: Optional[List[ChapterInfo]] = None
+
         # 埋め込みチャプターフラグ（MP4から読み込んだチャプターがあるか）
         self._has_embedded_chapters = False
 
@@ -761,11 +927,18 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         self._chapters_edited = False
 
         # 仮想タイムライン: ファイル切替後のシーク位置
+        # NOTE: これらはPlaybackManagerに移行済み。後方互換性のため残すが、使用しない
         self._pending_seek_position: Optional[int] = None
-        self._target_source_url: Optional[QUrl] = None  # 切替先のソースURL
-        self._pending_playback_state: Optional[bool] = None  # 切替前の再生状態（True=再生中）
+        self._target_source_url: Optional[QUrl] = None
+        self._pending_playback_state: Optional[bool] = None
 
         self._setup_ui()
+
+        # PlaybackManagerシグナルの接続
+        self._connect_playback_manager_signals()
+
+        # ChapterManagerシグナルの接続
+        self._connect_chapter_manager_signals()
 
     def _setup_ui(self):
         """UI構築"""
@@ -794,6 +967,92 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         # 出力プレビューを初期化
         self._update_output_preview()
+
+    def _connect_playback_manager_signals(self):
+        """PlaybackManagerのシグナルをUIに接続"""
+        pm = self._playback_manager
+
+        # ソース切り替え時のUI更新
+        pm.source_switched.connect(self._on_source_switched_by_manager)
+
+        # 再生状態変更時のアイコン更新
+        pm.playback_state_changed.connect(self._on_playback_state_changed)
+
+        # 全ソース再生完了
+        pm.media_ended.connect(self._on_media_ended)
+
+        # エラー発生時のログ出力
+        pm.error_occurred.connect(self._on_playback_error)
+
+    def _on_source_switched_by_manager(self, source_index: int):
+        """PlaybackManagerからのソース切り替え通知"""
+        if hasattr(self, '_source_list'):
+            self._source_list.set_current_index(source_index)
+        if source_index < len(self._state.sources):
+            self._state.video_path = self._state.sources[source_index].path
+            if hasattr(self, '_log_panel') and self._log_panel:
+                self._log_panel.info(
+                    f"Switched to: {self._state.sources[source_index].path.name}",
+                    source="Playback"
+                )
+
+    def _on_playback_state_changed(self, is_playing: bool):
+        """再生状態変更時のUI更新"""
+        if hasattr(self, '_play_btn'):
+            if is_playing:
+                self._play_btn.setIcon(self._pause_icon)
+            else:
+                self._play_btn.setIcon(self._play_icon)
+
+    def _on_media_ended(self):
+        """全ソース再生完了時の処理"""
+        if hasattr(self, '_log_panel') and self._log_panel:
+            self._log_panel.info("Reached end of all sources", source="Playback")
+
+    def _on_playback_error(self, error_message: str):
+        """再生エラー時の処理"""
+        if hasattr(self, '_log_panel') and self._log_panel:
+            self._log_panel.error(error_message, source="Playback")
+
+    def _connect_chapter_manager_signals(self):
+        """ChapterManagerのシグナルをUIに接続"""
+        cm = self._chapter_manager
+
+        # チャプター読み込み完了時
+        cm.chapters_loaded.connect(self._on_chapters_loaded_by_manager)
+
+        # チャプター保存完了時
+        cm.chapters_saved.connect(self._on_chapters_saved_by_manager)
+
+        # エラー発生時
+        cm.error_occurred.connect(self._on_chapter_error)
+
+    def _on_chapters_loaded_by_manager(self, filename: str):
+        """ChapterManagerからのチャプター読み込み完了通知"""
+        if hasattr(self, '_log_panel') and self._log_panel:
+            self._log_panel.info(f"Loaded chapters from: {filename}", source="Chapter")
+
+    def _on_chapters_saved_by_manager(self, filename: str):
+        """ChapterManagerからのチャプター保存完了通知"""
+        if hasattr(self, '_log_panel') and self._log_panel:
+            self._log_panel.info(f"Saved chapters to: {filename}", source="Chapter")
+
+    def _on_chapter_error(self, error_message: str):
+        """チャプターエラー時の処理"""
+        if hasattr(self, '_log_panel') and self._log_panel:
+            self._log_panel.error(error_message, source="Chapter")
+
+    # ========================================
+    # SourceFileManager同期
+    # ========================================
+
+    def _sync_source_manager(self):
+        """SourceFileManagerをself._state.sourcesと同期
+
+        self._state.sourcesが更新された後に呼び出す。
+        SourceFileManagerの時間変換メソッドを使えるようになる。
+        """
+        self._source_manager.set_sources(self._state.sources)
 
     def _create_left_panel(self) -> QWidget:
         """左側パネル（操作系を操作順に配置）"""
@@ -915,13 +1174,12 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(6)
 
-        # メディアプレイヤー設定
-        self._media_player = QMediaPlayer()
-        self._audio_output = QAudioOutput()
-        self._media_player.setAudioOutput(self._audio_output)
-        self._audio_output.setVolume(1.0)  # OSボリュームに任せる
+        # メディアプレイヤー設定（PlaybackManagerから取得）
+        # NOTE: PlaybackManagerが__init__で作成済み。ここでは参照のみ更新
+        self._media_player = self._playback_manager.media_player
+        self._audio_output = self._playback_manager.audio_output
 
-        # シグナル接続
+        # シグナル接続（既存のUI更新用 - 段階的にPlaybackManagerに移行予定）
         self._media_player.positionChanged.connect(self._on_position_changed)
         self._media_player.durationChanged.connect(self._on_duration_changed)
         self._media_player.errorOccurred.connect(self._on_media_error)
@@ -931,30 +1189,34 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         ctrl_row = QHBoxLayout()
         ctrl_row.addStretch()  # 左側スペーサー
 
-        # 時間移動ボタンのスタイル（戻る系: パステルブルー）
+        # 時間移動ボタンのスタイル（軽めのアウトラインスタイル）
         back_btn_style = """
             QPushButton {
-                background: #2a3a4d;
-                color: #a8c8e8;
-                border: 1px solid #3a5068;
+                background: #2a2a2a;
+                color: #a0a0a0;
+                border: 1px solid #4a4a4a;
                 border-radius: 12px;
                 font-size: 18px;
                 font-weight: bold;
                 padding: 4px 2px;
             }
             QPushButton:hover {
-                background: #354a5f;
+                background: #3a3a3a;
+                color: #f0f0f0;
+                border-color: #1e50a2;
             }
             QPushButton:pressed {
-                background: #405a70;
+                background: #1e50a2;
+                color: #ffffff;
             }
             QPushButton:disabled {
-                background: #1a2530;
-                color: #4a5a6a;
+                background: #1a1a1a;
+                color: #555555;
+                border-color: #333333;
             }
         """
 
-        # 時間移動ボタンのスタイル（進む系: パステルブルーに統一）
+        # 時間移動ボタンのスタイル（進む系: 統一）
         forward_btn_style = back_btn_style
 
         # -10s
@@ -998,31 +1260,36 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         is_windows = platform.system() == "Windows"
         symbol_font_css = "font-family: 'Segoe UI Symbol';" if is_windows else ""
 
-        # 前のチャプター（パステルブルー - 戻る系と統一）
-        prev_chapter_style = f"""
+        # チャプタースキップボタン（軽めのアウトラインスタイル）
+        chapter_btn_style = f"""
             QPushButton {{
-                background: #2a3a4d;
-                color: #a8c8e8;
-                border: 1px solid #3a5068;
+                background: #2a2a2a;
+                color: #a0a0a0;
+                border: 1px solid #4a4a4a;
                 border-radius: 14px;
                 font-size: 20px;
                 font-weight: bold;
                 {symbol_font_css}
             }}
             QPushButton:hover {{
-                background: #354a5f;
+                background: #3a3a3a;
+                color: #f0f0f0;
+                border-color: #1e50a2;
             }}
             QPushButton:pressed {{
-                background: #405a70;
+                background: #1e50a2;
+                color: #ffffff;
             }}
             QPushButton:disabled {{
-                background: #1a2530;
-                color: #4a5a6a;
+                background: #1a1a1a;
+                color: #555555;
+                border-color: #333333;
             }}
         """
 
-        # 次のチャプター（パステルブルーに統一）
-        next_chapter_style = prev_chapter_style
+        # 前後チャプターは同じスタイル
+        prev_chapter_style = chapter_btn_style
+        next_chapter_style = chapter_btn_style
 
         # 前のチャプター
         self._prev_chapter_btn = QPushButton("|◀")
@@ -1045,19 +1312,18 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 border: none;
             }
             QPushButton:hover {
-                background: rgba(255, 255, 255, 0.1);
-                border-radius: 8px;
+                background: transparent;
             }
             QPushButton:pressed {
-                background: rgba(255, 255, 255, 0.2);
+                background: transparent;
             }
             QPushButton:disabled {
                 opacity: 0.3;
             }
         """)
-        self._play_btn.setFixedSize(55, 55)
+        self._play_btn.setFixedSize(75, 75)
         from PySide6.QtCore import QSize
-        self._play_btn.setIconSize(QSize(55, 55))
+        self._play_btn.setIconSize(QSize(75, 75))
         self._play_btn.setToolTip("再生/一時停止 (Space)")
         self._play_btn.clicked.connect(self._toggle_playback)
         self._play_btn.setEnabled(False)
@@ -1122,7 +1388,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             QPushButton {
                 background: #1e40af;
                 color: #ffffff;
-                border: 1px solid #3b82f6;
+                border: 1px solid #1e50a2;
                 border-radius: 4px;
                 padding: 4px 12px;
             }
@@ -1132,7 +1398,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             QPushButton:checked {
                 background: #166534;
                 color: #ffffff;
-                border-color: #22c55e;
+                border-color: #c3d825;
             }
             QPushButton:checked:hover {
                 background: #15803d;
@@ -1169,7 +1435,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             QComboBox QAbstractItemView {
                 background: #1a1a1a;
                 color: #f0f0f0;
-                selection-background-color: #3b82f6;
+                selection-background-color: #1e50a2;
             }
         """)
         self._audio_device_combo.setToolTip("音声出力デバイス")
@@ -1182,7 +1448,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         # 時間表示
         self._time_label = QLabel("0:00:00.000 / 0:00:00.000")
-        self._time_label.setStyleSheet("color: #22c55e;")
+        self._time_label.setStyleSheet("color: #c3d825;")
         self._time_label.setFont(self._get_monospace_font(18))
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         bottom_row.addWidget(self._time_label)
@@ -1213,15 +1479,10 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         output_row = QHBoxLayout()
         output_row.setSpacing(8)
 
-        self._output_label = QLabel("ベース名 | ")
-        self._output_label.setFixedWidth(100)
+        self._output_label = QLabel("出力 | ")
+        self._output_label.setFixedWidth(60)
         self._output_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._output_label.setStyleSheet("""
-            QLabel {
-                color: #c0c0c0;
-                font-size: 15px;
-            }
-        """)
+        self._output_label.setStyleSheet("color: #c0c0c0; font-size: 15px;")
         output_row.addWidget(self._output_label)
 
         self._output_edit = QLineEdit()
@@ -1234,8 +1495,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 color: #f0f0f0;
                 border: 1px solid #3a3a3a;
                 border-radius: 6px;
-                padding: 10px 16px;
-                font-size: 16px;
+                padding: 8px 12px;
+                font-size: 14px;
             }
             QLineEdit:focus {
                 border: 1px solid #60a5fa;
@@ -1243,53 +1504,13 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         """)
         output_row.addWidget(self._output_edit, stretch=1)
 
-        browse_btn = QPushButton("...")
-        browse_btn.setFixedSize(40, 40)
-        browse_btn.setStyleSheet("""
-            QPushButton {
-                background: #2a2a2a;
-                color: #a0a0a0;
-                border: 1px solid #3a3a3a;
-                border-radius: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: #3a3a3a;
-                color: #f0f0f0;
-            }
-        """)
-        browse_btn.setToolTip("出力先を変更")
-        browse_btn.clicked.connect(self._browse_output)
-        output_row.addWidget(browse_btn)
+        # プレビューラベル（入力欄の右側、差分のみ表示）
+        self._output_preview_label = QLabel("")
+        self._output_preview_label.setStyleSheet("color: #c3d825; font-size: 14px;")
+        self._output_preview_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        output_row.addWidget(self._output_preview_label)
 
         main_layout.addLayout(output_row)
-
-        # === 出力ファイル名プレビュー ===
-        preview_row = QHBoxLayout()
-        preview_row.setSpacing(8)
-        preview_row.setContentsMargins(0, 0, 0, 0)
-
-        self._preview_prefix_label = QLabel("ファイル名 | ")
-        self._preview_prefix_label.setFixedWidth(100)
-        self._preview_prefix_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._preview_prefix_label.setStyleSheet("""
-            QLabel {
-                color: #c0c0c0;
-                font-size: 16px;
-            }
-        """)
-        preview_row.addWidget(self._preview_prefix_label)
-
-        self._output_preview_label = QLabel("")
-        self._output_preview_label.setStyleSheet("""
-            QLabel {
-                color: #c0c0c0;
-                font-size: 16px;
-            }
-        """)
-        preview_row.addWidget(self._output_preview_label, stretch=1)
-
-        main_layout.addLayout(preview_row)
 
         # === 動画プレビュー（最大化）===
         # 外枠フレーム
@@ -1370,7 +1591,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 border-radius: 8px;
             }
         """)
-        frame.setMinimumHeight(120)
+        frame.setMinimumHeight(100)
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -1418,7 +1639,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         load_btn.setFixedWidth(80)
         load_btn.setStyleSheet("""
             QPushButton {
-                background: #3b82f6;
+                background: #1e50a2;
                 color: white;
                 border: none;
                 border-radius: 6px;
@@ -1427,7 +1648,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 font-size: 12px;
             }
             QPushButton:hover {
-                background: #2563eb;
+                background: #3a6cb5;
             }
         """)
         load_btn.setToolTip("チャプターファイルを読み込み")
@@ -1466,7 +1687,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 padding: 4px;
             }
             QTableWidget::item:selected {
-                background: #3b82f6;
+                background: rgba(30, 80, 162, 0.5);
+                color: #ffffff;
             }
             QHeaderView {
                 background: #000000;
@@ -1498,6 +1720,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._table.currentCellChanged.connect(self._on_current_cell_changed)
         # 行ドラッグ＆ドロップはeventFilterでDrop処理（_sync_after_row_drop）
+        # 外部ファイル（チャプターファイル）のドロップ
+        self._table.external_files_dropped.connect(self._on_chapter_files_dropped)
         # ファイル境界線デリゲートを設定
         self._boundary_delegate = FileBoundaryDelegate(self._table, self)
         self._table.setItemDelegate(self._boundary_delegate)
@@ -1660,24 +1884,48 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 padding: 6px 20px;
             }
             QMenu::item:selected {
-                background: #3b82f6;
+                background: #1e50a2;
             }
         """)
-        project_menu.addAction("Save Project...", self._save_project)
         project_menu.addAction("Load Project...", self._load_project)
+        project_menu.addSeparator()
+        # Complete チェックボックス（QWidgetActionで実装）
+        from PySide6.QtWidgets import QWidgetAction, QCheckBox
+        self._complete_checkbox = QCheckBox("Complete")
+        self._complete_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #f0f0f0;
+                font-size: 16px;
+                padding: 6px 20px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #606060;
+                border-radius: 3px;
+                background: #2a2a2a;
+            }
+            QCheckBox::indicator:checked {
+                background: #c3d825;
+                border-color: #c3d825;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #a0c0e0;
+            }
+        """)
+        self._complete_checkbox.stateChanged.connect(self._on_complete_checkbox_changed)
+        complete_action = QWidgetAction(project_menu)
+        complete_action.setDefaultWidget(self._complete_checkbox)
+        project_menu.addAction(complete_action)
+        project_menu.addSeparator()
+        project_menu.addAction("Save Project...", self._save_project)
+        project_menu.addSeparator()
+        project_menu.addAction("Batch Encode...", self._batch_encode)
         self._save_project_btn.setMenu(project_menu)
         btn_layout.addWidget(self._save_project_btn)
 
-        # Encodeボタン（エンコード中はキャンセルボタンに変化）
-        self._export_btn = QPushButton("Encode")
-        self._export_btn.setFixedHeight(40)
-        self._export_btn.setStyleSheet(ButtonStyles.primary_compact())
-        self._export_btn.setToolTip("動画をエンコードして書き出す")
-        self._export_btn.clicked.connect(self._on_export_btn_clicked)
-        self._is_exporting = False  # エンコード状態フラグ
-        btn_layout.addWidget(self._export_btn)
-
-        # エンコード進捗バー（エンコード中のみ表示、残りスペースを埋める）
+        # エンコード進捗バー（ProjectとEncodeの間、エンコード中のみ表示）
         self._encode_progress = QProgressBar()
         self._encode_progress.setFixedHeight(24)
         self._encode_progress.setVisible(False)
@@ -1690,11 +1938,20 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 color: #ffffff;
             }
             QProgressBar::chunk {
-                background: #3b82f6;
+                background: #c53d43;
                 border-radius: 3px;
             }
         """)
         btn_layout.addWidget(self._encode_progress, 1)  # stretch factor 1
+
+        # Encodeボタン（エンコード中はキャンセルボタンに変化）
+        self._export_btn = QPushButton("Encode")
+        self._export_btn.setFixedHeight(40)
+        self._export_btn.setStyleSheet(ButtonStyles.primary_compact())
+        self._export_btn.setToolTip("動画をエンコードして書き出す")
+        self._export_btn.clicked.connect(self._on_export_btn_clicked)
+        self._is_exporting = False  # エンコード状態フラグ
+        btn_layout.addWidget(self._export_btn)
 
         container_layout.addWidget(btn_frame)
 
@@ -1835,16 +2092,23 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 self._chapter_overlay_label.raise_()
 
     def _browse_output(self):
-        """出力先ファイル選択"""
-        file_path, _ = CenteredFileDialog.getSaveFileName(
-            self,
-            "Save Output Video",
-            str(self._state.work_dir / "output.mp4"),
-            "MP4 Files (*.mp4);;All Files (*)"
+        """出力先ディレクトリ選択"""
+        from rehearsal_workflow.ui.dialogs import SourceSelectionDialog
+
+        # 現在の出力ディレクトリを初期値に
+        start_dir = self._state.output_dir if self._state.output_dir else self._state.work_dir
+
+        dialog = SourceSelectionDialog(
+            parent=self,
+            work_dir=start_dir,
+            mode="directory"
         )
-        if file_path:
-            self._output_edit.setText(file_path)
-            self._state.output_path = Path(file_path)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected_dir = dialog.get_selected_directory()
+            if selected_dir:
+                self._state.output_dir = selected_dir
+                self._update_output_preview()
 
     def _update_output_preview(self):
         """出力ファイル名プレビューを更新"""
@@ -1853,6 +2117,19 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         # 設定を読み取り
         settings = ExportSettingsDialog.load_settings_static()
         split_chapters = settings.get("split_chapters", False)
+
+        # 複数ソース・分割モードの判定
+        is_multi_source = len(self._state.sources) > 1
+        is_multi_split = is_multi_source and split_chapters
+
+        # 入力欄の有効/無効を切り替え
+        if is_multi_split:
+            self._output_edit.setEnabled(False)
+            self._output_edit.setPlaceholderText("(各ソースファイル名)")
+            self._output_edit.clear()
+        else:
+            self._output_edit.setEnabled(True)
+            self._output_edit.setPlaceholderText("output filename")
 
         # ベースファイル名を取得
         output_base = self._output_edit.text().strip()
@@ -1871,20 +2148,41 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         has_valid_chapters = len(valid_chapters) > 0
 
         # プレビューを更新
-        if split_chapters:
-            # 分割モード
+        if is_multi_split:
+            # 複数ソース・分割モード
             if has_valid_chapters:
+                n = len(valid_chapters)
                 first_title = valid_chapters[0].title
-                # ファイル名として使えない文字を置換
-                safe_title = re.sub(r'[\\/:*?"<>|]', '_', first_title)[:20]
-                preview = f"{base_name}_01_{safe_title}.mp4 など {len(valid_chapters)} ファイル"
+                safe_title = re.sub(r'[\\/:*?"<>|]', '_', first_title)[:15]
+                preview = f"_01_{safe_title}.mp4 ({n} files)"
             else:
-                preview = "チャプターがありません"
+                preview = "(no chapters)"
+        elif split_chapters:
+            # 単一ソース・分割モード
+            if has_valid_chapters:
+                n = len(valid_chapters)
+                first_title = valid_chapters[0].title
+                safe_title = re.sub(r'[\\/:*?"<>|]', '_', first_title)
+                base_len = len(base_name)
+                if base_len > 30:
+                    preview = f"→ {n} files"
+                elif base_len > 20:
+                    preview = f"_01_...mp4 ({n} files)"
+                else:
+                    max_title = 15 if base_len > 10 else 25
+                    safe_title = safe_title[:max_title]
+                    preview = f"_01_{safe_title}.mp4 ({n} files)"
+            else:
+                preview = "(no chapters)"
         else:
             # 一括モード
             suffix = "_chaptered.mp4" if has_valid_chapters else "_encoded.mp4"
-            preview = f"{base_name}{suffix}"
+            preview = f"+ {suffix}"
         self._output_preview_label.setText(preview)
+
+        # 出力ディレクトリ変更をシグナルで通知
+        output_dir = self._state.output_dir or self._state.work_dir
+        self.output_dir_changed.emit(output_dir)
 
     # === 動画操作 ===
 
@@ -1979,9 +2277,9 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         self._log_panel.info(f"Switched to: {source.path.name}", source="Media")
 
     def _merge_audio_files(self) -> Optional[Path]:
-        """複数の音声ファイルをffmpegで結合
+        """複数のソースファイルから音声を抽出・結合
 
-        ffmpegのconcat demuxerを使用して結合。
+        動画ファイルの場合は音声を抽出してから結合する。
         シングルクォートを含むファイル名も適切にエスケープ。
 
         Returns:
@@ -1991,21 +2289,56 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             return None
 
         try:
-            # 一時ディレクトリに出力
-            output_path = Path(tempfile.gettempdir()) / "merged_audio.mp3"
+            temp_dir = Path(tempfile.gettempdir())
+            output_path = temp_dir / "merged_audio.m4a"
+            temp_audio_files = []
+
+            # 各ソースから音声を抽出
+            for i, src in enumerate(self._state.sources):
+                is_video = src.path.suffix.lower() in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+                if is_video:
+                    # 動画から音声を抽出
+                    temp_audio = temp_dir / f"temp_audio_{i}.m4a"
+                    cmd = [
+                        get_ffmpeg_path(), '-y',
+                        '-i', str(src.path),
+                        '-vn',  # 動画を除外
+                        '-acodec', 'copy',  # 音声はそのままコピー
+                        str(temp_audio)
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if result.returncode != 0:
+                        # コピーに失敗した場合はAAC再エンコード
+                        cmd = [
+                            get_ffmpeg_path(), '-y',
+                            '-i', str(src.path),
+                            '-vn',
+                            '-acodec', 'aac', '-b:a', '192k',
+                            str(temp_audio)
+                        ]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                        if result.returncode != 0:
+                            self._log_panel.error(f"Audio extraction failed: {src.path.name}", source="Media")
+                            continue
+                    temp_audio_files.append(temp_audio)
+                else:
+                    # 音声ファイルはそのまま使用
+                    temp_audio_files.append(src.path)
+
+            if len(temp_audio_files) < 2:
+                self._log_panel.error("Not enough audio files to merge", source="Media")
+                return None
 
             # concat demuxer用のファイルリストを作成
-            list_file = Path(tempfile.gettempdir()) / "concat_list.txt"
+            list_file = temp_dir / "concat_list.txt"
             with open(list_file, 'w', encoding='utf-8') as f:
-                for src in self._state.sources:
-                    # concat demuxerではシングルクォートをエスケープする必要がある
-                    # file 'path' 形式で、パス内のシングルクォートは '\'' でエスケープ
-                    escaped_path = str(src.path).replace("'", "'\\''")
+                for audio_path in temp_audio_files:
+                    escaped_path = str(audio_path).replace("'", "'\\''")
                     f.write(f"file '{escaped_path}'\n")
 
             self._log_panel.debug(f"Concat list: {list_file}", source="Media")
 
-            # ffmpegで結合
+            # ffmpegで結合（音声なのでcopyでOK）
             cmd = [
                 get_ffmpeg_path(), '-y',
                 '-f', 'concat',
@@ -2031,6 +2364,11 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             # 一時ファイルを削除
             if list_file.exists():
                 list_file.unlink()
+            for temp_file in temp_audio_files:
+                # 元のソースファイルでない一時ファイルのみ削除
+                is_temp = temp_file.parent == temp_dir and temp_file.name.startswith("temp_audio_")
+                if is_temp and temp_file.exists():
+                    temp_file.unlink()
 
             self._log_panel.info(
                 f"Merged {len(self._state.sources)} files → {output_path.name}",
@@ -2043,6 +2381,84 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             return None
         except Exception as e:
             self._log_panel.error(f"Merge failed: {e}", source="Media")
+            return None
+
+    def _are_sources_video(self) -> bool:
+        """ソースファイルが動画かどうかを判定"""
+        video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+        if not self._state.sources:
+            return False
+        # 全てのソースが動画であれば True
+        return all(src.path.suffix.lower() in video_exts for src in self._state.sources)
+
+    def _merge_video_files(self) -> Optional[Path]:
+        """複数の動画ファイルをffmpegで結合
+
+        concat demuxerを使用して動画を結合する。
+        カット精度を確保するため常に再エンコードを行う。
+
+        Returns:
+            結合されたファイルのパス、失敗時はNone
+        """
+        if len(self._state.sources) < 2:
+            return None
+
+        try:
+            temp_dir = Path(tempfile.gettempdir())
+            output_path = temp_dir / "merged_video.mp4"
+
+            # concat demuxer用のファイルリストを作成
+            list_file = temp_dir / "concat_video_list.txt"
+            with open(list_file, 'w', encoding='utf-8') as f:
+                for src in self._state.sources:
+                    escaped_path = str(src.path).replace("'", "'\\''")
+                    f.write(f"file '{escaped_path}'\n")
+
+            self._log_panel.debug(f"Video concat list: {list_file}", source="Media")
+
+            # 再エンコードで結合（カット精度を確保）
+            cmd = [
+                get_ffmpeg_path(), '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', str(list_file),
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+                '-c:a', 'aac', '-b:a', '192k',
+                '-movflags', '+faststart',
+                str(output_path)
+            ]
+
+            self._log_panel.info("Re-encoding videos for accurate cuts...", source="Media")
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1800  # 30分タイムアウト
+            )
+
+            if result.returncode != 0:
+                self._log_panel.error(f"Video merge failed: {result.stderr[:200]}", source="Media")
+                # 一時ファイルを削除
+                if list_file.exists():
+                    list_file.unlink()
+                return None
+
+            # 一時ファイルを削除
+            if list_file.exists():
+                list_file.unlink()
+
+            self._log_panel.info(
+                f"Merged {len(self._state.sources)} videos → {output_path.name}",
+                source="Media"
+            )
+            return output_path
+
+        except subprocess.TimeoutExpired:
+            self._log_panel.error("Video merge timeout", source="Media")
+            return None
+        except Exception as e:
+            self._log_panel.error(f"Video merge failed: {e}", source="Media")
             return None
 
     def _toggle_playback(self):
@@ -2123,59 +2539,23 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
     def _get_source_offsets(self) -> List[int]:
         """各ソースの開始オフセット（累積デュレーション）を取得"""
-        offsets = [0]
-        cumulative = 0
-        for source in self._state.sources[:-1]:  # 最後以外
-            cumulative += source.duration_ms
-            offsets.append(cumulative)
-        return offsets
+        return self._source_manager.get_source_offsets()
 
     def _get_total_duration(self) -> int:
         """仮想タイムライン全体のデュレーション（ミリ秒）"""
-        return sum(s.duration_ms for s in self._state.sources)
+        return self._source_manager.total_duration_ms
 
     def _get_local_time_in_source(self, absolute_time_ms: int, source_idx: int) -> int:
-        """絶対時間（仮想タイムライン）をソース内のローカル時間に変換
-
-        Args:
-            absolute_time_ms: 仮想タイムライン上の絶対時間（ミリ秒）
-            source_idx: 対象ソースのインデックス
-
-        Returns:
-            ソース内でのローカル時間（ミリ秒）
-        """
-        if source_idx is None or source_idx < 0:
-            return absolute_time_ms
-
-        offsets = self._get_source_offsets()
-        if source_idx < len(offsets):
-            return max(0, absolute_time_ms - offsets[source_idx])
-        return absolute_time_ms
+        """絶対時間（仮想タイムライン）をソース内のローカル時間に変換"""
+        return self._source_manager.get_local_time_in_source(absolute_time_ms, source_idx)
 
     def _virtual_to_source(self, virtual_pos: int) -> tuple:
         """仮想位置を (ソースインデックス, ローカルオフセット) に変換"""
-        if len(self._state.sources) <= 1:
-            return (0, virtual_pos)
-
-        cumulative = 0
-        for idx, source in enumerate(self._state.sources):
-            if cumulative + source.duration_ms > virtual_pos:
-                return (idx, virtual_pos - cumulative)
-            cumulative += source.duration_ms
-
-        # 最後のファイルの末尾
-        last_idx = len(self._state.sources) - 1
-        return (last_idx, self._state.sources[last_idx].duration_ms)
+        return self._source_manager.virtual_to_source(virtual_pos)
 
     def _source_to_virtual(self, source_idx: int, local_pos: int) -> int:
         """ソース位置を仮想位置に変換"""
-        if len(self._state.sources) <= 1:
-            return local_pos
-
-        offsets = self._get_source_offsets()
-        if source_idx < len(offsets):
-            return offsets[source_idx] + local_pos
-        return local_pos
+        return self._source_manager.source_to_virtual(source_idx, local_pos)
 
     def _get_virtual_position(self) -> int:
         """現在の仮想タイムライン位置を取得"""
@@ -2375,11 +2755,13 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         if current_row == self._current_chapter_row:
             return
 
-        # ハイライト用の色
-        highlight_bg = QBrush(QColor("#fde047"))  # 明るい黄色背景
-        highlight_fg = QBrush(QColor("#000000"))  # 黒文字
-        default_bg = QBrush(QColor("#1a1a1a"))  # デフォルト背景
-        default_fg = QBrush(QColor("#f0f0f0"))  # デフォルト文字色
+        # ハイライト用の色（ThemeManagerから取得）
+        theme = get_theme_manager()
+        highlight_bg = QBrush(theme.get_color(ColorRole.PLAYBACK))
+        # ハイライト時のテキストは暗い背景かどうかで決める
+        highlight_fg = QBrush(QColor("#000000") if theme.is_dark else QColor("#000000"))
+        default_bg = QBrush(theme.get_color(ColorRole.BACKGROUND))
+        default_fg = QBrush(theme.get_color(ColorRole.FOREGROUND))
 
         # 選択行を取得
         selected_row = self._table.currentRow()
@@ -2429,11 +2811,12 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         if row < 0 or row >= self._table.rowCount():
             return
 
-        # ハイライト用の色
-        highlight_bg = QBrush(QColor("#fde047"))  # 明るい黄色背景
-        highlight_fg = QBrush(QColor("#000000"))  # 黒文字
-        default_bg = QBrush(QColor("#1a1a1a"))  # デフォルト背景
-        default_fg = QBrush(QColor("#f0f0f0"))
+        # ハイライト用の色（ThemeManagerから取得）
+        theme = get_theme_manager()
+        highlight_bg = QBrush(theme.get_color(ColorRole.PLAYBACK))
+        highlight_fg = QBrush(QColor("#000000") if theme.is_dark else QColor("#000000"))
+        default_bg = QBrush(theme.get_color(ColorRole.BACKGROUND))
+        default_fg = QBrush(theme.get_color(ColorRole.FOREGROUND))
 
         # 全行のスタイルをリセットし、指定行をハイライト
         for r in range(self._table.rowCount()):
@@ -2459,6 +2842,31 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         title_item = self._table.item(row, 1)
         if title_item:
             self._update_chapter_overlay(title_item.text())
+
+    def _refresh_chapter_colors(self):
+        """テーマ変更時にチャプターテーブルの色を再描画"""
+        if self._table.rowCount() == 0:
+            return
+
+        # 現在のハイライト行を再設定することで色を更新
+        current_row = self._current_chapter_row
+        if current_row >= 0 and current_row < self._table.rowCount():
+            # 一時的にリセット
+            self._current_chapter_row = -1
+            # 再設定
+            self._set_current_chapter_row(current_row)
+        else:
+            # ハイライト行がない場合は全行をデフォルト色に
+            theme = get_theme_manager()
+            default_bg = QBrush(theme.get_color(ColorRole.BACKGROUND))
+            default_fg = QBrush(theme.get_color(ColorRole.FOREGROUND))
+
+            for row in range(self._table.rowCount()):
+                for col in range(2):
+                    item = self._table.item(row, col)
+                    if item:
+                        item.setBackground(default_bg)
+                        item.setForeground(default_fg)
 
     def _update_chapter_overlay(self, title: str):
         """チャプター名オーバーレイを更新（音声モードのみ）
@@ -2699,6 +3107,10 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
     def _on_waveform_finished(self, data: list):
         """波形生成完了"""
+        # ソースが空の場合は波形を設定しない（削除後にスレッドが完了した場合）
+        if not self._state.sources:
+            self._log_panel.debug("Waveform generation completed but sources are empty, skipping", source="Waveform")
+            return
         if self._waveform_widget:
             self._waveform_widget.set_waveform(data)
         self._log_panel.info(f"Waveform generated: {len(data)} samples", source="Waveform")
@@ -2933,11 +3345,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         self._state.sources = sources
 
-        # 最初のファイル名をOutputのベースファイル名に設定
-        if sources:
-            first_file = sources[0].path
-            base_name = first_file.stem
-            self._output_edit.setText(base_name)
+        # ベースファイル名を更新（単一:ファイル名、複数:フォルダ名）
+        self._update_base_filename_from_first_source()
 
         self._log_panel.info(
             f"Sources updated: {len(self._state.sources)} files",
@@ -2946,16 +3355,15 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         self._prepare_for_new_source()
 
-        # 複数ファイルの場合、チャプターを自動生成
-        if len(self._state.sources) > 1:
-            self._generate_chapters_from_sources()
-
         # ソースがあれば自動的にメディアプレーヤーに読み込み
         if self._state.sources:
             self._load_source_media()
-            # 単一ソースの場合、同名.txtチャプターファイルを自動読み込み
+            # 同名.txtチャプターファイルを自動読み込み
             if len(self._state.sources) == 1:
                 self._try_load_chapter_file(self._state.sources[0].path)
+            else:
+                # 複数ファイルの場合、各ファイルのチャプターを読み込み
+                self._load_chapters_for_all_sources()
 
     def _add_sources(self):
         """ソースファイルを追加（選択位置の後に挿入）"""
@@ -3000,6 +3408,9 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         for i, src in enumerate(new_sources):
             self._state.sources.insert(insert_index + i, src)
 
+        # ベースファイル名を更新（複数ソースになった場合はフォルダ名に）
+        self._update_base_filename_from_first_source()
+
         self._log_panel.info(
             f"Added {len(new_sources)} file(s) at position {insert_index + 1}",
             source="UI"
@@ -3010,6 +3421,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         # UI更新
         self._source_list.set_sources(self._state.sources)
+        self._sync_source_manager()  # SourceFileManagerを同期
 
         # 追加したファイルの最初のチャプターをハイライト
         # insert_indexに対応するチャプター行を探す
@@ -3079,6 +3491,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             source_index = insert_index + i
             chapter_path = src.path.with_suffix('.txt')
 
+            has_zero_chapter = False
             if chapter_path.exists():
                 # チャプターファイルから読み込み
                 try:
@@ -3091,20 +3504,22 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                                 'local_time_ms': ch.local_time_ms,
                                 'color': QColor("#f0f0f0")
                             })
+                            if ch.local_time_ms == 0:
+                                has_zero_chapter = True
                         self._log_panel.info(
                             f"Auto-loaded chapters from: {chapter_path.name}",
                             source="Add"
                         )
-                        continue
                 except Exception as e:
                     self._log_panel.debug(f"Failed to load chapter file: {e}", source="Add")
 
-            # チャプターファイルがない場合はデフォルト（ファイル名、ローカル時間0）
-            new_chapters.append({
-                'title': src.path.stem,
-                'source_index': source_index,
-                'local_time_ms': 0,
-                'color': QColor("#f0f0f0")
+            # 0:00チャプターがなければ「Chapter 0」を自動追加（YouTube互換性のため）
+            if not has_zero_chapter:
+                new_chapters.append({
+                    'title': 'Chapter 0',
+                    'source_index': source_index,
+                    'local_time_ms': 0,
+                    'color': QColor("#f0f0f0")
             })
 
         # 既存チャプターに新しいチャプターを挿入
@@ -3219,7 +3634,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 background-color: #0f0f0f;
                 color: #f0f0f0;
                 border: 1px solid #3a3a3a;
-                selection-background-color: #3b82f6;
+                selection-background-color: #1e50a2;
             }
             QFileDialog QTreeView::item:hover, QFileDialog QListView::item:hover {
                 background-color: #2d2d2d;
@@ -3234,7 +3649,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             QFileDialog QComboBox QAbstractItemView {
                 background-color: #2d2d2d;
                 color: #f0f0f0;
-                selection-background-color: #3b82f6;
+                selection-background-color: #1e50a2;
             }
             QFileDialog QHeaderView::section {
                 background-color: #1a1a1a;
@@ -3468,6 +3883,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._update_position_after_removal()
         elif not self._state.sources:
             # ソースが空になった場合
+            self._cleanup_waveform_thread()  # 実行中の波形スレッドをキャンセル
             self._source_list.set_sources([])
             self._waveform_widget.clear()
             # メディアプレーヤーを停止・クリア
@@ -3542,6 +3958,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._update_position_after_removal()
         else:
             # ソースが空になった場合
+            self._cleanup_waveform_thread()  # 実行中の波形スレッドをキャンセル
             self._table.setRowCount(0)
             self._state.chapters = []
             self._has_embedded_chapters = False
@@ -3563,12 +3980,21 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         )
 
     def _update_base_filename_from_first_source(self):
-        """先頭ソースのファイル名でベースファイル名を更新"""
+        """ベースファイル名を更新
+
+        - 単一ソース: ソースファイル名
+        - 複数ソース: カレントフォルダ名
+        """
         if self._state.sources:
-            first_file = self._state.sources[0].path
-            base_name = first_file.stem
+            num_sources = len(self._state.sources)
+            if num_sources == 1:
+                # 単一ソース: ファイル名
+                base_name = self._state.sources[0].path.stem
+            else:
+                # 複数ソース: カレントフォルダ名
+                base_name = self._state.work_dir.name
             self._output_edit.setText(base_name)
-            self._log_panel.debug(f"Base filename updated: {base_name}", source="UI")
+            self._log_panel.debug(f"Base filename: {base_name} ({num_sources} sources)", source="UI")
 
     def _update_position_after_removal(self):
         """削除後の波形位置と時間表示を更新"""
@@ -4200,6 +4626,32 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         self._waveform_widget.set_chapters(chapters, duration)
 
+        # ソース境界行リストを更新（外部ファイルドロップ用）
+        self._update_source_boundary_rows()
+
+    def _update_source_boundary_rows(self):
+        """ソース境界行リストを計算してテーブルに設定
+
+        各ソースの先頭チャプター行を境界として記録する。
+        外部ファイルドロップ時のインジケーター表示に使用。
+        """
+        if self._table.rowCount() == 0:
+            self._table.set_source_boundary_rows([])
+            return
+
+        boundary_rows = []
+        last_source_idx = -1
+
+        for row in range(self._table.rowCount()):
+            time_item = self._table.item(row, 0)
+            if time_item:
+                source_idx = time_item.data(Qt.ItemDataRole.UserRole + 1)
+                if source_idx is not None and source_idx != last_source_idx:
+                    boundary_rows.append(row)
+                    last_source_idx = source_idx
+
+        self._table.set_source_boundary_rows(boundary_rows)
+
     def _remove_row(self, row: int):
         """指定行削除"""
         self._table.removeRow(row)
@@ -4219,6 +4671,22 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         except ValueError:
             self._log_panel.warning(f"Invalid time format: {time_str}", source="Chapter")
             return
+
+        # デバッグ: シーク位置の詳細をログ出力
+        if len(self._state.sources) > 1:
+            source_idx, local_pos = self._virtual_to_source(position_ms)
+            offsets = self._get_source_offsets()
+            total_dur = self._get_total_duration()
+            self._log_panel.debug(
+                f"Chapter click: row={row}, time_str={time_str}, "
+                f"virtual_pos={position_ms}ms -> source[{source_idx}] local={local_pos}ms",
+                source="Chapter"
+            )
+            self._log_panel.debug(
+                f"Source durations: {[s.duration_ms for s in self._state.sources]}, "
+                f"offsets: {offsets}, total: {total_dur}ms",
+                source="Chapter"
+            )
 
         # 仮想タイムラインでシーク
         self._seek_virtual(position_ms)
@@ -4374,6 +4842,19 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                     'local_time_ms': local_time_ms,
                     'color': default_color,
                 })
+
+            # 各ソースに0:00チャプターがなければ「Chapter 0」を自動追加（YouTube互換性のため）
+            sources_with_zero = set(
+                ch['source_index'] for ch in chapters_data if ch['local_time_ms'] == 0
+            )
+            for source_index in range(len(self._state.sources)):
+                if source_index not in sources_with_zero:
+                    chapters_data.append({
+                        'title': 'Chapter 0',
+                        'source_index': source_index,
+                        'local_time_ms': 0,
+                        'color': default_color,
+                    })
 
             # テーブルを再構築
             self._rebuild_chapter_table_from_data(chapters_data)
@@ -4569,7 +5050,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         # チャプターグループのタイトルを更新（埋め込みを緑色で表示）
         if hasattr(self, '_chapter_title_label'):
-            self._chapter_title_label.setText('Chapters <span style="color: #22c55e;">(埋め込み)</span>')
+            self._chapter_title_label.setText('Chapters <span style="color: #c3d825;">(埋め込み)</span>')
             self._chapter_title_label.setTextFormat(Qt.TextFormat.RichText)
 
         # テーブルを再構築
@@ -4638,7 +5119,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         # チャプターグループのタイトルを更新
         if hasattr(self, '_chapter_title_label'):
             if has_any_embedded:
-                self._chapter_title_label.setText('Chapters <span style="color: #22c55e;">(埋め込み)</span>')
+                self._chapter_title_label.setText('Chapters <span style="color: #c3d825;">(埋め込み)</span>')
                 self._chapter_title_label.setTextFormat(Qt.TextFormat.RichText)
             else:
                 self._chapter_title_label.setText("Chapters")
@@ -4785,16 +5266,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         # デフォルトファイル名: 最初のソースファイル名.vce.json
         default_name = self._state.sources[0].path.stem + ".vce.json"
-        default_path = self._state.work_dir / default_name
-
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Project",
-            str(default_path),
-            "VCE Project Files (*.vce.json);;All Files (*)"
-        )
-        if not file_path:
-            return
+        file_path = self._state.work_dir / default_name
 
         # テーブルから全チャプターを取得
         chapters_data = []
@@ -4823,18 +5295,24 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         # エンコード設定を取得
         encode_settings = ExportSettingsDialog.load_settings_static()
 
+        # ベースファイル名を取得
+        output_base = self._output_edit.text().strip()
+
         # プロジェクトデータを構築
         project = {
             "version": "1.0",
             "created": datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+            "status": "complete" if self._state.project_complete else "draft",
             "sources": [s.path.name for s in self._state.sources],
             "chapters": chapters_data,
             "encode_settings": {
                 "encoder": encode_settings.get("encoder", "copy"),
                 "quality_index": encode_settings.get("quality_index", 0),
                 "embed_chapters": encode_settings.get("embed_chapters", True),
+                "overlay_titles": encode_settings.get("overlay_titles", True),
                 "split_chapters": encode_settings.get("split_chapters", False),
             },
+            "output_base": output_base if output_base else None,
             "output_dir": str(self._state.output_dir) if self._state.output_dir else None
         }
 
@@ -4850,21 +5328,40 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._log_panel.error(f"Failed to save project: {e}", source="Project")
 
     def _load_project(self, file_path: str = None):
-        """プロジェクトを.vce.jsonファイルから読み込み
+        """プロジェクトを.vce.jsonファイルから読み込み（load_projectのラッパー）
+
+        Args:
+            file_path: プロジェクトファイルパス（Noneの場合はダイアログを表示）
+        """
+        # load_projectに委譲（duration検出を正しく行うため）
+        path = Path(file_path) if file_path else None
+        self.load_project(path)
+
+    def _load_project_legacy(self, file_path: str = None):
+        """【廃止予定】プロジェクトを.vce.jsonファイルから読み込み
+
+        Note:
+            この古い実装はduration_ms=0のままソースを読み込むバグがあります。
+            load_project()を使用してください。
 
         Args:
             file_path: プロジェクトファイルパス（Noneの場合はダイアログを表示）
         """
         if file_path is None:
-            # ファイル選択ダイアログ
-            file_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "Load Project",
-                str(self._state.work_dir),
-                "VCE Project Files (*.vce.json);;All Files (*)"
+            # ファイル選択ダイアログ（SourceSelectionDialogを使用）
+            from rehearsal_workflow.ui.dialogs import SourceSelectionDialog
+            dialog = SourceSelectionDialog(
+                parent=self,
+                work_dir=self._state.work_dir,
+                mode="project"
             )
-            if not file_path:
+            dialog.setWindowTitle("Load Project")
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
+            selected = dialog.get_selected_file()
+            if not selected:
+                return
+            file_path = str(selected)
 
         project_path = Path(file_path)
         if not project_path.exists():
@@ -4915,6 +5412,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._log_panel.error("No valid sources found", source="Project")
             return
 
+        self._sync_source_manager()  # SourceFileManagerを同期
+
         # メディアを準備
         self._prepare_for_new_source()
         self._load_source_media()
@@ -4935,12 +5434,45 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             self._update_chapter_drag_enabled()
             self._update_output_preview()
 
-        # 出力ディレクトリを設定
+        # ベースファイル名を復元
+        output_base = project.get("output_base")
+        if output_base:
+            self._output_edit.setText(output_base)
+        else:
+            # デフォルト: 単一ソースはファイル名、複数ソースはフォルダ名
+            self._update_base_filename_from_first_source()
+
+        # 出力ディレクトリを設定（相対パスを優先して解決）
         output_dir = project.get("output_dir")
         if output_dir:
-            self._state.output_dir = Path(output_dir)
+            # まず相対パスとして解決を試みる
+            output_path = base_dir / output_dir
+            if not output_path.exists():
+                # 絶対パスとして試す
+                abs_path = Path(output_dir)
+                if abs_path.exists():
+                    output_path = abs_path
+            # ディレクトリが存在しなくても設定を保持（エクスポート前は存在しないことが多い）
+            self._state.output_dir = output_path
         else:
             self._state.output_dir = None
+        # ステータスバーに反映
+        self.output_dir_changed.emit(self._state.output_dir or self._state.work_dir)
+
+        # エンコード設定を復元
+        encode_settings = project.get("encode_settings", {})
+        if encode_settings:
+            ExportSettingsDialog.save_settings_static(encode_settings)
+
+        # 完了ステータスを設定
+        status = project.get("status", "draft")
+        is_complete = status == "complete"
+        self._state.project_complete = is_complete
+        if hasattr(self, '_complete_checkbox'):
+            self._complete_checkbox.blockSignals(True)
+            self._complete_checkbox.setChecked(is_complete)
+            self._complete_checkbox.blockSignals(False)
+        self.project_complete_changed.emit(is_complete)
 
         self._log_panel.info(
             f"Loaded project: {project_path.name} ({len(self._state.sources)} sources, {len(chapters)} chapters)",
@@ -5071,37 +5603,257 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         return chapters
 
     def _start_export(self):
-        """エクスポート開始"""
-        # 複数音声ファイルの場合は先に結合
-        input_path = self._state.video_path
-        is_multi_audio = False
+        """エクスポート開始（非同期）
 
-        if len(self._state.sources) > 1:
-            # 複数音声: 結合する
-            is_multi_audio = True
-            self._log_panel.info(
-                f"Merging {len(self._state.sources)} audio files...",
-                source="Export"
-            )
-            merged_path = self._merge_audio_files()
-            if merged_path:
-                input_path = merged_path
-                self._log_panel.info(f"Merged: {merged_path.name}", source="Export")
-            else:
-                self._log_panel.error("Failed to merge audio files", source="Export")
+        複数ソースの場合:
+        1. calculate_extraction_plan で必要なセグメントを計算
+        2. SegmentExtractWorker で各ソースから必要部分のみ抽出・結合
+        3. _continue_export で最終エクスポート
+
+        これにより、大きなソースファイルでも一時ファイルサイズを最小化。
+        """
+        # 入力検証
+        if not self._state.video_path or not self._state.video_path.exists():
+            if not self._state.sources:
+                self._log_panel.error("No video/audio loaded", source="Export")
                 return
 
+        # UIを即座に更新（Cancel状態に）
+        self._is_exporting = True
+        self._export_btn.setText("Cancel")
+        self._export_btn.setStyleSheet(ButtonStyles.danger_compact())
+        self._export_btn.setToolTip("エンコードを中止")
+        self._encode_progress.setValue(0)
+        self._encode_progress.setFormat("Preparing...")
+        self._encode_progress.setVisible(True)
+
+        # 設定を取得
+        settings = ExportSettingsDialog.load_settings_static()
+        cut_excluded = settings["cut_excluded"]
+        encoder_id = settings["encoder"]
+        quality_index = settings["quality_index"]
+
+        # 品質設定
+        if getattr(self, '_is_audio_only', False):
+            bitrate, crf = self._audio_quality_options[0][1], self._audio_quality_options[0][2]
+        else:
+            if 0 <= quality_index < len(self._video_quality_options):
+                _, bitrate, crf = self._video_quality_options[quality_index]
+            else:
+                bitrate, crf = 4000, 23
+
+        # 複数ソースファイルの場合 - CLIEncodeWorkerを使用
+        if len(self._state.sources) > 1:
+            # プロジェクトファイルを一時保存
+            project_path = self._save_temp_project()
+            if not project_path:
+                self._log_panel.error("Failed to save temp project", source="Export")
+                self._reset_export_btn()
+                return
+
+            # 出力パス決定
+            output_dir = self._state.output_dir or self._state.work_dir
+            output_base = self._output_edit.text().strip() or "output"
+            output_path = output_dir / f"{Path(output_base).stem}_encoded.mp4"
+
+            self._log_panel.info(
+                f"Starting CLI encode: {len(self._state.sources)} sources",
+                source="Export"
+            )
+
+            # CLIEncodeWorkerを作成
+            self._cli_encode_worker = CLIEncodeWorker(
+                project_path=project_path,
+                output_path=output_path,
+                encoder=encoder_id,
+                auto_bitrate=True,  # ソースと同じビットレート
+                embed_chapters=settings.get("embed_chapters", True),
+                cut_excluded=cut_excluded,
+                parent=self
+            )
+            self._cli_encode_worker.progress.connect(self._on_cli_progress)
+            self._cli_encode_worker.progress_percent.connect(self._on_cli_percent)
+            self._cli_encode_worker.log_message.connect(self._on_cli_log)
+            self._cli_encode_worker.finished.connect(self._on_cli_finished)
+            self._cli_encode_worker.start()
+            return
+
+        # 単一ファイルの場合は直接エクスポート
+        self._extraction_adjusted_chapters = None  # 単一ファイルは調整不要
+        self._continue_export(self._state.video_path)
+
+    def _on_extract_progress(self, message: str):
+        """セグメント抽出進捗メッセージ"""
+        self._log_panel.info(message, source="Export")
+        self._encode_progress.setFormat(message)
+
+    def _on_extract_percent(self, percent: int):
+        """セグメント抽出進捗パーセント"""
+        # 抽出フェーズは全体の50%とする
+        self._encode_progress.setValue(percent // 2)
+
+    def _on_extract_finished(self, extracted_path):
+        """セグメント抽出完了後の処理"""
+        self._segment_extract_worker = None
+        if extracted_path:
+            self._log_panel.info(f"Extracted: {extracted_path.name}", source="Export")
+            self._continue_export(extracted_path, use_adjusted_chapters=True)
+        else:
+            self._log_panel.error("Extraction returned no output", source="Export")
+            self._reset_export_btn()
+
+    def _on_extract_error(self, error: str):
+        """セグメント抽出エラー"""
+        self._log_panel.error(error, source="Export")
+        self._reset_export_btn()
+        self._segment_extract_worker = None
+
+    # 以下は後方互換性のため残す（単純マージが必要な場合用）
+    def _on_merge_progress(self, message: str):
+        """マージ進捗メッセージ"""
+        self._log_panel.info(message, source="Export")
+        self._encode_progress.setFormat(message)
+
+    def _on_merge_finished(self, merged_path):
+        """マージ完了後の処理"""
+        self._merge_worker = None
+        if merged_path:
+            self._log_panel.info(f"Merged: {merged_path.name}", source="Export")
+            self._continue_export(merged_path)
+        else:
+            self._log_panel.error("Merge returned no output", source="Export")
+            self._reset_export_btn()
+
+    def _on_merge_error(self, error: str):
+        """マージエラー"""
+        self._log_panel.error(error, source="Export")
+        self._reset_export_btn()
+        self._merge_worker = None
+
+    # CLIEncodeWorker用ハンドラ
+    def _save_temp_project(self) -> Optional[Path]:
+        """現在の状態を一時プロジェクトファイルに保存"""
+        from datetime import datetime
+        from .dialogs import ExportSettingsDialog
+
+        if not self._state.sources:
+            return None
+
+        # 一時ファイルパス
+        temp_dir = Path(tempfile.gettempdir())
+        project_path = temp_dir / f"vce_temp_{os.getpid()}.vce.json"
+
+        # テーブルからチャプターを取得
+        chapters_data = []
+        for row in range(self._table.rowCount()):
+            time_item = self._table.item(row, 0)
+            title_item = self._table.item(row, 1)
+            if time_item and title_item:
+                source_index = time_item.data(Qt.ItemDataRole.UserRole + 1)
+                local_time_ms = time_item.data(Qt.ItemDataRole.UserRole + 2)
+                if source_index is None:
+                    source_index = 0
+                if local_time_ms is None:
+                    try:
+                        chapter = ChapterInfo.from_time_str(time_item.text(), "")
+                        local_time_ms = chapter.local_time_ms
+                    except ValueError:
+                        local_time_ms = 0
+                chapters_data.append({
+                    "local_time_ms": local_time_ms,
+                    "source_index": source_index,
+                    "title": title_item.text()
+                })
+
+        # エンコード設定
+        encode_settings = ExportSettingsDialog.load_settings_static()
+
+        # プロジェクトデータ
+        project = {
+            "version": "1.0",
+            "created": datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+            "sources": [str(s.path) for s in self._state.sources],  # 絶対パス
+            "chapters": chapters_data,
+            "encode_settings": {
+                "encoder": encode_settings.get("encoder", "copy"),
+                "quality_index": encode_settings.get("quality_index", 0),
+                "embed_chapters": encode_settings.get("embed_chapters", True),
+                "cut_excluded": encode_settings.get("cut_excluded", True),
+            },
+            "output_dir": str(self._state.output_dir) if self._state.output_dir else str(self._state.work_dir)
+        }
+
+        try:
+            with open(project_path, 'w', encoding='utf-8') as f:
+                json.dump(project, f, indent=2, ensure_ascii=False)
+            return project_path
+        except Exception as e:
+            self._log_panel.error(f"Failed to save temp project: {e}", source="Export")
+            return None
+
+    def _on_cli_progress(self, message: str):
+        """CLIエンコード進捗メッセージ"""
+        self._encode_progress.setFormat(message)
+
+    def _on_cli_percent(self, percent: int):
+        """CLIエンコード進捗パーセント"""
+        self._encode_progress.setValue(percent)
+
+    def _on_cli_log(self, message: str):
+        """CLIエンコードログメッセージ"""
+        self._log_panel.info(message, source="Export")
+
+    def _on_cli_finished(self, success: bool, result: str):
+        """CLIエンコード完了"""
+        self._cli_encode_worker = None
+        if success:
+            self._log_panel.info(f"Export completed: {Path(result).name}", source="Export")
+            self._reset_export_btn()
+            self.export_finished.emit(True, Path(result).name)
+            # 出力動画を読み込み
+            self._load_exported_video(result)
+        else:
+            self._log_panel.error(f"Export failed: {result}", source="Export")
+            self._reset_export_btn()
+            self.export_finished.emit(False, result)
+
+    def _continue_export(self, input_path: Path, use_adjusted_chapters: bool = False):
+        """マージ完了後または単一ファイル時のエクスポート処理
+
+        Args:
+            input_path: 入力ファイルパス
+            use_adjusted_chapters: True の場合、セグメント抽出で計算済みの
+                                   調整済みチャプターを使用（時間は既に調整済み、
+                                   除外チャプターは既に削除済み）
+        """
         # 入力検証
         if not input_path or not input_path.exists():
             self._log_panel.error("No video/audio loaded", source="Export")
+            self._reset_export_btn()
             return
 
-        # テーブルからチャプターを取得（出力ファイル名決定に必要）
-        chapters = self._get_table_chapters()
+        # チャプターを取得
+        if use_adjusted_chapters and self._extraction_adjusted_chapters is not None:
+            # セグメント抽出で計算済みの調整済みチャプターを使用
+            # 時間は出力ファイル内の位置に調整済み、除外チャプターは既に削除済み
+            chapters = self._extraction_adjusted_chapters
+            chapters_already_adjusted = True
+            self._log_panel.debug(
+                f"Using pre-adjusted chapters: {len(chapters)} chapters",
+                source="Export"
+            )
+        else:
+            # テーブルからチャプターを取得
+            chapters = self._get_table_chapters()
+            chapters_already_adjusted = False
 
         # 有効なチャプター（"--"で始まらないもの）の有無を判定
         EXCLUDE_PREFIX = "--"
-        valid_chapters = [ch for ch in chapters if not ch.title.startswith(EXCLUDE_PREFIX)]
+        if chapters_already_adjusted:
+            # 調整済みの場合は全て有効（除外は既に削除済み）
+            valid_chapters = chapters
+        else:
+            valid_chapters = [ch for ch in chapters if not ch.title.startswith(EXCLUDE_PREFIX)]
         has_valid_chapters = len(valid_chapters) > 0
 
         # 出力ファイル名を決定（チャプターの有無でサフィックスを変更）
@@ -5128,15 +5880,26 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 counter += 1
             self._log_panel.info(f"Output renamed to avoid overwriting input: {output_path.name}", source="Export")
 
-        output_path = str(output_path)
+        output_path_str = str(output_path)
 
         # 設定をQSettingsから取得
         settings = ExportSettingsDialog.load_settings_static()
         encoder_id = settings["encoder"]
         quality_index = settings["quality_index"]
         embed_chapters = settings["embed_chapters"]
+        overlay_titles = settings.get("overlay_titles", True)
         cut_excluded = settings["cut_excluded"]
         split_chapters = settings["split_chapters"]
+
+        # セグメント抽出済みの場合、cut_excludedを無効化
+        # （既に必要部分のみ抽出済みのため、再度カットする必要がない）
+        if chapters_already_adjusted:
+            if cut_excluded:
+                self._log_panel.debug(
+                    "Disabling cut_excluded (segments already extracted)",
+                    source="Export"
+                )
+            cut_excluded = False
 
         # 品質設定を取得（音声のみの場合は固定）
         if getattr(self, '_is_audio_only', False):
@@ -5149,33 +5912,31 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         # 「元と同じ」が選択されている場合の処理
         if bitrate == 0:
-            base_bitrate = 4000  # デフォルト値
+            # 元動画のビットレートを検出（検出失敗時は4000kbps）
+            detected_bitrate = detect_video_bitrate(str(input_path))
+            base_bitrate = detected_bitrate if detected_bitrate else 4000
+            self._log_panel.debug(f"Detected source bitrate: {base_bitrate} kbps", source="Export")
             if encoder_id == "libx264":
                 # CPU: CRFモードで高画質（ビットレートは参考値）
                 bitrate = base_bitrate
                 crf = 18  # 高画質CRF
                 self._log_panel.debug(f"Auto quality: CRF {crf}", source="Export")
             else:
-                # GPU: ビットレート×1.5で再エンコード劣化を補償
-                bitrate = int(base_bitrate * 1.5)
+                # GPU: ビットレート×1.1で再エンコード劣化を補償
+                bitrate = int(base_bitrate * 1.1)
                 self._log_panel.debug(f"Auto quality: {bitrate} kbps", source="Export")
 
         # 色空間情報を取得（音声のみの場合はNone）
         colorspace = detect_video_colorspace(str(input_path)) if input_path.suffix.lower() in VIDEO_EXTENSIONS else None
 
-        self._log_panel.info(f"Export started: {Path(output_path).name}", source="Export")
+        self._log_panel.info(f"Export started: {output_path.name}", source="Export")
+        self._log_panel.debug(f"Output dir: {output_dir}", source="Export")
         self._log_panel.debug(f"Encoder: {encoder_id}, Bitrate: {bitrate}kbps, CRF: {crf}", source="Export")
         self._log_panel.debug(f"Chapters: {len(chapters)}, Embed: {embed_chapters}", source="Export")
 
-        # ボタンをキャンセルモードに変更
-        self._is_exporting = True
-        self._export_btn.setText("Cancel")
-        self._export_btn.setStyleSheet(ButtonStyles.danger_compact())
-        self._export_btn.setToolTip("エンコードを中止")
-
         # 動画の長さを取得
-        if is_multi_audio:
-            # 複数音声の場合はチャプターから計算
+        if len(self._state.sources) > 1:
+            # 複数ソースの場合は各ソースのdurationから計算
             duration_ms = sum(src.duration_ms for src in self._state.sources)
         else:
             duration_ms = self._media_player.duration() if self._media_player else 0
@@ -5184,10 +5945,16 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         if split_chapters:
             self._log_panel.info(f"Split export started: {len(chapters)} chapters", source="Export")
 
+            # 複数ソースの場合、各ソースのベース名リストを作成
+            source_bases = None
+            if len(self._state.sources) > 1:
+                source_bases = [s.path.stem for s in self._state.sources]
+                self._log_panel.debug(f"Multi-source split: {source_bases}", source="Export")
+
             # SplitExportWorkerを作成して開始
             self._export_worker = SplitExportWorker(
                 input_file=str(input_path),
-                output_dir=str(self._state.work_dir),
+                output_dir=str(output_dir),
                 output_base=Path(output_base).name,
                 chapters=chapters,
                 total_duration_ms=duration_ms,
@@ -5196,7 +5963,8 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 crf=crf,
                 colorspace=colorspace,
                 is_audio_only=input_path.suffix.lower() in AUDIO_EXTENSIONS,
-                overlay_title=embed_chapters  # Embed Chapがチェックされている場合、タイトル焼き込み
+                overlay_title=overlay_titles,
+                source_bases=source_bases
             )
 
             # シグナル接続
@@ -5211,19 +5979,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             return
 
         # 通常エクスポート（単一ファイル）
-        # 有効なチャプターがある場合はチャプターファイルを自動保存（--除外）
-        if has_valid_chapters:
-            chapter_file_path = self._state.work_dir / f"{Path(output_base).name}_chapters.txt"
-            try:
-                with open(chapter_file_path, 'w', encoding='utf-8') as f:
-                    for ch in valid_chapters:
-                        f.write(f"{ch.time_str} {ch.title}\n")
-                self._log_panel.info(
-                    f"Saved {len(valid_chapters)} chapters to: {chapter_file_path.name}",
-                    source="Export"
-                )
-            except Exception as e:
-                self._log_panel.warning(f"Failed to save chapter file: {e}", source="Export")
+        # チャプターファイルはExportWorker完了時に出力ディレクトリに保存される
 
         # カバー画像を取得
         cover_image_path = None
@@ -5236,11 +5992,11 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         # ExportWorkerを作成して開始
         self._export_worker = ExportWorker(
             input_file=str(input_path),
-            output_file=output_path,
+            output_file=output_path_str,
             chapters=chapters,
             embed_chapters=embed_chapters,
             embed_title=True,
-            overlay_chapter_titles=True,  # チャプター名焼き込み有効
+            overlay_chapter_titles=overlay_titles,
             total_duration_ms=duration_ms,
             encoder_id=encoder_id,
             bitrate_kbps=bitrate,
@@ -5268,7 +6024,14 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         """エクスポート進捗パーセント"""
         # ローカル進捗バー更新
         self._encode_progress.setValue(percent)
-        self._encode_progress.setFormat(f"{percent}%")
+        # フォーマット: "percent% (n/m)" または "percent%"
+        if "/" in status:
+            # Split export: status = "1/2 (45%)" → "50% (1/2)"
+            parts = status.split()
+            file_progress = parts[0] if parts else ""
+            self._encode_progress.setFormat(f"{percent}% ({file_progress})")
+        else:
+            self._encode_progress.setFormat(f"{percent}%")
         if not self._encode_progress.isVisible():
             self._encode_progress.setVisible(True)
         # ステータスバー用シグナル
@@ -5287,7 +6050,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         self._load_exported_video(output_path)
 
     def _load_exported_video(self, video_path: str):
-        """エクスポート完了後に出力動画を読み込む"""
+        """エクスポート完了後に出力動画を読み込む（クリア→Open）"""
         output_file = Path(video_path)
         if not output_file.exists():
             self._log_panel.warning(f"Output file not found: {video_path}", source="Export")
@@ -5295,8 +6058,30 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
         self._log_panel.info(f"Loading exported video: {output_file.name}", source="Export")
 
+        # 全状態をクリア（Openボタンと同等の動作）
+        self._clear_all()
+
+        # ソースを単一ファイルとして設定
+        duration_ms = detect_video_duration(str(output_file)) or 0
+        self._state.sources = [
+            SourceFile(
+                path=output_file,
+                duration_ms=duration_ms,
+                file_type=output_file.suffix[1:].lower()
+            )
+        ]
+        self._source_list.set_sources(self._state.sources)
+        self._sync_source_manager()  # SourceFileManagerを同期
+
+        # 作業ディレクトリを更新
+        self._state.work_dir = output_file.parent
+        self.work_dir_changed.emit(self._state.work_dir)
+
         # 状態更新
         self._state.video_path = output_file
+        self._state.video_duration_ms = duration_ms
+        self._update_source_info()
+        self.source_changed.emit(self._state.sources)
 
         # メディアプレーヤーに読み込み
         self._media_player.setSource(QUrl.fromLocalFile(str(output_file)))
@@ -5306,22 +6091,11 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         # 動画モードに切り替え（品質選択を有効化）
         self._update_quality_combo_for_mode(is_audio=False)
 
-        # 波形生成をリセットして再生成
-        self._spectrogram_generated = False
+        # 波形生成
         self._start_waveform_generation(output_file)
 
         # 埋め込みチャプターを読み込み
-        # エンコード後は除外区間カット等で動画長が変わっている可能性があるため
-        # 実際の動画に合ったチャプターリストを表示
-        chapters = self._extract_chapters_from_media(output_file)
-        if chapters:
-            self._table.setRowCount(0)
-            for ch in chapters:
-                self._add_chapter_row(ch.time_ms, ch.title)
-            self._log_panel.info(f"Loaded {len(chapters)} chapters from exported video", source="Export")
-            self._update_waveform_chapters()
-        else:
-            self._log_panel.debug("No embedded chapters found in exported video", source="Export")
+        self._load_embedded_chapters(output_file)
 
     def _on_export_error(self, error: str):
         """エクスポートエラー"""
@@ -5352,6 +6126,23 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
 
     def _cancel_export(self):
         """エクスポートを中止"""
+        # CLIエンコードワーカーのキャンセル
+        if self._cli_encode_worker is not None:
+            self._log_panel.warning("CLI encode cancellation requested...", source="Export")
+            self._cli_encode_worker.cancel()
+            self._export_btn.setEnabled(False)
+            self._export_btn.setText("Cancelling...")
+            return
+
+        # マージワーカーのキャンセル
+        if hasattr(self, '_merge_worker') and self._merge_worker is not None:
+            self._log_panel.warning("Merge cancellation requested...", source="Export")
+            self._merge_worker.cancel()
+            self._export_btn.setEnabled(False)
+            self._export_btn.setText("Cancelling...")
+            return
+
+        # エクスポートワーカーのキャンセル
         if hasattr(self, '_export_worker') and self._export_worker is not None:
             self._log_panel.warning("Export cancellation requested...", source="Export")
             self._export_worker.cancel()
@@ -5450,6 +6241,9 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 return
             if audios:
                 self._add_sources_to_existing(audios, chapter_files)
+            elif chapter_files and not videos and not audios:
+                # チャプターファイルのみ: 同名音声を探して追加
+                self._handle_chapter_file_drop(chapter_files, is_audio_mode=True)
         else:
             # 動画モード中
             if audios and not videos:
@@ -5460,6 +6254,9 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 return
             if videos:
                 self._add_sources_to_existing(videos, chapter_files)
+            elif chapter_files and not videos and not audios:
+                # チャプターファイルのみ: 同名動画を探して追加
+                self._handle_chapter_file_drop(chapter_files, is_audio_mode=False)
 
     def _handle_initial_drop(self, videos: list, audios: list, chapter_files: list):
         """初回ドロップ時の処理（ソースがない場合）"""
@@ -5479,14 +6276,18 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 )
                 for p in videos
             ]
+            self._sync_source_manager()  # SourceFileManagerを同期
             self._prepare_for_new_source()
             self._load_source_media()
+            self._update_base_filename_from_first_source()  # ベースファイル名を更新
             if len(videos) == 1:
                 self._log_panel.info(f"Dropped video: {video_path.name}", source="Drop")
+                # 同名.txtチャプターファイルを自動読み込み
+                self._try_load_chapter_file(video_path)
             else:
                 self._log_panel.info(f"Dropped {len(videos)} video files", source="Drop")
-            # 同名.txtチャプターファイルを自動読み込み
-            self._try_load_chapter_file(video_path)
+                # 複数ファイルの場合、各ファイルのチャプターを読み込み
+                self._load_chapters_for_all_sources()
         elif audios:
             # 作業ディレクトリを最初のファイルの親フォルダに設定
             self._state.work_dir = audios[0].parent
@@ -5501,17 +6302,289 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 )
                 for p in audios
             ]
+            self._sync_source_manager()  # SourceFileManagerを同期
             self._prepare_for_new_source()
-            # 複数MP3の場合、チャプターを自動生成
-            if len(audios) > 1:
-                self._generate_chapters_from_sources()
             self._load_source_media()
+            self._update_base_filename_from_first_source()  # ベースファイル名を更新
             if len(audios) == 1:
                 self._log_panel.info(f"Dropped audio: {audios[0].name}", source="Drop")
                 # 同名.txtチャプターファイルを自動読み込み
                 self._try_load_chapter_file(audios[0])
             else:
                 self._log_panel.info(f"Dropped {len(audios)} audio files", source="Drop")
+                # 複数ファイルの場合、各ファイルのチャプターを読み込み
+                self._load_chapters_for_all_sources()
+        elif chapter_files:
+            # チャプターファイルのみ: 同名の動画/音声を探して読み込み
+            self._handle_chapter_file_drop(chapter_files, is_audio_mode=None)
+
+    def _load_multiple_sources(self, source_paths: List[Path]):
+        """複数ソースを非同期で読み込み（プロジェクトファイル用）
+
+        Args:
+            source_paths: 読み込むソースファイルのパスリスト
+        """
+        if not source_paths:
+            return
+
+        # 既存のワーカーをキャンセル
+        if self._duration_detect_worker:
+            self._duration_detect_worker.requestInterruption()
+            self._duration_detect_worker.wait(1000)
+            self._duration_detect_worker = None
+
+        # ワーカーを作成して非同期でduration検出
+        self._duration_detect_worker = DurationDetectWorker(source_paths, parent=self)
+        self._duration_detect_worker.progress.connect(self._on_duration_detect_progress)
+        self._duration_detect_worker.finished.connect(self._on_duration_detect_finished)
+
+        self._log_panel.info(f"Loading {len(source_paths)} sources...", source="Project")
+        self._duration_detect_worker.start()
+
+    def _on_duration_detect_progress(self, current: int, total: int):
+        """Duration検出の進捗表示"""
+        self._log_panel.debug(f"Detecting duration: {current}/{total}", source="Project")
+
+    def _on_duration_detect_finished(self, results: list):
+        """Duration検出完了後のソース読み込み処理
+
+        Args:
+            results: [(path, duration_ms), ...] のリスト
+        """
+        if not results:
+            self._log_panel.error("No sources loaded", source="Project")
+            return
+
+        # SourceFileオブジェクトを作成
+        self._state.sources = [
+            SourceFile(
+                path=path,
+                duration_ms=duration_ms,
+                file_type=path.suffix[1:].lower()
+            )
+            for path, duration_ms in results
+        ]
+        self._sync_source_manager()  # SourceFileManagerを同期
+
+        # デバッグ: 検出されたdurationをログ出力
+        for path, duration_ms in results:
+            self._log_panel.debug(
+                f"Duration detected: {path.name} = {duration_ms}ms "
+                f"({self._format_time(duration_ms)})",
+                source="Project"
+            )
+
+        # UIを更新
+        self._prepare_for_new_source()
+        self._load_source_media()
+        self._update_base_filename_from_first_source()
+
+        self._log_panel.info(
+            f"Loaded {len(results)} source(s)",
+            source="Project"
+        )
+
+        # 保留中のチャプターがあれば読み込み
+        if self._pending_project_chapters:
+            chapters = self._pending_project_chapters
+            self._pending_project_chapters = None
+            QTimer.singleShot(300, lambda: self._load_project_chapters(chapters))
+
+        # ワーカーをクリーンアップ
+        self._duration_detect_worker = None
+
+    def _handle_chapter_file_drop(self, chapter_files: list, is_audio_mode: bool | None, insert_index: int = -1):
+        """チャプターファイルドロップ時の処理
+
+        Args:
+            chapter_files: ドロップされたチャプターファイルのリスト
+            is_audio_mode: True=音声モード, False=動画モード, None=初回（自動判定）
+            insert_index: 挿入先のsource_index（-1の場合は再生中ソースの後）
+        """
+        for chapter_path in chapter_files:
+            # 同名のメディアファイルを探す
+            media_path = self._find_same_name_media(chapter_path, is_audio_mode)
+            if media_path is None:
+                self._log_panel.warning(
+                    f"No matching media file found for: {chapter_path.name}",
+                    source="Drop"
+                )
+                continue
+
+            # ソースがない場合（初回）
+            if not self._state.sources:
+                self._state.work_dir = media_path.parent
+                self.work_dir_changed.emit(self._state.work_dir)
+                self._log_panel.info(f"Working directory: {media_path.parent}", source="Drop")
+                duration_ms = detect_video_duration(str(media_path)) or 0
+                self._state.sources = [
+                    SourceFile(
+                        path=media_path,
+                        duration_ms=duration_ms,
+                        file_type=media_path.suffix[1:].lower()
+                    )
+                ]
+                self._sync_source_manager()  # SourceFileManagerを同期
+                self._prepare_for_new_source()
+                self._load_source_media()
+                self._update_base_filename_from_first_source()  # ベースファイル名を更新
+                self._log_panel.info(f"Loaded: {media_path.name}", source="Drop")
+                # チャプターを読み込み（source_index=0を指定）
+                self._load_chapters_for_source(chapter_path, source_index=0)
+            else:
+                # 既存ソースがある場合は追加
+                # 重複チェック
+                if any(s.path == media_path for s in self._state.sources):
+                    self._log_panel.warning(
+                        f"Already loaded: {media_path.name}",
+                        source="Drop"
+                    )
+                    continue
+
+                # 挿入位置を決定
+                # insert_indexが指定されていればそれを使用、なければ再生中ソースの後
+                current_idx = self._source_list.get_current_index()
+                # 現在再生中のソースのパスを記録（挿入後にインデックスがずれるため）
+                current_source_path = (
+                    self._state.sources[current_idx].path
+                    if 0 <= current_idx < len(self._state.sources) else None
+                )
+                if insert_index >= 0:
+                    actual_insert_index = insert_index
+                else:
+                    actual_insert_index = current_idx + 1 if current_idx >= 0 else len(self._state.sources)
+
+                # ソースを追加
+                duration_ms = detect_video_duration(str(media_path)) or 0
+                self._state.sources.insert(
+                    actual_insert_index,
+                    SourceFile(path=media_path, duration_ms=duration_ms, file_type=media_path.suffix[1:].lower())
+                )
+
+                # チャプターを再構築（_rebuild_chapters_after_insert内で同名.txtを自動読み込み）
+                self._rebuild_chapters_after_insert(actual_insert_index, 1)
+
+                # 先頭に挿入された場合はベースファイル名を更新
+                if actual_insert_index == 0:
+                    self._update_base_filename_from_first_source()
+
+                # UIを更新
+                self._source_list.set_sources(self._state.sources)
+
+                # 元々再生していたソースの新しいインデックスを設定
+                if current_source_path:
+                    for i, s in enumerate(self._state.sources):
+                        if s.path == current_source_path:
+                            self._source_list.set_current_index(i)
+                            break
+
+                self._update_waveform_chapters()
+                self._update_chapter_buttons()
+                self._log_panel.info(
+                    f"Added: {media_path.name} at position {actual_insert_index}",
+                    source="Drop"
+                )
+
+                # 次のファイルは、今挿入した位置の次に挿入
+                insert_index = actual_insert_index + 1
+
+    def _load_chapters_for_source(self, chapter_path: Path, source_index: int):
+        """チャプターファイルを特定のソースに読み込み
+
+        Args:
+            chapter_path: チャプターファイルのパス
+            source_index: 対象のソースインデックス
+        """
+        try:
+            chapters = self._parse_chapter_file(str(chapter_path))
+            if not chapters:
+                return
+
+            default_color = QColor("#f0f0f0")
+
+            # 既存のチャプターデータを取得
+            existing_data = []
+            for row in range(self._table.rowCount()):
+                time_item = self._table.item(row, 0)
+                title_item = self._table.item(row, 1)
+                if time_item and title_item:
+                    existing_data.append({
+                        'title': title_item.text(),
+                        'source_index': time_item.data(Qt.ItemDataRole.UserRole + 1) or 0,
+                        'local_time_ms': time_item.data(Qt.ItemDataRole.UserRole + 2) or 0,
+                        'color': time_item.data(Qt.ItemDataRole.UserRole) or default_color,
+                    })
+
+            # 新しいチャプターを追加
+            has_zero_chapter = False
+            for ch in chapters:
+                existing_data.append({
+                    'title': ch.title,
+                    'source_index': source_index,
+                    'local_time_ms': ch.local_time_ms,
+                    'color': default_color,
+                })
+                if ch.local_time_ms == 0:
+                    has_zero_chapter = True
+
+            # 0:00チャプターがなければ「Chapter 0」を自動追加（YouTube互換性のため）
+            if not has_zero_chapter:
+                # 既存データにも該当sourceの0:00がないか確認
+                existing_zero = any(
+                    ch['source_index'] == source_index and ch['local_time_ms'] == 0
+                    for ch in existing_data
+                )
+                if not existing_zero:
+                    existing_data.append({
+                        'title': 'Chapter 0',
+                        'source_index': source_index,
+                        'local_time_ms': 0,
+                        'color': default_color,
+                    })
+
+            # ソート（source_index昇順、local_time_ms昇順）
+            existing_data.sort(key=lambda x: (x['source_index'], x['local_time_ms']))
+
+            # テーブルを再構築
+            self._rebuild_chapter_table_from_data(existing_data)
+            self._update_chapter_drag_enabled()
+            self._update_output_preview()
+
+            self._log_panel.info(
+                f"Loaded {len(chapters)} chapters from: {chapter_path.name}",
+                source="Drop"
+            )
+        except Exception as e:
+            self._log_panel.debug(f"Failed to load chapter file: {e}", source="Drop")
+
+    def _find_same_name_media(self, chapter_path: Path, is_audio_mode: bool | None) -> Path | None:
+        """チャプターファイルと同名のメディアファイルを探す
+
+        Args:
+            chapter_path: チャプターファイルのパス
+            is_audio_mode: True=音声のみ検索, False=動画のみ検索, None=両方検索（動画優先）
+
+        Returns:
+            見つかったメディアファイルのパス、なければNone
+        """
+        base_dir = chapter_path.parent
+        stem = chapter_path.stem
+
+        # 検索する拡張子を決定
+        if is_audio_mode is True:
+            extensions = list(AUDIO_EXTENSIONS)
+        elif is_audio_mode is False:
+            extensions = list(VIDEO_EXTENSIONS)
+        else:
+            # 初回は動画を優先して検索
+            extensions = list(VIDEO_EXTENSIONS) + list(AUDIO_EXTENSIONS)
+
+        for ext in extensions:
+            candidate = base_dir / f"{stem}{ext}"
+            if candidate.exists():
+                return candidate
+
+        return None
 
     def _add_sources_to_existing(self, new_paths: list, chapter_files: list):
         """既存ソースに追加（再生中ソースの後に挿入、チャプターファイル自動読み込み）"""
@@ -5538,6 +6611,9 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 SourceFile(path=path, duration_ms=duration_ms, file_type=path.suffix[1:].lower())
             )
 
+        # ベースファイル名を更新（複数ソースになった場合はフォルダ名に）
+        self._update_base_filename_from_first_source()
+
         # チャプターを再構築（_rebuild_chapters_after_insertがチャプターファイルも読み込む）
         self._rebuild_chapters_after_insert(insert_index, len(paths_to_add))
 
@@ -5557,7 +6633,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         )
 
     def _try_load_chapter_file(self, source_path: Path):
-        """同名.txtチャプターファイルがあれば自動読み込み"""
+        """同名.txtチャプターファイルがあれば自動読み込み、なければChapter 0を追加"""
         chapter_path = source_path.with_suffix('.txt')
         if chapter_path.exists():
             try:
@@ -5568,17 +6644,80 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                         f"Auto-loaded chapters from: {chapter_path.name}",
                         source="Drop"
                     )
+                    return
             except Exception as e:
                 self._log_panel.debug(f"Failed to load chapter file: {e}", source="Drop")
 
+        # チャプターファイルがない場合はChapter 0を追加（YouTube互換性のため）
+        self._add_chapter_at_position(0, 'Chapter 0', 0)
+
+    def _load_chapters_for_all_sources(self):
+        """全ソースファイルから同名.txtチャプターファイルを読み込み
+
+        複数ファイルドロップ時に使用。各ファイルの同名.txtを探して
+        チャプターを読み込み、なければデフォルトチャプター（ファイル名）を作成。
+        """
+        if not self._state.sources:
+            return
+
+        source_offsets = self._get_source_offsets()
+        all_chapters = []
+        loaded_count = 0
+
+        for source_index, source in enumerate(self._state.sources):
+            chapter_path = source.path.with_suffix('.txt')
+
+            has_zero_chapter = False
+            if chapter_path.exists():
+                try:
+                    parsed_chapters = self._parse_chapter_file(str(chapter_path))
+                    if parsed_chapters:
+                        for ch in parsed_chapters:
+                            all_chapters.append({
+                                'title': ch.title,
+                                'source_index': source_index,
+                                'local_time_ms': ch.local_time_ms,
+                                'color': QColor("#f0f0f0")
+                            })
+                            if ch.local_time_ms == 0:
+                                has_zero_chapter = True
+                        loaded_count += 1
+                except Exception as e:
+                    self._log_panel.debug(f"Failed to load {chapter_path.name}: {e}", source="Drop")
+
+            # 0:00チャプターがなければ「Chapter 0」を自動追加（該当ソースの先頭に）
+            if not has_zero_chapter:
+                # 該当ソースの先頭位置を探して挿入
+                insert_pos = len(all_chapters)
+                for i, ch in enumerate(all_chapters):
+                    if ch['source_index'] == source_index:
+                        insert_pos = i
+                        break
+                    elif ch['source_index'] > source_index:
+                        insert_pos = i
+                        break
+                all_chapters.insert(insert_pos, {
+                    'title': 'Chapter 0',
+                    'source_index': source_index,
+                    'local_time_ms': 0,
+                    'color': QColor("#f0f0f0")
+                })
+
+        # テーブルを構築
+        self._rebuild_chapter_table_from_data(all_chapters)
+
+        if loaded_count > 0:
+            self._log_panel.info(
+                f"Auto-loaded chapters from {loaded_count} file(s)",
+                source="Drop"
+            )
+
     def _add_chapter_for_source(self, source_index: int):
-        """新しいソース用のチャプターを追加"""
+        """新しいソース用のChapter 0を追加（YouTube互換性のため）"""
         if source_index >= len(self._state.sources):
             return
-        source = self._state.sources[source_index]
-        # ソースのローカル時間0に、ファイル名をタイトルとしてチャプターを追加
-        title = source.path.stem
-        self._add_chapter_at_position(0, title, source_index)
+        # ソースのローカル時間0に「Chapter 0」を追加
+        self._add_chapter_at_position(0, 'Chapter 0', source_index)
 
     def _load_chapters_to_table(self, chapters: list):
         """パース済みチャプターをテーブルに読み込み
@@ -5623,6 +6762,30 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 'local_time_ms': local_time_ms,
                 'color': default_color,
             })
+
+        # 各ソースに0:00チャプターがなければ「Chapter 0」を自動追加（YouTube互換性のため）
+        sources_with_zero = set(
+            ch['source_index'] for ch in chapters_data if ch['local_time_ms'] == 0
+        )
+        for source_index in range(len(self._state.sources)):
+            if source_index not in sources_with_zero:
+                # 該当ソースの先頭位置を探して挿入
+                insert_pos = 0
+                for i, ch in enumerate(chapters_data):
+                    if ch['source_index'] == source_index:
+                        insert_pos = i
+                        break
+                    elif ch['source_index'] > source_index:
+                        insert_pos = i
+                        break
+                    else:
+                        insert_pos = i + 1
+                chapters_data.insert(insert_pos, {
+                    'title': 'Chapter 0',
+                    'source_index': source_index,
+                    'local_time_ms': 0,
+                    'color': default_color,
+                })
 
         # テーブルを再構築
         self._rebuild_chapter_table_from_data(chapters_data)
@@ -5670,7 +6833,7 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
         title_item = QTableWidgetItem(title)
 
         # 追加したチャプターは緑色で表示（ドロップ追加と区別）
-        added_color = QColor("#22c55e")  # 緑色
+        added_color = QColor("#c3d825")  # 緑色
         time_item.setForeground(QBrush(added_color))
         title_item.setForeground(QBrush(added_color))
         time_item.setData(Qt.ItemDataRole.UserRole, added_color)
@@ -5687,6 +6850,23 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
             f"Chapter added: '{title}' at {time_str} (source_index={source_index})",
             source="Drop"
         )
+
+    def _on_chapter_files_dropped(self, file_paths: list, insert_index: int):
+        """チャプターテーブルへのチャプターファイルドロップ時の処理
+
+        Args:
+            file_paths: チャプターファイルパスのリスト
+            insert_index: 挿入先のsource_index
+        """
+        chapter_files = [Path(p) for p in file_paths]
+        if not chapter_files:
+            return
+
+        # 現在のモードを判定
+        is_audio_mode = self._is_audio_only if self._state.sources else None
+
+        # チャプターファイルドロップ処理を呼び出し
+        self._handle_chapter_file_drop(chapter_files, is_audio_mode, insert_index)
 
     def _on_folder_dropped(self, folder_path: str):
         """フォルダドロップ時の処理: 作業ディレクトリを設定してソース選択ダイアログを開く"""
@@ -5739,6 +6919,13 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 self._export_worker.cancel()
                 self._export_worker.wait(1000)
             self._export_worker = None
+
+        # CLIエンコードワーカーをクリーンアップ
+        if self._cli_encode_worker is not None:
+            if self._cli_encode_worker.isRunning():
+                self._cli_encode_worker.cancel()
+                self._cli_encode_worker.wait(3000)  # ffmpegプロセス終了を待機
+            self._cli_encode_worker = None
 
         if self._media_player:
             self._media_player.stop()
@@ -5806,7 +6993,15 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                     self._drag_source_row = -1
 
             elif event.type() == QEvent.Type.Drop:
-                # カスタムテーブルの挿入位置インジケーターを使用
+                # 外部ファイルドロップかどうかを確認
+                drop_event = event
+                if hasattr(drop_event, 'mimeData'):
+                    mime_data = drop_event.mimeData()
+                    if mime_data and mime_data.hasUrls():
+                        # 外部ファイルドロップ → DragDropTableWidget.dropEvent()に委譲
+                        return False
+
+                # 内部ドラッグ: カスタムテーブルの挿入位置インジケーターを使用
                 indicator_row = self._table._drop_indicator_row
                 indicator_above = self._table._drop_indicator_above
 
@@ -5865,3 +7060,330 @@ class MainWorkspace(QWidget, YouTubeDownloadMixin):
                 event.accept()
                 return
         super().keyPressEvent(event)
+
+    # ============================================
+    # プロジェクトファイル (.vce.json)
+    # ============================================
+
+    def save_project(self, file_path: Optional[Path] = None) -> bool:
+        """プロジェクトを.vce.jsonファイルに保存
+
+        Args:
+            file_path: 保存先パス（Noneの場合はダイアログで選択）
+
+        Returns:
+            保存成功したかどうか
+        """
+        import json
+
+        if not self._state.sources:
+            self._log_panel.warning("No sources to save", source="Project")
+            return False
+
+        # 保存先を選択
+        if file_path is None:
+            default_name = self._state.sources[0].path.stem + ".vce.json"
+            save_dir = self._state.output_dir or self._state.work_dir
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Project",
+                str(save_dir / default_name),
+                "Video Chapter Editor Project (*.vce.json)"
+            )
+            if not file_path:
+                return False
+            file_path = Path(file_path)
+
+        # プロジェクトデータを構築
+        project_dir = file_path.parent
+
+        # ソースファイルは相対パスで保存
+        sources = []
+        for source in self._state.sources:
+            try:
+                rel_path = source.path.relative_to(project_dir)
+                sources.append(str(rel_path))
+            except ValueError:
+                # 相対パスにできない場合は絶対パス
+                sources.append(str(source.path))
+
+        # チャプター情報を取得
+        chapters = []
+        for row in range(self._table.rowCount()):
+            time_item = self._table.item(row, 0)
+            title_item = self._table.item(row, 1)
+            if time_item and title_item:
+                source_index = time_item.data(Qt.ItemDataRole.UserRole + 1)
+                local_time_ms = time_item.data(Qt.ItemDataRole.UserRole + 2)
+                if source_index is None:
+                    source_index = 0
+                if local_time_ms is None:
+                    # 絶対時間から計算
+                    ch = ChapterInfo.from_time_str(time_item.text(), title_item.text())
+                    local_time_ms = ch.local_time_ms
+                chapters.append({
+                    "local_time_ms": local_time_ms,
+                    "source_index": source_index,
+                    "title": title_item.text()
+                })
+
+        # 出力ディレクトリ（相対パスで保存）
+        output_dir = None
+        if self._state.output_dir:
+            try:
+                output_dir = str(self._state.output_dir.relative_to(project_dir))
+            except ValueError:
+                output_dir = str(self._state.output_dir)
+
+        # プロジェクトデータ
+        project = {
+            "version": "1.0",
+            "status": "complete" if self._state.project_complete else "draft",
+            "sources": sources,
+            "chapters": chapters,
+            "output_dir": output_dir
+        }
+
+        # 保存
+        try:
+            file_path.write_text(
+                json.dumps(project, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+            self._log_panel.info(f"Project saved: {file_path.name}", source="Project")
+            return True
+        except Exception as e:
+            self._log_panel.error(f"Failed to save project: {e}", source="Project")
+            return False
+
+    def load_project(self, file_path: Optional[Path] = None) -> bool:
+        """プロジェクトを.vce.jsonファイルから読み込み
+
+        Args:
+            file_path: 読み込むファイルパス（Noneの場合はダイアログで選択）
+
+        Returns:
+            読み込み成功したかどうか
+        """
+        import json
+
+        # ファイルを選択
+        if file_path is None:
+            from rehearsal_workflow.ui.dialogs import SourceSelectionDialog
+            dialog = SourceSelectionDialog(
+                parent=self,
+                work_dir=self._state.work_dir,
+                mode="project"
+            )
+            dialog.setWindowTitle("Open Project")
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+            file_path = dialog.get_selected_file()
+            if not file_path:
+                return False
+
+        if not file_path.exists():
+            self._log_panel.error(f"Project file not found: {file_path}", source="Project")
+            return False
+
+        # プロジェクトデータを読み込み
+        try:
+            project = json.loads(file_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._log_panel.error(f"Failed to read project: {e}", source="Project")
+            return False
+
+        project_dir = file_path.parent
+        version = project.get("version", "1.0")
+
+        # ソースファイルを解決
+        source_paths = []
+        missing_sources = []
+        for source_name in project.get("sources", []):
+            source_path = project_dir / source_name
+            if not source_path.exists():
+                # 絶対パスとして試す
+                source_path = Path(source_name)
+            if source_path.exists():
+                source_paths.append(source_path)
+            else:
+                missing_sources.append(source_name)
+
+        if missing_sources:
+            self._log_panel.warning(
+                f"Missing sources: {', '.join(missing_sources)}",
+                source="Project"
+            )
+
+        if not source_paths:
+            self._log_panel.error("No valid sources found in project", source="Project")
+            return False
+
+        # 現在の状態をクリア
+        self._clear_all()
+
+        # 作業ディレクトリを設定
+        self._state.work_dir = project_dir
+        self.work_dir_changed.emit(project_dir)
+
+        # ソースファイルを読み込み
+        self._load_multiple_sources(source_paths)
+
+        # 出力ディレクトリを設定
+        output_dir = project.get("output_dir")
+        if output_dir:
+            # まず相対パスとして解決を試みる
+            output_path = project_dir / output_dir
+            if not output_path.exists():
+                # 絶対パスとして試す
+                abs_path = Path(output_dir)
+                if abs_path.exists():
+                    output_path = abs_path
+            # ディレクトリが存在しなくても設定を保持（エクスポート前は存在しないことが多い）
+            self._state.output_dir = output_path
+            self.output_dir_changed.emit(output_path)
+
+        # 完了ステータスを設定
+        status = project.get("status", "draft")
+        is_complete = status == "complete"
+        self._state.project_complete = is_complete
+        # チェックボックスの状態を更新
+        if hasattr(self, '_complete_checkbox'):
+            self._complete_checkbox.blockSignals(True)
+            self._complete_checkbox.setChecked(is_complete)
+            self._complete_checkbox.blockSignals(False)
+        self.project_complete_changed.emit(is_complete)
+
+        # チャプターを保留（_on_duration_detect_finished で読み込まれる）
+        chapters = project.get("chapters", [])
+        if chapters:
+            self._pending_project_chapters = chapters
+
+        self._log_panel.info(
+            f"Project loaded: {file_path.name} (v{version}, {len(source_paths)} sources)",
+            source="Project"
+        )
+        return True
+
+    def _load_project_chapters(self, chapters: list):
+        """プロジェクトのチャプターをテーブルに読み込み"""
+        # テーブルをクリア
+        self._table.setRowCount(0)
+
+        source_offsets = self._get_source_offsets()
+        default_color = QColor("#f0f0f0")
+
+        for ch in chapters:
+            local_time_ms = ch.get("local_time_ms", 0)
+            source_index = ch.get("source_index", 0)
+            title = ch.get("title", "")
+
+            # 絶対時間を計算
+            absolute_time_ms = local_time_ms
+            if source_index < len(source_offsets):
+                absolute_time_ms = source_offsets[source_index] + local_time_ms
+
+            time_str = self._format_time(absolute_time_ms)
+
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+
+            time_item = QTableWidgetItem(time_str)
+            title_item = QTableWidgetItem(title)
+
+            time_item.setForeground(QBrush(default_color))
+            title_item.setForeground(QBrush(default_color))
+            time_item.setData(Qt.ItemDataRole.UserRole, default_color)
+            title_item.setData(Qt.ItemDataRole.UserRole, default_color)
+            time_item.setData(Qt.ItemDataRole.UserRole + 1, source_index)
+            title_item.setData(Qt.ItemDataRole.UserRole + 1, source_index)
+            time_item.setData(Qt.ItemDataRole.UserRole + 2, local_time_ms)
+
+            self._table.setItem(row, 0, time_item)
+            self._table.setItem(row, 1, title_item)
+
+        self._update_source_boundary_rows()
+        self._update_chapter_drag_enabled()
+        self._update_output_preview()
+        self._update_waveform_chapters()
+
+        self._log_panel.debug(
+            f"Loaded {len(chapters)} chapters from project",
+            source="Project"
+        )
+
+    def _clear_all(self):
+        """すべての状態をクリア"""
+        # メディアを停止
+        if self._media_player:
+            self._media_player.stop()
+            self._media_player.setSource(QUrl())  # ソースもクリア
+
+        # ソースをクリア
+        self._state.sources = []
+        self._source_list.set_sources([])
+        self._sync_source_manager()  # SourceFileManagerを同期
+
+        # チャプターをクリア
+        self._table.setRowCount(0)
+
+        # 波形をクリア
+        if hasattr(self, '_waveform_widget'):
+            self._waveform_widget.set_waveform([], 0)
+            self._waveform_widget.set_chapters([], 0)
+            self._waveform_widget.clear_file_boundaries()  # ファイル境界もクリア
+
+        # 状態をリセット
+        self._state.video_path = None
+        self._state.video_duration_ms = 0
+        self._state.output_dir = None
+        self._state.project_complete = False
+        self._chapters_edited = False
+        self._has_embedded_chapters = False
+        self._pending_project_chapters = None
+        self._current_chapter_row = -1
+        # チェックボックスの状態を更新
+        if hasattr(self, '_complete_checkbox'):
+            self._complete_checkbox.blockSignals(True)
+            self._complete_checkbox.setChecked(False)
+            self._complete_checkbox.blockSignals(False)
+        self.project_complete_changed.emit(False)
+        # チャプタータイトルをリセット
+        if hasattr(self, '_chapter_title_label'):
+            self._chapter_title_label.setText("Chapters")
+            self._chapter_title_label.setTextFormat(Qt.TextFormat.PlainText)
+
+    def set_project_complete(self, complete: bool):
+        """編集完了フラグを設定
+
+        Args:
+            complete: 完了フラグ
+        """
+        self._state.project_complete = complete
+        # チェックボックスの状態を更新（シグナルを一時停止）
+        if hasattr(self, '_complete_checkbox'):
+            self._complete_checkbox.blockSignals(True)
+            self._complete_checkbox.setChecked(complete)
+            self._complete_checkbox.blockSignals(False)
+        self._log_panel.debug(
+            f"Project complete: {complete}",
+            source="Project"
+        )
+
+    def _on_complete_checkbox_changed(self, state: int):
+        """Complete チェックボックスの状態変更"""
+        from PySide6.QtCore import Qt
+        checked = state == Qt.CheckState.Checked.value
+        self._state.project_complete = checked
+        self.project_complete_changed.emit(checked)
+        self._log_panel.debug(
+            f"Project complete toggled: {checked}",
+            source="Project"
+        )
+
+    def _batch_encode(self):
+        """Batch Encode: 親ウィンドウのバッチ処理を呼び出す"""
+        # 親ウィンドウ（VideoChapterEditor）の _batch_export メソッドを呼び出す
+        parent = self.window()
+        if parent and hasattr(parent, '_batch_export'):
+            parent._batch_export()
