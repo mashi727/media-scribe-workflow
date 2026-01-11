@@ -54,8 +54,8 @@
 \geometry{left=15mm,right=15mm,top=20mm,bottom=20mm}
 
 % ファイル生成日時（JST）
-\newcommand{\generatedDate}{2026-01-10}
-\newcommand{\generatedTime}{12:00}
+\newcommand{\generatedDate}{2026-01-11}
+\newcommand{\generatedTime}{06:45}
 
 % ヘッダー・フッター設定
 \usepackage{fancyhdr}
@@ -164,6 +164,8 @@
 
 なお、2026年1月10日にリポジトリ名を\texttt{rehearsal-workflow}から\texttt{media-scribe-workflow}に変更した。これは本来の目的である「メディアからの文字起こし（scribe）」をより正確に反映するためである。
 
+2026年1月11日の設計対話において、リポジトリの根本目的「メディアの再利用性・相互運用性向上」を明確化し、VCE機能図の2軸モデル（What/How/Who）を設計した。これにより、処理・コンテンツ・実装クラスの関係が体系的に整理された。
+
 \tableofcontents
 
 \newpage
@@ -258,6 +260,41 @@ Gitの設計には、UNIX哲学の影響が色濃く見られる。小さな単�
 \textbf{解決}: 思考と作業を時間的に分離する。
 \end{decisionbox}
 
+\subsubsection{認知科学的根拠}
+
+この「思考と作業の分離」という設計思想は、認知心理学における注意研究の知見と整合する\footnote{本節の議論は、梅棹忠夫『知的生産の技術』(1969)を起点とした認知科学的再構成に基づく。}。
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+認知科学的知見 & 本プロジェクトへの含意 \\
+\midrule
+ワーキングメモリ容量制限（Miller, 1956） & 思考中にエンコード進捗を気にすると認知負荷が増大 \\
+タスクスイッチングコスト（Monsell, 2003） & 思考と作業の頻繁な切り替えは両方の効率を低下させる \\
+注意の同時処理限界（Pashler, 1994） & 創造的思考と機械的作業の並行処理は原理的に非効率 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+Shiffrin \& Schneider (1977) の自動処理と統制処理の区別によれば、創造的思考（チャプターの切り方を考える、除外区間を判断する）は本質的に\textbf{統制処理}であり、常に注意を要する。一方、エンコードやAI分析の実行は機械に委譲可能な処理である。
+
+\begin{decisionbox}[title={探索的書記と形式的書記}]
+書く行為には二種類ある：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+種類 & 特徴 & 本プロジェクトでの対応 \\
+\midrule
+探索的書記 & 思考を構成する、注意を要する & GUIでのチャプター編集、分析方針決定 \\
+形式的書記 & 機械的処理、自動化可能 & CLIによるバッチ処理、PDF生成 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+プロジェクトファイル（\texttt{.msw.yaml}）は、探索的書記の成果を凍結し、形式的書記を機械に委譲するためのインターフェースである。
+\end{decisionbox}
+
 \begin{indentedlst}
 \begin{lstlisting}[basicstyle=\ttfamily\tiny]
 +-----------------------------------------------------------+
@@ -333,6 +370,38 @@ ffmpeg & 動画処理 & 業界標準ツール \\
 +-------------------+
 \end{lstlisting}
 \end{indentedlst}
+
+\subsection{リポジトリの目的：メディアの再利用性・相互運用性向上}
+
+本リポジトリ（media-scribe-workflow）が目指す根本的な目的は、\textbf{メディアの再利用性・相互運用性向上}である。これは単なるツール開発ではなく、知的生産性の向上を実現するための基盤整備である。
+
+\begin{decisionbox}[title={標準化の意義}]
+\textbf{背景}: 散在するメディアファイル（録画、録音、ダウンロード等）は、そのままでは再利用が困難。
+
+\textbf{目的}:
+\begin{itemize}
+\item \textbf{再利用性}: 関係者（自分自身を含む）が容易に再利用できる形式への変換
+\item \textbf{相互運用性}: 異なるツール・プラットフォーム間での利用を可能にする
+\item \textbf{Digitalization}: 散在するメディアの整理・構造化
+\end{itemize}
+
+\textbf{手段}: VCEを中核とした標準化ワークフロー
+\end{decisionbox}
+
+VCEの役割は、このワークフローにおける\textbf{編集・標準化ツール}である。入力されたメディアファイルに対して以下の処理を行う：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+処理 & 説明 \\
+\midrule
+チャプター位置指定 & 追加・編集・削除・移動 \\
+要不要部分指定 & 除外区間の設定 \\
+音声ノーマライズ & 音量の正規化 \\
+カバー画像設定 & 音声のみの場合、必要に応じて \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
 
 %% ========================================
 %% 第2章：上流設計
@@ -644,6 +713,117 @@ media-scribe-workflow/
 `-- dev_logs_tex/           # 開発ログ（LaTeX/PDF）
 \end{lstlisting}
 \end{indentedlst}
+
+\subsection{VCE機能図：2軸モデル}
+
+VCEの機能を体系的に整理するため、2軸モデルを設計した（図\ref{fig:vce-functional}）\footnote{Mermaidソース: \texttt{dev\_logs\_tex/vce\_functional\_diagram.mmd}}。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{vce_functional_diagram.png}
+\caption{VCE機能図：2軸モデル}
+\label{fig:vce-functional}
+\end{figure}
+
+\subsubsection{設計の経緯}
+
+機能図の設計にあたり、2つのアプローチを検討した：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+アプローチ & 特徴 \\
+\midrule
+案A（クラスありき） & クラス設計から出発し、処理を割り当てる。既存のクラス構造に引きずられやすい \\
+案B（処理ありき） & 処理を洗い出し、類似性を発見してからクラスに集約。処理の本質から設計を見直せる \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\textbf{案B（処理ありき）}を採用した。これにより、以下の評価が可能になる：
+\begin{enumerate}
+\item \textbf{処理の重複}: 同じような処理が複数箇所にないか
+\item \textbf{責務の偏り}: 一つのクラスに処理が集中していないか
+\item \textbf{グルーピングの妥当性}: 処理のまとまりがクラス分割と合っているか
+\end{enumerate}
+
+\subsubsection{2軸の意味}
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+軸 & 方向 & 意味 \\
+\midrule
+縦軸（Y） & 上→下 & 時間・状態変化・目的の階層 \\
+横軸（X） & 左→右 & 目的→手段（What→How→Who） \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{3列構成}
+
+\paragraph{コンテンツ列（What）}
+処理対象のデータを時間・状態変化の順に配置：
+
+\begin{indentedlst}
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+入力（MP4/MP3）
+    |
+    v
+SourceFile（内部表現）
+    |
+    v
+Chapter（チャプター情報）
+    |
+    v
+.vce.json（プロジェクト）
+    |
+    v
+出力（MP4/MP3）
+\end{lstlisting}
+\end{indentedlst}
+
+\paragraph{処理列（How）}
+状態を変化させる機能をグループ化：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+グループ & 処理 \\
+\midrule
+入力 & 分類、読込 \\
+編集 & 追加、削除、章編集、除外 \\
+永続化 & 保存、読込 \\
+出力 & 正規化、変換、分割 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\paragraph{実装列（Who）}
+処理を担当するManagerクラス：
+
+\begin{indentedtable}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Manager & 担当処理 \\
+\midrule
+SourceFileManager & 入力処理、ソース管理 \\
+PlaybackManager & 再生制御 \\
+ChapterManager & 編集、永続化 \\
+ExportOrchestrator & 出力処理 \\
+\bottomrule
+\end{tabularx}
+\end{indentedtable}
+
+\subsubsection{モデルの活用}
+
+この2軸モデルにより、以下の設計検証が可能となる：
+
+\begin{enumerate}
+\item \textbf{責務の確認}: 各Managerが担当する処理が明確になり、責務の偏りを発見できる
+\item \textbf{依存関係の可視化}: コンテンツ→処理→実装の流れが明確になり、依存の方向が一目でわかる
+\item \textbf{リファクタリングの指針}: 処理のグルーピングとManagerの対応を見直す際の基準となる
+\end{enumerate}
 
 \subsection{CLIツール（配管層）}
 
