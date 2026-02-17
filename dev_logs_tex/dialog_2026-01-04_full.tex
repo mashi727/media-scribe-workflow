@@ -1,0 +1,289 @@
+%% dialog_2026-01-04_full.tex
+%% 2026年1月4日の開発対話記録（594メッセージ）
+
+\section{2026年1月4日：成果物変換図とYouTubeダウンロード機能}
+
+この日は、前日の設計議論を踏まえた成果物変換図の作成、GitHub Pagesによるドキュメント公開、YouTubeダウンロード機能の実装、再生コントロールのUI改善など、594メッセージに及ぶ大規模な開発セッションとなった。
+
+\subsection{成果物ベースのワークフロー整理}
+
+\begin{userbox}
+もう一度、整理したいと思います。成果物ベースでは入力は、外部から提供される曲ごとの音声／映像ファイル、未編集音声ファイル、未編集mp4、Youtubeからダウンロードできる講義／レッスン動画。最終的な出力は、講義の学習教材や欠席者の自習用に活用できるレベルの資料（PDF）、講義の詳細なスクリプト、自習・確認用のチャプター付き動画、Youtube動画用のチャプターリストと認識しています。
+\end{userbox}
+
+成果物の関係が体系的に整理された：
+
+\vspace{0.5\baselineskip}
+\noindent{\footnotesize
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+分類 & 成果物 & 備考 \\
+\midrule
+入力 & 曲ごと音声/映像、未編集素材、YouTube URL & 状態により前処理要否が決定 \\
+中間出力 & SRT（YouTube/Whisper）、チャプター付きmp4 & \\
+最終出力 & スクリプトPDF、サマリーPDF、チャプターリスト & \\
+\bottomrule
+\end{tabularx}
+}
+\vspace{0.5\baselineskip}
+
+\subsection{スクリプトとサマリーの区別}
+
+\begin{userbox}
+講義の詳細なスクリプトは、srt-meeting-report.mdで示した内容をイメージしています。
+\end{userbox}
+
+\begin{assistantbox}
+スクリプトは単なるSRT整形ではなく、発言者識別、セクション構造、略語のfootnote、文脈補足を含む構造化文書ということですね。
+\end{assistantbox}
+
+両者の関係が明確化された：
+
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+SRT
+ +-- スクリプト: 原文忠実、全発言記録（一次資料）
+ |     `- LuaTeX -> PDF
+ |
+ `-- サマリーレポート: AI分析・要約（二次資料）
+       `- 学習ポイント抽出、構造化
+\end{lstlisting}
+
+\subsection{話者特定（Speaker Diarization）}
+
+\begin{userbox}
+いつも必要となるとは考えていませんが、会議の録音など話者特定を行いたい場合はありますね。
+\end{userbox}
+
+プロファイル別の必要性が整理された：
+
+\vspace{0.5\baselineskip}
+\noindent{\footnotesize
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+プロファイル & 話者特定 \\
+\midrule
+orchestral\_rehearsal & 不要（基本的に指揮者のみ） \\
+horn\_lesson & あると便利（講師と生徒の区別） \\
+meeting\_report & 有用（複数参加者の発言記録） \\
+\bottomrule
+\end{tabularx}
+}
+\vspace{0.5\baselineskip}
+
+\subsection{GitHub Pagesによるドキュメント公開}
+
+\begin{userbox}
+Mermaidの図、SVGで保存できたと思うんですけど、ファイルに保存するためのUIってつけられます？
+\end{userbox}
+
+\begin{userbox}
+アプリに実装ではなく、githubのページに実装してもらいたいんですけど。
+\end{userbox}
+
+docs/ディレクトリにMermaid図ビューアが作成された：
+
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+docs/
++-- index.html          # トップページ
+`-- mermaid-viewer.html # Mermaid図ビューア + SVGダウンロード
+\end{lstlisting}
+
+機能：
+\begin{itemize}
+\item ドロップダウンで図を選択
+\item Download SVGボタンでファイル保存
+\item ダークモード対応（OS設定に連動）
+\item URL直リンク対応（例: \texttt{\#artifact-transformation}）
+\end{itemize}
+
+\begin{userbox}
+JSが動くんですね。Leafletはいける感じですか。
+\end{userbox}
+
+\begin{assistantbox}
+問題なく動きます。Leafletは完全にクライアントサイドJSなので、GitHub Pagesと相性抜群です。
+\end{assistantbox}
+
+\subsection{YouTubeダウンロード機能の実装}
+
+\begin{userbox}
+未実装ですが、Youtubeのリンクから動画をダウンロードし、表示、編集する機能を追加しましょう。そうすると、現在の成果物変換図のVideo Chapter Editorのスコープが全ての入力に対応できるようになりますね。
+\end{userbox}
+
+\subsubsection{SourceSelectionDialogの拡張}
+
+\begin{userbox}
+メイン画面がビジーになるので、Select Sourceのダイアログの中に作成しましょうか。加えて、Cover Imageの機能もmp3固有のものなのでこのボタンも、Select Sourceダイアログへ移動しましょう。
+\end{userbox}
+
+SourceSelectionDialogが大幅に拡張された：
+
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
++----------------------------------------------------+
+| Select Source                                       |
++----------------------------------------------------+
+|  ( ) Local Files    ( ) YouTube URL                 |
++----------------------------------------------------+
+| [Local Files選択時]                                 |
+|  [MP3] [MP4]                    /path/to/dir [..]   |
+|  +-----------------------------------------------+  |
+|  | file1.mp3                                     |  |
+|  | file2.mp3                                     |  |
+|  +-----------------------------------------------+  |
+|                                                     |
+| [YouTube URL選択時]                                 |
+|  URL: [_________________________________] [Check]   |
+|  Status: Ready to download                          |
++----------------------------------------------------+
+| Cover Image (for audio files):                      |
+|  [Select Image] Not Set            [Clear]          |
++----------------------------------------------------+
+|                              [Cancel] [OK]          |
++----------------------------------------------------+
+\end{lstlisting}
+
+\subsubsection{YouTubeDownloadWorkerの実装}
+
+workers.pyにYouTubeダウンロード用のワーカークラスが追加された：
+
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+class YouTubeDownloadWorker(QThread):
+    """YouTube動画ダウンロードワーカー"""
+    log_message = Signal(str)
+    progress_update = Signal(str)
+    download_completed = Signal(str, str)  # (video_path, srt_path or "")
+    error_occurred = Signal(str)
+
+    def __init__(self, url: str, output_dir: str,
+                 download_subs: bool = True, sub_lang: str = "ja"):
+        # ...
+
+    def _sanitize_filename(self, title: str, max_length: int = 60) -> str:
+        """タイトルをファイル名に使える形式に変換"""
+        # ...
+
+    def _get_video_info(self) -> Optional[dict]:
+        """yt-dlp -J で動画情報を取得"""
+        # ...
+\end{lstlisting}
+
+\subsubsection{カバー画像プレビュー}
+
+\begin{userbox}
+カバー画像の有無をメイン画面で確認したいと考えています。Select Sourceとファイル名の右側に画像を表示するウィジェットを２行分で作成してください。カバー画像が作成されていないときは黒背景でUnsetと赤字で表示してください。
+\end{userbox}
+
+main\_workspace.pyにカバー画像プレビューが追加された：
+
+\begin{itemize}
+\item サイズ: 142×80px（16:9アスペクト比、2行分の高さ）
+\item 未設定時: 黒背景（\texttt{\#0a0a0a}）+ 赤字（\texttt{\#ef4444}）で「Cover Image\textbackslash nUnset」
+\item 設定時: カバー画像をスケーリングして表示
+\end{itemize}
+
+\subsection{再生コントロールのUI改善}
+
+\subsubsection{チャプタースキップボタン}
+
+\begin{userbox}
+プレイヤーのコントロールで、再生／一時停止ボタンの左右にチャプタースキップを追加してください。
+\end{userbox}
+
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+# 前のチャプター
+self._prev_chapter_btn = QPushButton("|◀")
+self._prev_chapter_btn.setFixedSize(50, 50)
+self._prev_chapter_btn.clicked.connect(self._goto_prev_chapter)
+
+# 次のチャプター
+self._next_chapter_btn = QPushButton("▶|")
+self._next_chapter_btn.setFixedSize(50, 50)
+self._next_chapter_btn.clicked.connect(self._goto_next_chapter)
+\end{lstlisting}
+
+動作仕様：
+\begin{itemize}
+\item 前のチャプター: 現在位置から1秒以上前のチャプターにジャンプ
+\item 次のチャプター: 現在位置から500ms以上後のチャプターにジャンプ
+\item メディアが読み込まれている AND チャプターが存在する場合のみ有効
+\end{itemize}
+
+\subsubsection{Windowsでの再生シンボル修正}
+
+\begin{userbox}
+Windowsで再生ボタンの背景と再生シンボルの背景色が異なるんですけど、修正できますか？
+\end{userbox}
+
+\begin{assistantbox}
+Windowsでは Unicode 記号（▶、⏸）が Segoe UI Emoji フォントで絵文字として描画され、独自の背景色が表示されます。Segoe UI Symbol フォントを指定することで解決します。
+\end{assistantbox}
+
+\begin{lstlisting}[language=python,basicstyle=\ttfamily\tiny]
+is_windows = platform.system() == "Windows"
+symbol_font_css = "font-family: 'Segoe UI Symbol';" if is_windows else ""
+\end{lstlisting}
+
+\subsubsection{パステルカラーの適用}
+
+\begin{userbox}
+コントロールのボタンにも、パステル調のカラーをさりげなくつけましょうか。
+\end{userbox}
+
+\begin{userbox}
+混乱することはないと思うので、戻る系の色に進む系もパステルブルーに統一してください。
+\end{userbox}
+
+最終的に全ての時間移動ボタン・チャプタースキップボタンがパステルブルーに統一された：
+
+\vspace{0.5\baselineskip}
+\noindent{\footnotesize
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+ボタン & 色 \\
+\midrule
+時間移動（-10s〜+10s）、チャプタースキップ（|◀、▶|） & パステルブルー（\texttt{\#2a3a4d}） \\
+再生/一時停止（▶/⏸） & ブルー（\texttt{\#3b82f6}） \\
+\bottomrule
+\end{tabularx}
+}
+\vspace{0.5\baselineskip}
+
+\subsubsection{ボタン状態の統一}
+
+\begin{userbox}
+動画が読み込まれていない時、再生ボタンとスキップボタンが使用できないようになっているのに対して、他のボタンが使用できる状態なので、これも合わせてください。
+\end{userbox}
+
+\texttt{\_update\_seek\_buttons(enabled)}メソッドが追加され、8つの時間移動ボタンの有効/無効を一括で切り替える機能が実装された。
+
+\subsection{チャプターテーブルの行番号}
+
+\begin{userbox}
+Chaptersのリストのタイトルを、背景黒で「No.」を追加しましょう。記入がない状態でもNo.を表示するようにしてください。
+\end{userbox}
+
+当初は3列目としてNo.カラムを追加する実装が行われたが、ユーザーの意図は既存の行ヘッダーのスタイリングであることが判明し、修正された。行ヘッダーの背景を黒にし、コーナーウィジェットに「No.」を表示する実装に変更された。
+
+\subsection{この日の成果}
+
+\begin{enumerate}
+\item \textbf{成果物変換図} - 入力→中間出力→最終出力の関係を明確化
+\item \textbf{スクリプト/サマリー区別} - 一次資料と二次資料の定義
+\item \textbf{話者特定} - プロファイル別必要性の整理
+\item \textbf{GitHub Pages} - Mermaid図ビューア + SVGエクスポート
+\item \textbf{YouTubeダウンロード} - yt-dlp統合、SourceSelectionDialog拡張
+\item \textbf{カバー画像プレビュー} - メイン画面に状態表示
+\item \textbf{チャプタースキップ} - 再生コントロールに追加
+\item \textbf{パステルカラー} - ボタンの視覚的改善
+\item \textbf{Windows対応} - Unicode記号のフォント修正
+\end{enumerate}
+
+\subsection{技術的なポイント}
+
+\begin{enumerate}
+\item \textbf{GitHub Pages}: 静的ファイルのみ（HTML/CSS/JS）、サーバーサイド処理なし、Mermaid.jsやLeafletなどクライアントサイドライブラリは動作可能
+\item \textbf{QThread Worker}: YouTubeダウンロードをバックグラウンドで実行し、UIをブロックしない設計
+\item \textbf{Windows Unicode}: Segoe UI EmojiではなくSegoe UI Symbolを指定することでカラー絵文字を回避
+\item \textbf{ボタン状態管理}: インスタンス変数として保持し、メディア読み込み状態に応じて一括で有効/無効を切り替え
+\end{enumerate}
+

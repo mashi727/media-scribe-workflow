@@ -1,0 +1,119 @@
+%% dialog_2026-01-01_full.tex
+%% 2026年1月1日の開発対話記録（6メッセージ）
+
+\section{2026年1月1日：iPad版への展望}
+
+新年最初のセッションは、video-chapter-editorのiPad対応可能性についての技術的検討が行われた短い対話となった。
+
+\subsection{iPad移植の技術的課題}
+
+\begin{userbox}
+このアプリ、iPad用にリリースするとなると大変ですかね。
+\end{userbox}
+
+\begin{assistantbox}
+かなり大変です。現在の構成ではiOSへの直接移植は困難です。
+\end{assistantbox}
+
+主な技術的障壁が整理された：
+
+\vspace{0.5\baselineskip}
+\noindent{\footnotesize
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+要素 & 現状 & iPad移植 \\
+\midrule
+GUI & PySide6 (Qt) & iOS非対応 \\
+言語 & Python & iOS公式サポートなし \\
+動画処理 & ffmpeg (CLI) & 要ネイティブビルド \\
+ファイルアクセス & 自由 & サンドボックス制限 \\
+\bottomrule
+\end{tabularx}
+}
+\vspace{0.5\baselineskip}
+
+\subsection{移植アプローチの検討}
+
+4つの選択肢が提示された：
+
+\begin{enumerate}
+\item \textbf{ネイティブ書き直し}（最も現実的）
+  \begin{itemize}
+  \item Swift + SwiftUI
+  \item AVFoundation（動画処理）
+  \item 工数: 大
+  \end{itemize}
+
+\item \textbf{クロスプラットフォーム}
+  \begin{itemize}
+  \item Flutter / React Native
+  \item Kotlin Multiplatform
+  \item 工数: 中〜大
+  \end{itemize}
+
+\item \textbf{Web + サーバー構成}
+  \begin{itemize}
+  \item フロントエンド: Web (PWA)
+  \item バックエンド: 現在のPython処理をAPI化
+  \item iPad: Safari/WebViewで利用
+  \item 工数: 中
+  \end{itemize}
+
+\item \textbf{Catalyst}
+  \begin{itemize}
+  \item macOS版を先に作成 → iPad互換
+  \item Qt/PySide6では難しい
+  \end{itemize}
+\end{enumerate}
+
+\subsection{Tauri経由のSwift移行案}
+
+\begin{userbox}
+Tauri版を作成して、Swiftに向かうのはいかがでしょう。
+\end{userbox}
+
+\begin{assistantbox}
+良いアプローチです。Tauri 2.0はiOS/Androidサポートがあります。
+\end{assistantbox}
+
+段階的な移行パスが提案された：
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+現在 (PySide6)
+    ↓
+Tauri 2.0 (Rust + Web)
+    ↓
+├── デスクトップ: そのまま利用
+├── iPad: Tauri iOS (実験的)
+└── 必要なら: Swift書き直し (知見を活用)
+\end{lstlisting}
+
+Tauriのメリット：
+
+\vspace{0.5\baselineskip}
+\noindent{\footnotesize
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+項目 & 内容 \\
+\midrule
+コード共有 & デスクトップ/モバイルで同一フロントエンド \\
+パフォーマンス & Rustバックエンドは高速 \\
+バイナリサイズ & Electronより小さい（約10MB） \\
+学習効果 & Rust → Swift移行時に役立つ \\
+\bottomrule
+\end{tabularx}
+}
+\vspace{0.5\baselineskip}
+
+\begin{userbox}
+ちょっと考えますね。
+\end{userbox}
+
+\begin{assistantbox}
+了解です。検討事項が多いですからね。
+\end{assistantbox}
+
+\subsection{この日の要点}
+
+2026年最初のセッションでは、具体的な開発作業ではなく、アプリの将来的な展開について検討が行われた。PySide6/Pythonベースの現在のアーキテクチャからiPad対応への道筋として、Tauri 2.0を中間ステップとし、必要に応じてSwiftへ移行するという段階的アプローチが有力な選択肢として浮上した。
+

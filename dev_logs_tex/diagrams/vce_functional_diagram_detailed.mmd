@@ -1,0 +1,217 @@
+%%{init: {'theme': 'base', 'flowchart': {'nodeSpacing': 10, 'rankSpacing': 25, 'curve': 'basis'}}}%%
+flowchart LR
+    subgraph External["外部入力"]
+        direction TB
+        Y1["YouTube URL/再生リスト"]
+        L1["MP4（単一/複数）"]
+        L2["MP3（単一/複数）"]
+        L3["チャプターファイル .txt"]
+        P1["前処理\nyt-dlp/ffmpeg"]
+    end
+
+    subgraph VCE["VCE（Video Chapter Editor）"]
+        direction TB
+
+        subgraph Layer1["UI・表示層"]
+            direction TB
+
+            subgraph Input_Processing["入力処理 ※PAD: pad_on_files_dropped_v2"]
+                direction TB
+                IP1["_on_files_dropped()"]
+                IP2["SourceFileManager\n.classify_dropped_files()"]
+                IP3{"ClassifiedFiles\n判定"}
+            end
+
+            subgraph Load_Mode["ロードモード分岐"]
+                direction TB
+                LM1{"sources\n存在?"}
+                LM2["初回モード\n_handle_initial_drop()\n※PAD: pad_handle_initial_drop_v2"]
+                LM3["追加モード\n_add_sources_to_existing()\n※PAD: pad_add_sources_to_existing_v2"]
+                LM4{"型チェック\naudio/video"}
+            end
+
+            subgraph UI_Operations["UI操作"]
+                direction TB
+                UI1["Open Dialog"]
+                UI2["D&D受付"]
+                UI3["再生操作\n再生/停止/シーク"]
+                UI4["音声デバイス選択"]
+            end
+
+            subgraph Display["表示コンポーネント"]
+                direction TB
+                D1["動画プレビュー\nQMediaPlayer"]
+                D2["波形表示\nWaveformWidget"]
+                D3["スペクトログラム"]
+                D4["仮想タイムライン\nマーカー/境界/除外"]
+                D5["ソースリスト\nSourceListWidget"]
+            end
+
+            subgraph UI_Update["UI更新メソッド"]
+                direction TB
+                UU1["_prepare_for_new_source()"]
+                UU2["_load_source_media()"]
+                UU3["_update_waveform_chapters()"]
+                UU4["_start_waveform_generation()"]
+            end
+        end
+
+        subgraph Layer2["編集・ダイアログ層"]
+            direction TB
+            subgraph Edit_Row["編集機能"]
+                direction TB
+                E1["チャプターCRUD\n追加/削除/編集"]
+                E2["除外設定\nExclude regions"]
+                E3["貼り付け/抽出"]
+                E4["ソース並べ替え"]
+                E5["行ドラッグ"]
+            end
+            subgraph Dialog_Row["ダイアログ"]
+                direction TB
+                DG1["ソース選択"]
+                DG2["エクスポート設定"]
+                DG3["カバー画像"]
+                DG4["並べ替え"]
+                DG5["バッチ"]
+                DG6["プレイリスト"]
+                DG7["設定"]
+            end
+        end
+
+        subgraph Layer3["内部処理層"]
+            direction TB
+
+            subgraph Manager_Row["Manager"]
+                direction TB
+                M1["PlaybackManager\n再生制御/仮想タイムライン"]
+                M2["ChapterManager\nチャプターCRUD/永続化"]
+                M3["ExportOrchestrator\nエクスポートワークフロー"]
+                M4["SourceFileManager\n※PAD: pad_source_manager_*"]
+            end
+
+            subgraph SourceManager_Detail["SourceFileManager詳細"]
+                direction TB
+                SM1["classify_dropped_files()\nClassifiedFiles生成"]
+                SM2["handle_initial_load()\nInitialLoadResult生成\n※PAD図参照"]
+                SM3["handle_add_sources()\nAddSourcesResult生成\n※PAD図参照"]
+                SM4["virtual_to_source()\nsource_to_virtual()"]
+            end
+
+            subgraph Worker_Row["Worker（非同期）"]
+                direction TB
+                W1["ExportWorker"]
+                W2["SplitWorker"]
+                W3["WaveformWorker"]
+                W4["SpectrogramWorker"]
+                W5["YouTubeWorker"]
+                W6["PlaylistWorker"]
+                W7["DurationDetectWorker"]
+            end
+        end
+    end
+
+    subgraph Output["出力"]
+        direction TB
+        PJ["プロジェクト\n.vce.json"]
+        V1["チャプター付MP4"]
+        V2["分割動画"]
+        V3["音声MP3"]
+        T1["YouTubeチャプター"]
+        T2["テキスト"]
+    end
+
+    %% Input flow
+    L1 --> UI1
+    L1 --> UI2
+    L2 --> UI1
+    L2 --> UI2
+    L3 --> UI2
+    Y1 --> P1
+    P1 --> UI1
+
+    %% D&D/Open to classification
+    UI1 --> IP1
+    UI2 --> IP1
+    IP1 --> IP2
+    IP2 --> IP3
+
+    %% Classification results
+    IP3 -->|"has_project"| PJ
+    IP3 -->|"has_media"| LM1
+
+    %% Load mode branching
+    LM1 -->|"No: 初回"| LM2
+    LM1 -->|"Yes: 追加"| LM4
+    LM4 -->|"型一致"| LM3
+    LM4 -->|"型不一致"| UI2
+
+    %% Initial/Add to SourceFileManager
+    LM2 --> SM2
+    LM3 --> SM3
+
+    %% SourceFileManager to UI Update
+    SM2 --> UU1
+    SM3 --> UU3
+    UU1 --> UU2
+    UU2 --> UU4
+
+    %% UI Update to Display
+    UU2 --> D1
+    UU2 --> D5
+    UU3 --> D4
+    UU4 --> D2
+
+    %% Playback
+    UI3 --> M1
+    M1 --> D1
+    M1 --> D4
+    M1 --> SM4
+
+    %% Edit layer
+    E1 --> M2
+    E4 --> M4
+    DG2 --> M3
+
+    %% Manager to Worker
+    M3 --> W1
+    M3 --> W2
+    M4 --> W7
+
+    %% Worker to Display
+    W3 --> D2
+    W4 --> D3
+    W7 --> SM2
+
+    %% Output
+    M2 --> PJ
+    M4 --> PJ
+    W1 --> V1
+    W2 --> V2
+    M2 --> T1
+
+    %% Styling
+    classDef external fill:#e3f2fd,stroke:#1565c0
+    classDef input fill:#fff3e0,stroke:#e65100
+    classDef loadmode fill:#fce4ec,stroke:#c2185b
+    classDef ui fill:#c8e6c9,stroke:#388e3c
+    classDef display fill:#b3e5fc,stroke:#0288d1
+    classDef uiupdate fill:#dcedc8,stroke:#689f38
+    classDef edit fill:#f3e5f5,stroke:#7b1fa2
+    classDef dialog fill:#ffe0b2,stroke:#f57c00
+    classDef manager fill:#e1bee7,stroke:#6a1b9a
+    classDef sourcemanager fill:#f8bbd9,stroke:#ad1457
+    classDef worker fill:#ffccbc,stroke:#e64a19
+    classDef output fill:#e8f5e9,stroke:#2e7d32
+
+    class Y1,L1,L2,L3,P1 external
+    class IP1,IP2,IP3 input
+    class LM1,LM2,LM3,LM4 loadmode
+    class UI1,UI2,UI3,UI4 ui
+    class D1,D2,D3,D4,D5 display
+    class UU1,UU2,UU3,UU4 uiupdate
+    class E1,E2,E3,E4,E5 edit
+    class DG1,DG2,DG3,DG4,DG5,DG6,DG7 dialog
+    class M1,M2,M3,M4 manager
+    class SM1,SM2,SM3,SM4 sourcemanager
+    class W1,W2,W3,W4,W5,W6,W7 worker
+    class PJ,V1,V2,V3,T1,T2 output

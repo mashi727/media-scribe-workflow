@@ -1,0 +1,256 @@
+% LuaLaTeX document
+\documentclass[a4paper,10pt,twocolumn]{ltjsarticle}
+
+% ファイル生成日時（JST）
+\newcommand{\generatedDate}{2026-01-12}
+\newcommand{\generatedTime}{15:45}
+
+% LuaLaTeX用フォント設定パッケージ
+\usepackage{luatexja-fontspec}
+\usepackage{amsmath,amssymb}
+\usepackage{unicode-math}
+
+% ====================
+% 欧文フォント設定 (Libertinus)
+% ====================
+\setmainfont{Libertinus Serif}[
+    BoldFont = {Libertinus Serif Bold},
+    ItalicFont = {Libertinus Serif Italic},
+    BoldItalicFont = {Libertinus Serif Bold Italic}
+]
+\setsansfont{Libertinus Sans}[
+    BoldFont = {Libertinus Sans Bold},
+    ItalicFont = {Libertinus Sans Italic}
+]
+\setmonofont{DejaVu Sans Mono}[Scale=0.9]
+
+% ====================
+% 日本語フォント設定 (原ノ味フォント)
+% ====================
+\setmainjfont{HaranoAjiMincho-Regular}[
+    BoldFont = {HaranoAjiGothic-Medium},
+    ItalicFont = {HaranoAjiMincho-Regular},
+    BoldItalicFont = {HaranoAjiGothic-Bold}
+]
+\setsansjfont{HaranoAjiGothic-Regular}[
+    BoldFont = {HaranoAjiGothic-Bold}
+]
+\setmonojfont{HaranoAjiGothic-Regular}
+
+% ====================
+% 数式フォント設定 (Libertinus Math)
+% ====================
+\setmathfont{Libertinus Math}
+
+% ヘッダー・フッター設定
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[R]{\small \generatedDate\ \generatedTime\ JST (\thepage/\pageref{LastPage})}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% 1ページ目のスタイル
+\fancypagestyle{firstpage}{
+  \fancyhf{}
+  \renewcommand{\headrulewidth}{0pt}
+}
+
+% 追加パッケージ
+\usepackage{ascmac}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+% listings設定（コード表示用）
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  literate={~}{{\textasciitilde}}1
+}
+
+% Y列タイプの定義
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{Claude Code カスタムコマンドに関する技術対話}
+\author{massy-Claude Dialogue}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{firstpage}
+
+\section*{概要}
+
+本文書は、Claude Codeのカスタムコマンド機能に関する技術的な対話を記録したものである。
+特に、複数コマンドの組み合わせ実行とファイル参照機能について検討した。
+
+\section{複数コマンドの組み合わせ実行}
+
+\begin{itembox}[l]{問い}
+\texttt{\textasciitilde/.claude/commands}にカスタムコマンドをいくつか定義しています。
+複数のコマンドを組み合わせて実行することは可能ですか
+\end{itembox}
+
+\subsection{回答}
+
+直接的なコマンドチェーン機能は実装されていないが、いくつかの代替手段がある。
+
+\subsubsection{推奨方法：メタコマンドの作成}
+
+\texttt{context: fork}を使って、複数コマンドを呼び出すメタコマンドを作成できる。
+
+\begin{lstlisting}[language={}]
+# ~/.claude/commands/full-workflow.md
+---
+context: fork
+description: 複数処理を一括実行
+allowed-tools: Bash(*)
+---
+
+以下のワークフローを順序実行:
+
+## ステップ1
+/srt-script を実行して字幕ファイルを準備
+
+## ステップ2
+/rehearsal を実行して分析レポートを作成
+
+## ステップ3
+/srttex を実行してPDF用ドキュメントを生成
+\end{lstlisting}
+
+Claudeが自動的にSkillツールを使って各コマンドを呼び出す。
+
+\subsubsection{他の代替手段}
+
+\vspace{0.5\baselineskip}
+\noindent{\footnotesize
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+方法 & 用途 \\
+\midrule
+メタコマンド（\texttt{context: fork}） & 複数コマンドの統合ワークフロー \\
+Bashスクリプト統合 & シェルコマンドとの連携 \\
+手動順次実行 & シンプルな場合は\texttt{/cmd1} → \texttt{/cmd2}と手動で \\
+\bottomrule
+\end{tabularx}
+}
+\vspace{0.5\baselineskip}
+
+\subsubsection{制限の理由}
+
+\begin{itemize}
+  \item 各コマンド実行時にユーザーが確認・制御できるようにする設計
+  \item 途中結果を確認して分岐・修正が可能
+\end{itemize}
+
+\section{カスタムコマンド内でのファイル参照}
+
+\begin{itembox}[l]{問い}
+カスタムコマンドで、\texttt{\textasciitilde/.claude/command/}のなかのファイルを読み込むことは可能ですか
+\end{itembox}
+
+\subsection{回答}
+
+\texttt{@}記法でファイル参照が可能である。
+
+\subsubsection{基本的な使い方}
+
+\begin{lstlisting}[language={}]
+# ~/.claude/commands/my-command.md
+
+@~/.claude/commands/shared-template.md
+の内容に従って処理してください
+
+# または相対パス
+@.claude/SHARED_STANDARDS.md を参照して
+コードレビュー
+\end{lstlisting}
+
+\subsubsection{制限事項}
+
+\begin{itemize}
+  \item カスタムコマンド間の直接的なinclude/import機能はない
+  \item \texttt{@}はファイル内容をClaudeに渡す参照であり、テンプレートエンジンのような埋め込みではない
+\end{itemize}
+
+\subsubsection{共通テンプレートを共有する方法}
+
+\paragraph{方法1：共有ファイルを\texttt{@}で参照}
+
+\begin{lstlisting}[language={}]
+~/.claude/
++-- commands/
+|   +-- srt-script.md   # @~/.claude/SHARED...
+|   +-- rehearsal.md    # @~/.claude/SHARED...
+|   +-- luatex.md
++-- SHARED_TEMPLATE.md  # 共通テンプレート
+\end{lstlisting}
+
+\paragraph{方法2：Skills機能を使用（複雑な場合に推奨）}
+
+\begin{lstlisting}[language={}]
+~/.claude/skills/document-generation/
++-- SKILL.md         # メイン定義
++-- templates.md     # テンプレート集
++-- styles.md        # スタイルガイド
+\end{lstlisting}
+
+Skillsは複数ファイル構造をサポートしており、より複雑なワークフローに適している。
+
+\subsubsection{機能対応まとめ}
+
+\vspace{0.5\baselineskip}
+\noindent{\footnotesize
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+機能 & 可否 \\
+\midrule
+\texttt{@}でファイル参照 & 可能 \\
+コマンド間のinclude & 不可 \\
+共有ファイルを\texttt{@}参照 & 可能（推奨） \\
+複数ファイル構成 & Skills機能を使用 \\
+\bottomrule
+\end{tabularx}
+}
+\vspace{0.5\baselineskip}
+
+\section*{Claude Code氏の所感}
+
+本対話を通じて、Claude Codeのカスタムコマンド機能における設計思想がよく見える。
+
+\paragraph{技術的観点}
+カスタムコマンドは「単一ファイル・単一目的」という設計原則に基づいている。
+これはUnix哲学の「一つのことをうまくやる」に通じるものであり、
+シンプルさと予測可能性を重視した設計である。
+一方で、複雑なワークフローを構築したい場合には、
+Skills機能への移行が必要となり、学習コストが増加する。
+
+\paragraph{ユーザビリティ観点}
+直接的なコマンドチェーン機能がないことは、
+「暗黙の動作を避ける」という安全性重視の設計と解釈できる。
+ユーザーは各ステップの実行を明示的に確認できるため、
+意図しない動作を防ぐことができる。
+しかし、定型的なワークフローを繰り返し実行する場合には冗長に感じる可能性がある。
+
+\paragraph{アーキテクチャ的考察}
+\texttt{@}記法によるファイル参照は、LLMへのコンテキスト注入という観点では合理的だが、
+従来のプログラミングにおけるモジュールシステムとは根本的に異なる。
+これは「プロンプトエンジニアリング」という新しいパラダイムの制約とも言える。
+Skills機能の存在は、この制約を緩和しようとする試みであり、
+今後のCLIツールとLLMの統合における一つの方向性を示している。
+
+\paragraph{批判的視点}
+現状の設計では、カスタムコマンドのDRY原則（Don't Repeat Yourself）の適用が困難である。
+複数のコマンドで共通のプロンプト部分がある場合、それぞれのファイルに重複して記述するか、
+Skills機能への移行を強いられる。
+この点は、より軽量なinclude機構の導入によって改善できる余地があると考えられる。
+
+\end{document}

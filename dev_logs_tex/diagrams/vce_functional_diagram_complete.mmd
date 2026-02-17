@@ -1,0 +1,167 @@
+%%{init: {'theme': 'base', 'flowchart': {'nodeSpacing': 8, 'rankSpacing': 20, 'curve': 'basis', 'wrappingWidth': 80}}}%%
+flowchart LR
+    subgraph External["外部入力"]
+        direction TB
+        Y1["YouTube URL/再生リスト"]
+        L1["MP4（単一/複数）"]
+        L2["MP3（単一/複数）"]
+        L3["チャプターファイル"]
+        P1["前処理\nyt-dlp/ffmpeg"]
+    end
+
+    subgraph VCE["VCE（Video Chapter Editor）"]
+        direction TB
+
+        subgraph Layer1["UI・表示層"]
+            direction TB
+            subgraph UI_Row["UI操作"]
+                direction TB
+                UI1["Open/Add"]
+                UI2["D&D"]
+                UI3["再生操作\n再生/停止/シーク"]
+                UI4["音声デバイス"]
+            end
+            subgraph Display_Row["表示"]
+                direction TB
+                D1["動画プレビュー"]
+                D2["波形"]
+                D3["スペクトログラム"]
+                D4["仮想タイムライン\nマーカー/境界/除外"]
+                D5["ソースリスト"]
+            end
+        end
+
+        subgraph Layer2["編集・ダイアログ層"]
+            direction TB
+            subgraph Edit_Row["編集"]
+                direction TB
+                E1["チャプターCRUD"]
+                E2["除外設定"]
+                E3["貼り付け/抽出"]
+                E4["ソース並べ替え"]
+                E5["行ドラッグ"]
+            end
+            subgraph Dialog_Row["ダイアログ"]
+                direction TB
+                DG1["ソース選択"]
+                DG2["エクスポート設定"]
+                DG3["カバー画像"]
+                DG4["並べ替え"]
+                DG5["バッチ"]
+                DG6["プレイリスト"]
+                DG7["設定"]
+            end
+            subgraph Settings_Row["設定・管理"]
+                direction TB
+                S1["テーマ"]
+                S2["カラー"]
+                S3["ログ"]
+                S4["更新"]
+                S5["ショートカット"]
+                S6["完了フラグ"]
+            end
+        end
+
+        subgraph Layer3["内部処理層"]
+            direction TB
+            subgraph Manager_Row["Manager"]
+                direction TB
+                M1["PlaybackManager"]
+                M2["ChapterManager"]
+                M3["ExportOrchestrator"]
+                M4["SourceFileManager"]
+            end
+            subgraph Worker_Row["Worker（非同期）"]
+                direction TB
+                W1["Export"]
+                W2["Split"]
+                W3["Waveform"]
+                W4["Spectrogram"]
+                W5["YouTube DL"]
+                W6["Playlist"]
+                W7["Duration"]
+                W8["Merge"]
+                W9["Segment"]
+                W10["CLI"]
+            end
+        end
+    end
+
+    subgraph Output["出力"]
+        direction TB
+        PJ["プロジェクト\n.vce.json"]
+        V1["チャプター付MP4"]
+        V2["分割動画"]
+        V3["音声MP3"]
+        T1["YouTubeチャプター"]
+        T2["テキスト"]
+    end
+
+    subgraph CLI["CLI（バッチ）"]
+        direction TB
+        C1["vce-encode"]
+        C2["vce-split"]
+    end
+
+    %% Main flow
+    External --> Layer1
+    Layer1 --> Layer2
+    Layer2 --> Layer3
+    Layer3 --> Output
+    Output --> CLI
+
+    %% Detailed connections
+    Y1 --> P1
+    P1 --> UI1
+    L1 --> UI1
+    L2 --> UI1
+    L3 --> UI2
+    Y1 -.-> DG6
+
+    UI1 --> D1
+    UI1 --> D4
+    UI3 --> M1
+    D2 -.-> W3
+    D3 -.-> W4
+
+    E1 --> M2
+    E4 --> M4
+    DG2 --> M3
+    DG7 -.-> S1
+
+    M1 --> W5
+    M3 --> W1
+    M3 --> W2
+    M4 --> W7
+
+    M2 --> PJ
+    M4 --> PJ
+    W1 --> V1
+    W2 --> V2
+    M2 --> T1
+
+    PJ --> C1
+    PJ --> C2
+
+    %% Styling
+    classDef external fill:#e3f2fd,stroke:#1565c0
+    classDef ui fill:#c8e6c9,stroke:#388e3c
+    classDef display fill:#b3e5fc,stroke:#0288d1
+    classDef edit fill:#f3e5f5,stroke:#7b1fa2
+    classDef dialog fill:#ffe0b2,stroke:#f57c00
+    classDef settings fill:#d1c4e9,stroke:#512da8
+    classDef manager fill:#e1bee7,stroke:#6a1b9a
+    classDef worker fill:#ffccbc,stroke:#e64a19
+    classDef output fill:#e8f5e9,stroke:#2e7d32
+    classDef cli fill:#ffecb3,stroke:#ff8f00
+
+    class Y1,L1,L2,L3,P1 external
+    class UI1,UI2,UI3,UI4 ui
+    class D1,D2,D3,D4,D5 display
+    class E1,E2,E3,E4,E5 edit
+    class DG1,DG2,DG3,DG4,DG5,DG6,DG7 dialog
+    class S1,S2,S3,S4,S5,S6 settings
+    class M1,M2,M3,M4 manager
+    class W1,W2,W3,W4,W5,W6,W7,W8,W9,W10 worker
+    class PJ,V1,V2,V3,T1,T2 output
+    class C1,C2 cli

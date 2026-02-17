@@ -1,0 +1,37 @@
+# pad_add_sources_to_existing_v2.spd
+# リファクタリング後の _add_sources_to_existing フロー
+
+:terminal 開始
+
+:comment 挿入位置を決定（UIから取得）
+current_idx = _source_list.get_current_index()
+
+:comment SourceFileManagerでソース追加
+result = _source_manager.handle_add_sources(new_paths, current_idx)
+
+:if result is None OR result.count_added == 0
+	:comment スキップされたパスをログ出力
+	:terminal 終了
+:else
+	:comment ソースリスト同期
+	_state.sources = _source_manager.sources
+
+	:comment ベースファイル名更新
+	:call _update_base_filename_from_first_source()
+
+	:comment チャプター再構築
+	:call _rebuild_chapters_after_insert(inserted_at, count_added)
+
+	:comment UI更新（5つのメソッド呼び出し）
+	_source_list.set_sources(_state.sources)
+	:call _update_waveform_chapters()
+	:call _update_chapter_buttons()
+	:call _update_chapter_drag_enabled()
+	:call _update_output_preview()
+
+	:comment 波形再生成
+	:call _start_waveform_generation(sources[0].path)
+
+	ログ: "Added N file(s) after position X"
+
+:terminal 終了

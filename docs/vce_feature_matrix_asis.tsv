@@ -1,0 +1,36 @@
+レイヤー	1. コンテンツ取得	2. 字幕取得	3. 解析	4. プロジェクト作成	5. 構造化編集	6. エンコード出力	7. レポート生成	8. PDF出力
+レイヤー区分	入力層	入力層	支援プロセス層	支援プロセス層	支援プロセス層	最終目的層	最終目的層	最終目的層
+目的 (Why)	動画/音声ファイルの取得	文字起こしデータの取得	メタデータ・波形・スペクトログラム取得	編集プロジェクトの定義	チャプター・除外区間の編集	最終動画/音声の出力	分析レポートの作成	印刷可能なPDFの出力
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+陶器 (Porcelain)	VCE GUI ★God Class	─	VCE GUI ★God Class	VCE GUI ★God Class	VCE GUI ★God Class	VCE GUI ★God Class	msw-pipeline	msw-pipeline
+	movie-viewer	─	movie-viewer	movie-viewer	movie-viewer	─	─	─
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+配管 (Plumbing)	ytdl	yt-srt	─	─ (手動/GUI)	video-chapters	vce-encode	msw-report	msw-compile
+	yt-srt (--download)	whisper-remote	─	─	─	vce-split	msw-config	luatex-pdf
+	video-trim	─	─	─	─	video-chapters	rehearsal-finalize	─
+	rehearsal-download	─	─	─	─	─	─	─
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+ライブラリ (Library)	YouTubeDownloadWorker	SRTParser	WaveformWorker	SourceFileManager ★統合済	ChapterManager ★統合済	ExportWorker	ReportGenerator	─
+※現状	PlaylistDownloadWorker	Subtitle	SpectrogramWorker	ConfigLoader	PlaybackManager ★統合済	SplitExportWorker	ReportMetadata	─
+	PlaylistInfoWorker	─	DurationDetectWorker	─	─	MergeWorker	ConfigLoader	─
+	SourceFileManager ★統合済	─	FFmpegUtils	─	─	CLIEncodeWorker	─	─
+	YouTubeMixin	─	VideoProperties	─	─	ExportOrchestrator ★統合済	─	─
+	─	─	ColorspaceInfo	─	─	─	─	─
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+外部ツール (External)	yt-dlp	yt-dlp (字幕)	ffprobe	─	─	ffmpeg	─	lualatex
+	curl/wget	Whisper	─	─	─	─	─	─
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+データモデル	SourceFile	Subtitle	VideoProperties	ProjectState	ChapterInfo	ChapterInfo	ReportMetadata	─
+	─	─	ColorspaceInfo	ChapterInfo	─	SegmentInfo	─	─
+	─	─	VideoParams	SourceFile	─	VideoParams	─	─
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+入力形式	URL / ローカルファイル	YouTube URL / 音声	動画/音声ファイル	─	.vce.json	.vce.json	.vce.json + .srt	.tex
+出力形式	動画/音声ファイル	.srt	メタデータ / 波形データ	.vce.json	.vce.json (更新)	.mp4 / .mp3	.tex	.pdf
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+設定 (What/Why)	─	─	─	defaults.yaml	templates/*.yaml	─	.vce.json[msw]	─
+設定 (How)	─	─	─	─	─	.vce.json[export]	─	luatex-settings.yaml
+─────	─────	─────	─────	─────	─────	─────	─────	─────
+※ AS-IS: 2026-01-13時点の現状（ExportOrchestrator統合後）
+※ ★God Class: MainWorkspace (7,013行, ~180メソッド) に機能が集中 → レガシーコード削除済み（370行削減）
+※ ★統合済: Managerとして抽出され、MainWorkspaceから委譲されている
+※ 全4マネージャー（Playback, Chapter, Source, Export）が統合済み

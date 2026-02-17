@@ -1,0 +1,45 @@
+flowchart TB
+    subgraph inputs["入力ソース"]
+        I1["YouTube URL"]
+        I2["ローカルMP4"]
+        I3["MP3 + カバー画像"]
+    end
+
+    subgraph intermediate["中間成果物"]
+        M1["編集可能MP4"]
+        M2["SRTファイル"]
+    end
+
+    subgraph outputs["最終成果物"]
+        O1["チャプター付きMP4"]
+        O2["YouTubeチャプター"]
+        O3["分割動画"]
+    end
+
+    subgraph docs["文書成果物"]
+        D1["スクリプトPDF"]
+        D2["サマリーPDF"]
+    end
+
+    I1 -->|yt-dlp| M1
+    I1 -.->|"字幕あり"| M2
+    I2 -->|video-trim| M1
+    I3 -->|ffmpeg| M1
+    M1 -.->|Whisper| M2
+
+    M1 -->|VCE| O1
+    M1 -->|VCE| O2
+    M1 -->|VCE| O3
+
+    M2 -->|Claude| D1
+    M2 -->|Claude| D2
+
+    classDef input fill:#e3f2fd,stroke:#1565c0
+    classDef intermediate fill:#f3e5f5,stroke:#7b1fa2
+    classDef output fill:#e8f5e9,stroke:#2e7d32
+    classDef doc fill:#fff3e0,stroke:#e65100
+
+    class I1,I2,I3 input
+    class M1,M2 intermediate
+    class O1,O2,O3 output
+    class D1,D2 doc

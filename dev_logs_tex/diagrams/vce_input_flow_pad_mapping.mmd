@@ -1,0 +1,123 @@
+%%{init: {'theme': 'base', 'flowchart': {'nodeSpacing': 15, 'rankSpacing': 30, 'curve': 'basis'}}}%%
+flowchart TB
+    subgraph Entry["エントリーポイント"]
+        E1["ファイルドロップ/Open"]
+    end
+
+    subgraph PAD1["_on_files_dropped\n※PAD: pad_on_files_dropped_v2.png"]
+        direction TB
+        P1_1["classify_dropped_files()"]
+        P1_2{"ClassifiedFiles"}
+        P1_3{"has_project?"}
+        P1_4{"sources存在?"}
+    end
+
+    subgraph Branch_Project["プロジェクト処理"]
+        BP1["_load_project()"]
+    end
+
+    subgraph PAD2["_handle_initial_drop\n※PAD: pad_handle_initial_drop_v2.png"]
+        direction TB
+        P2_1["handle_initial_load()"]
+        P2_2["InitialLoadResult"]
+        P2_3["_prepare_for_new_source()"]
+        P2_4["_load_source_media()"]
+        P2_5{"is_single?"}
+        P2_6["_try_load_chapter_file()"]
+        P2_7["_load_chapters_for_all_sources()"]
+    end
+
+    subgraph PAD3["_add_sources_to_existing\n※PAD: pad_add_sources_to_existing_v2.png"]
+        direction TB
+        P3_1["handle_add_sources()"]
+        P3_2["AddSourcesResult"]
+        P3_3["_rebuild_chapters_after_insert()"]
+        P3_4["UI更新（5メソッド）"]
+        P3_5["_start_waveform_generation()"]
+    end
+
+    subgraph PAD4["SourceFileManager.handle_initial_load\n※PAD: pad_source_manager_handle_initial_load.png"]
+        direction TB
+        P4_1{"has_chapter_only?"}
+        P4_2{"has_video?"}
+        P4_3["media_type = video"]
+        P4_4["media_type = audio"]
+        P4_5["SourceFile作成\n+ duration検出"]
+        P4_6["return InitialLoadResult"]
+    end
+
+    subgraph PAD5["SourceFileManager.handle_add_sources\n※PAD: pad_source_manager_handle_add_sources.png"]
+        direction TB
+        P5_1["重複フィルタリング"]
+        P5_2["挿入位置決定"]
+        P5_3["SourceFile作成\n+ duration検出"]
+        P5_4["リスト挿入"]
+        P5_5["return AddSourcesResult"]
+    end
+
+    subgraph TypeCheck["型チェック（追加モード）"]
+        TC1{"current_is_audio?"}
+        TC2{"has_video?"}
+        TC3["警告: 型不一致"]
+    end
+
+    %% Main flow
+    E1 --> P1_1
+    P1_1 --> P1_2
+    P1_2 --> P1_3
+    P1_3 -->|"Yes"| BP1
+    P1_3 -->|"No"| P1_4
+    P1_4 -->|"空: 初回モード"| P2_1
+    P1_4 -->|"存在: 追加モード"| TC1
+
+    %% Initial drop flow
+    P2_1 --> P4_1
+    P4_1 -->|"Yes"| P2_6
+    P4_1 -->|"No"| P4_2
+    P4_2 -->|"Yes"| P4_3
+    P4_2 -->|"No"| P4_4
+    P4_3 --> P4_5
+    P4_4 --> P4_5
+    P4_5 --> P4_6
+    P4_6 --> P2_2
+    P2_2 --> P2_3
+    P2_3 --> P2_4
+    P2_4 --> P2_5
+    P2_5 -->|"単一"| P2_6
+    P2_5 -->|"複数"| P2_7
+
+    %% Type check flow
+    TC1 -->|"audio mode"| TC2
+    TC1 -->|"video mode"| P3_1
+    TC2 -->|"has_video"| TC3
+    TC2 -->|"has_audio"| P3_1
+
+    %% Add sources flow
+    P3_1 --> P5_1
+    P5_1 --> P5_2
+    P5_2 --> P5_3
+    P5_3 --> P5_4
+    P5_4 --> P5_5
+    P5_5 --> P3_2
+    P3_2 --> P3_3
+    P3_3 --> P3_4
+    P3_4 --> P3_5
+
+    %% Styling
+    classDef entry fill:#e3f2fd,stroke:#1565c0
+    classDef pad1 fill:#fff3e0,stroke:#e65100
+    classDef pad2 fill:#e8f5e9,stroke:#2e7d32
+    classDef pad3 fill:#fce4ec,stroke:#c2185b
+    classDef pad4 fill:#e1bee7,stroke:#6a1b9a
+    classDef pad5 fill:#f8bbd9,stroke:#ad1457
+    classDef project fill:#b3e5fc,stroke:#0288d1
+    classDef typecheck fill:#ffccbc,stroke:#e64a19
+
+    class E1 entry
+    class P1_1,P1_2,P1_3,P1_4 pad1
+    class P2_1,P2_2,P2_3,P2_4,P2_5,P2_6,P2_7 pad2
+    class P3_1,P3_2,P3_3,P3_4,P3_5 pad3
+    class P4_1,P4_2,P4_3,P4_4,P4_5,P4_6 pad4
+    class P5_1,P5_2,P5_3,P5_4,P5_5 pad5
+    class BP1 project
+    class TC1,TC2,TC3 typecheck
