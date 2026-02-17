@@ -3359,7 +3359,7 @@ class EditTab(QWidget):
     def load_media(self):
         file_path, _ = CenteredFileDialog.getOpenFileName(
             self, "音声/動画ファイルを選択", "",
-            "Media Files (*.mp4 *.mp3 *.m4a *.wav *.mov *.avi *.mkv)"
+            "Media Files (*.mp4 *.mp3 *.m4a *.wav *.mov *.avi *.mkv *.m4v)"
         )
         if file_path:
             self._initialize_media(file_path)
