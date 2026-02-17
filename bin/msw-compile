@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""
+msw-compile - LaTeX ファイルを PDF にコンパイル
+
+luatex-pdf のラッパー。MSW 設定を参照してコンパイルオプションを決定する。
+
+Usage:
+    msw-compile <file.tex> [options]
+    msw-compile <file1.tex> <file2.tex> ... [options]
+
+Options:
+    -o, --output DIR      出力ディレクトリ（デフォルト: 入力ファイルと同じ）
+    --keep-aux            補助ファイルを保持
+    --dry-run             コマンドを表示するだけで実行しない
+    -v, --verbose         詳細ログを表示
+
+Examples:
+    # 基本的な使用法
+    msw-compile report.tex
+
+    # 出力ディレクトリを指定
+    msw-compile report.tex -o output/
+
+    # 複数ファイルをコンパイル
+    msw-compile chapter1.tex chapter2.tex chapter3.tex
+
+    # ドライラン
+    msw-compile report.tex --dry-run
+"""
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# デフォルトのコンパイラ
+DEFAULT_COMPILER = "luatex-pdf"
+
+# 補助ファイルの拡張子
+AUX_EXTENSIONS = [".aux", ".log", ".toc", ".out", ".fls", ".fdb_latexmk", ".synctex.gz"]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="LaTeX ファイルを PDF にコンパイル（luatex-pdf ラッパー）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    msw-compile report.tex
+    msw-compile report.tex -o output/
+    msw-compile chapter1.tex chapter2.tex
+    msw-compile report.tex --dry-run
+        """,
+    )
+    parser.add_argument(
+        "files", nargs="+", type=Path, help="コンパイルする .tex ファイル"
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, help="出力ディレクトリ（デフォルト: 入力と同じ）"
+    )
+    parser.add_argument(
+        "--keep-aux", action="store_true", help="補助ファイルを保持"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="コマンドを表示するだけで実行しない"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="詳細ログを表示")
+
+    args = parser.parse_args()
+
+    # コンパイラの存在確認
+    compiler = find_compiler()
+    if not compiler and not args.dry_run:
+        print(f"Error: Compiler not found: {DEFAULT_COMPILER}", file=sys.stderr)
+        print("Please ensure luatex-pdf is installed and in PATH.", file=sys.stderr)
+        sys.exit(1)
+
+    # 各ファイルをコンパイル
+    success_count = 0
+    fail_count = 0
+
+    for tex_file in args.files:
+        if not tex_file.exists():
+            print(f"Error: File not found: {tex_file}", file=sys.stderr)
+            fail_count += 1
+            continue
+
+        if tex_file.suffix != ".tex":
+            print(f"Warning: Skipping non-.tex file: {tex_file}", file=sys.stderr)
+            continue
+
+        success = compile_file(
+            tex_file,
+            output_dir=args.output,
+            keep_aux=args.keep_aux,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            compiler=compiler or DEFAULT_COMPILER,
+        )
+
+        if success:
+            success_count += 1
+        else:
+            fail_count += 1
+
+    # サマリー
+    if len(args.files) > 1:
+        print()
+        print(f"=== Summary ===")
+        print(f"Success: {success_count}")
+        print(f"Failed: {fail_count}")
+
+    sys.exit(0 if fail_count == 0 else 1)
+
+
+def find_compiler() -> str | None:
+    """コンパイラを探す"""
+    compiler = shutil.which(DEFAULT_COMPILER)
+    if compiler:
+        return compiler
+
+    # フォールバック: lualatex を直接探す
+    lualatex = shutil.which("lualatex")
+    if lualatex:
+        return lualatex
+
+    return None
+
+
+def compile_file(
+    tex_file: Path,
+    output_dir: Path | None,
+    keep_aux: bool,
+    dry_run: bool,
+    verbose: bool,
+    compiler: str,
+) -> bool:
+    """単一ファイルをコンパイル"""
+    tex_file = tex_file.resolve()
+    work_dir = tex_file.parent
+
+    # 出力先
+    if output_dir:
+        output_dir = output_dir.resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pdf_output = output_dir / tex_file.with_suffix(".pdf").name
+    else:
+        pdf_output = tex_file.with_suffix(".pdf")
+
+    # コマンド構築
+    if compiler.endswith("luatex-pdf"):
+        # luatex-pdf はファイル名だけを受け取る
+        cmd = [compiler, tex_file.name]
+    else:
+        # lualatex の場合
+        cmd = [
+            compiler,
+            "-interaction=nonstopmode",
+            "-file-line-error",
+            tex_file.name,
+        ]
+
+    if verbose or dry_run:
+        print(f"[COMPILE] {tex_file.name}")
+        print(f"  Command: {' '.join(cmd)}")
+        print(f"  Working dir: {work_dir}")
+        print(f"  Output: {pdf_output}")
+
+    if dry_run:
+        print("  (dry-run: skipping execution)")
+        return True
+
+    # コンパイル実行
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=work_dir,
+            capture_output=not verbose,
+            text=True,
+            timeout=300,  # 5分タイムアウト
+        )
+
+        if result.returncode != 0:
+            print(f"Error: Compilation failed for {tex_file.name}", file=sys.stderr)
+            if not verbose and result.stderr:
+                print(result.stderr, file=sys.stderr)
+            return False
+
+        # 出力ディレクトリが異なる場合は PDF を移動
+        if output_dir and output_dir != work_dir:
+            src_pdf = tex_file.with_suffix(".pdf")
+            if src_pdf.exists():
+                shutil.move(str(src_pdf), str(pdf_output))
+
+        # 補助ファイルの削除
+        if not keep_aux:
+            cleanup_aux_files(tex_file)
+
+        print(f"[OK] {pdf_output}")
+        return True
+
+    except subprocess.TimeoutExpired:
+        print(f"Error: Compilation timed out for {tex_file.name}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return False
+
+
+def cleanup_aux_files(tex_file: Path):
+    """補助ファイルを削除"""
+    base = tex_file.with_suffix("")
+    for ext in AUX_EXTENSIONS:
+        aux_file = base.with_suffix(ext)
+        if aux_file.exists():
+            try:
+                aux_file.unlink()
+            except OSError:
+                pass
+
+
+if __name__ == "__main__":
+    main()

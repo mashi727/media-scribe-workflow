@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""
+msw-config - MSW 設定のマージと検証
+
+Usage:
+    msw-config <project.vce.json> [options]
+
+Options:
+    -f, --format FORMAT   出力形式 (yaml, json) [default: yaml]
+    --validate            設定の検証のみ（出力なし）
+    --show-layers         各レイヤーを個別に表示
+    -v, --verbose         詳細ログを表示
+
+Examples:
+    # マージ済み設定を表示
+    msw-config project.vce.json
+
+    # JSON形式で出力
+    msw-config project.vce.json -f json
+
+    # 設定の検証
+    msw-config project.vce.json --validate
+
+    # 各レイヤーを個別に表示
+    msw-config project.vce.json --show-layers
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+# パッケージのインポートパスを追加
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import yaml
+
+from media_scribe_workflow.config import ConfigLoader
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="MSW 設定のマージと検証",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    msw-config project.vce.json
+    msw-config project.vce.json -f json
+    msw-config project.vce.json --validate
+    msw-config project.vce.json --show-layers
+        """,
+    )
+    parser.add_argument("project", type=Path, help="プロジェクトファイル (.vce.json)")
+    parser.add_argument(
+        "-f",
+        "--format",
+        choices=["yaml", "json"],
+        default="yaml",
+        help="出力形式 (default: yaml)",
+    )
+    parser.add_argument(
+        "--validate", action="store_true", help="設定の検証のみ（出力なし）"
+    )
+    parser.add_argument(
+        "--show-layers", action="store_true", help="各レイヤーを個別に表示"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="詳細ログを表示")
+
+    args = parser.parse_args()
+
+    # プロジェクトファイルの存在確認
+    if not args.project.exists():
+        print(f"Error: Project file not found: {args.project}", file=sys.stderr)
+        sys.exit(1)
+
+    loader = ConfigLoader()
+
+    try:
+        if args.show_layers:
+            show_layers(loader, args.project, args.format, args.verbose)
+        elif args.validate:
+            validate_config(loader, args.project, args.verbose)
+        else:
+            show_merged_config(loader, args.project, args.format, args.verbose)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+
+            traceback.print_exc()
+        sys.exit(1)
+
+
+def show_merged_config(
+    loader: ConfigLoader, project_path: Path, fmt: str, verbose: bool
+):
+    """マージ済み設定を表示"""
+    if verbose:
+        print(f"Loading config from: {project_path}", file=sys.stderr)
+
+    config = loader.get_merged_config(project_path)
+    output_config(config, fmt)
+
+
+def show_layers(loader: ConfigLoader, project_path: Path, fmt: str, verbose: bool):
+    """各レイヤーを個別に表示"""
+    # Defaults
+    print("=" * 60)
+    print("Layer 1: defaults.yaml")
+    print("=" * 60)
+    defaults = loader.load_defaults()
+    output_config(defaults, fmt)
+
+    # Project MSW section
+    project_msw = loader.load_project_msw(project_path)
+    template_name = project_msw.get("template")
+
+    # Template (if specified)
+    if template_name:
+        print()
+        print("=" * 60)
+        print(f"Layer 2: templates/{template_name}.yaml")
+        print("=" * 60)
+        try:
+            # テンプレートのみ（extendsなし）を読み込むため直接ファイルを読む
+            template_path = loader.config_dir / "templates" / f"{template_name}.yaml"
+            if template_path.exists():
+                with open(template_path, "r", encoding="utf-8") as f:
+                    template = yaml.safe_load(f) or {}
+                output_config(template, fmt)
+            else:
+                print(f"(Template not found: {template_path})")
+        except Exception as e:
+            print(f"(Error loading template: {e})")
+
+    # Project MSW
+    print()
+    print("=" * 60)
+    print(f"Layer 3: {project_path.name}[msw]")
+    print("=" * 60)
+    output_config(project_msw, fmt)
+
+    # Merged result
+    print()
+    print("=" * 60)
+    print("Merged Result")
+    print("=" * 60)
+    config = loader.get_merged_config(project_path)
+    output_config(config, fmt)
+
+
+def validate_config(loader: ConfigLoader, project_path: Path, verbose: bool):
+    """設定の検証"""
+    errors = []
+    warnings = []
+
+    # プロジェクトの msw セクションを読み込み
+    project_msw = loader.load_project_msw(project_path)
+
+    # テンプレートの存在確認
+    template_name = project_msw.get("template")
+    if template_name:
+        template_path = loader.config_dir / "templates" / f"{template_name}.yaml"
+        if not template_path.exists():
+            errors.append(f"Template not found: {template_name}")
+    else:
+        warnings.append("No template specified in project msw section")
+
+    # 必須メタデータの確認（テンプレートがある場合）
+    if template_name and (loader.config_dir / "templates" / f"{template_name}.yaml").exists():
+        try:
+            template = loader.load_template(template_name)
+            required = template.get("required_metadata", [])
+            metadata = project_msw.get("metadata", {})
+
+            for field in required:
+                if field not in metadata:
+                    errors.append(f"Missing required metadata: {field}")
+        except Exception as e:
+            errors.append(f"Error loading template: {e}")
+
+    # defaults.yaml の存在確認
+    defaults_path = loader.config_dir / "defaults.yaml"
+    if not defaults_path.exists():
+        warnings.append(f"defaults.yaml not found at {defaults_path}")
+
+    # 結果表示
+    if errors:
+        print("Validation FAILED", file=sys.stderr)
+        for error in errors:
+            print(f"  ERROR: {error}", file=sys.stderr)
+        for warning in warnings:
+            print(f"  WARNING: {warning}", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print("Validation OK")
+        for warning in warnings:
+            print(f"  WARNING: {warning}")
+        if verbose:
+            print(f"  Template: {template_name or '(none)'}")
+            config = loader.get_merged_config(project_path)
+            print(f"  Merged config keys: {list(config.keys())}")
+
+
+def output_config(config: dict, fmt: str):
+    """設定を指定形式で出力"""
+    if fmt == "json":
+        print(json.dumps(config, indent=2, ensure_ascii=False))
+    else:
+        print(yaml.dump(config, allow_unicode=True, default_flow_style=False, sort_keys=False))
+
+
+if __name__ == "__main__":
+    main()

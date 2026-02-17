@@ -1,0 +1,140 @@
+# encoders.yaml - エンコーダ設定
+#
+# 全エンコーダの品質プリセットとデフォルト引数を定義。
+# quality_index: 0=High Quality, 1=Standard, 2=Fast
+
+# 品質レベルのラベル定義（UI表示用）
+quality_labels:
+  - id: 0
+    name: "High Quality"
+    description: "最高品質（時間がかかる）"
+  - id: 1
+    name: "Standard"
+    description: "バランスの取れた品質"
+  - id: 2
+    name: "Fast"
+    description: "高速エンコード（品質低下）"
+
+# エンコーダ定義
+encoders:
+  # macOS: Apple VideoToolbox
+  h264_videotoolbox:
+    platform: darwin
+    type: hw
+    display_name: "GPU (VideoToolbox)"
+    description: "Apple GPUで高速エンコード"
+    quality_presets:
+      0:
+        q: 40
+      1:
+        q: 55
+      2:
+        q: 70
+    default_args:
+      - "-pix_fmt"
+      - "yuv420p"
+      - "-allow_sw"
+      - "1"
+
+  # NVIDIA NVENC
+  h264_nvenc:
+    platform:
+      - win32
+      - linux
+    type: hw
+    display_name: "GPU (NVIDIA)"
+    description: "NVIDIA GPUで高速エンコード"
+    quality_presets:
+      0:
+        preset: p5
+        cq: 20
+      1:
+        preset: p4
+        cq: 24
+      2:
+        preset: p2
+        cq: 28
+    default_args:
+      - "-pix_fmt"
+      - "yuv420p"
+
+  # Intel Quick Sync Video
+  h264_qsv:
+    platform:
+      - win32
+      - linux
+    type: hw
+    display_name: "GPU (Intel QSV)"
+    description: "Intel GPUで高速エンコード"
+    quality_presets:
+      0:
+        preset: slow
+        global_quality: 22
+      1:
+        preset: medium
+        global_quality: 26
+      2:
+        preset: fast
+        global_quality: 30
+    default_args:
+      - "-pix_fmt"
+      - "nv12"
+
+  # AMD AMF
+  h264_amf:
+    platform: win32
+    type: hw
+    display_name: "GPU (AMD)"
+    description: "AMD GPUで高速エンコード"
+    quality_presets:
+      0:
+        quality: quality
+        qp: 20
+      1:
+        quality: balanced
+        qp: 24
+      2:
+        quality: speed
+        qp: 28
+    default_args:
+      - "-pix_fmt"
+      - "yuv420p"
+
+  # Linux VAAPI
+  h264_vaapi:
+    platform: linux
+    type: hw
+    display_name: "GPU (VAAPI)"
+    description: "VAAPI GPUで高速エンコード"
+    quality_presets:
+      0:
+        qp: 22
+      1:
+        qp: 26
+      2:
+        qp: 30
+    default_args:
+      - "-pix_fmt"
+      - "vaapi_vld"
+
+  # CPU (libx264) - 全プラットフォーム共通
+  libx264:
+    platform: all
+    type: sw
+    display_name: "CPU (x264)"
+    description: "CPU処理・高画質"
+    quality_presets:
+      0:
+        preset: medium
+        crf: 20
+      1:
+        preset: fast
+        crf: 23
+      2:
+        preset: ultrafast
+        crf: 26
+    default_args:
+      - "-threads"
+      - "0"
+      - "-pix_fmt"
+      - "yuv420p"

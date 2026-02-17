@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""
+msw-report - SRT と設定から LaTeX レポートを生成
+
+Usage:
+    msw-report <project.vce.json> [options]
+
+Options:
+    -s, --srt FILE        SRT ファイルのパス
+    -o, --output FILE     出力ファイルのパス（デフォルト: stdout）
+    --dry-run             生成せずに設定を確認
+    -v, --verbose         詳細ログを表示
+
+Examples:
+    # 基本的な使用法
+    msw-report project.vce.json --srt video.srt -o report.tex
+
+    # 標準出力に出力
+    msw-report project.vce.json --srt video.srt
+
+    # 設定の確認のみ
+    msw-report project.vce.json --dry-run
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+# パッケージのインポートパスを追加
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from media_scribe_workflow.config import ConfigLoader
+from media_scribe_workflow.pipeline import ReportGenerator, ReportMetadata
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="SRT と設定から LaTeX レポートを生成",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    msw-report project.vce.json --srt video.srt -o report.tex
+    msw-report project.vce.json --srt video.srt
+    msw-report project.vce.json --dry-run
+        """,
+    )
+    parser.add_argument("project", type=Path, help="プロジェクトファイル (.vce.json)")
+    parser.add_argument(
+        "-s", "--srt", type=Path, help="SRT ファイルのパス"
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, help="出力ファイルのパス（デフォルト: stdout）"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="生成せずに設定を確認"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="詳細ログを表示")
+
+    args = parser.parse_args()
+
+    # プロジェクトファイルの存在確認
+    if not args.project.exists():
+        print(f"Error: Project file not found: {args.project}", file=sys.stderr)
+        sys.exit(1)
+
+    # SRT ファイルの存在確認
+    if args.srt and not args.srt.exists():
+        print(f"Error: SRT file not found: {args.srt}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        if args.dry_run:
+            dry_run(args.project, args.srt, args.verbose)
+        else:
+            generate_report(args.project, args.srt, args.output, args.verbose)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+
+def dry_run(project_path: Path, srt_path: Path | None, verbose: bool):
+    """設定の確認のみ（生成なし）"""
+    loader = ConfigLoader()
+    config = loader.get_merged_config(project_path)
+    metadata = ReportMetadata.from_config(config)
+
+    print("=== Project Configuration ===")
+    print(f"Project: {project_path}")
+    print(f"SRT: {srt_path or '(not specified)'}")
+    print()
+
+    print("=== Metadata ===")
+    print(f"Date: {metadata.date or '(not set)'}")
+    print(f"Instructor: {metadata.instructor or '(not set)'}")
+    print(f"Instructor Title: {metadata.instructor_title or '(not set)'}")
+    print(f"Instrument: {metadata.instrument or '(not set)'}")
+    print(f"Lesson Topic: {metadata.lesson_topic or '(not set)'}")
+    print(f"Author: {metadata.author_name or '(not set)'}")
+    print(f"Affiliation: {metadata.author_affiliation or '(not set)'}")
+    print()
+
+    print("=== Template ===")
+    template = config.get("template", "(none)")
+    print(f"Template: {template}")
+    print()
+
+    print("=== Report Sections ===")
+    report_config = config.get("report", {})
+    sections = report_config.get("sections", report_config.get("common_sections", []))
+    for section in sections:
+        section_id = section.get("id", "")
+        section_title = section.get("title", section_id)
+        required = section.get("required", False)
+        req_mark = "[required]" if required else ""
+        print(f"  - {section_title} ({section_id}) {req_mark}")
+    print()
+
+    if srt_path:
+        from media_scribe_workflow.pipeline import SRTParser
+        parser = SRTParser()
+        subtitles = parser.parse(srt_path)
+        print("=== SRT Statistics ===")
+        print(f"Total entries: {len(subtitles)}")
+        if subtitles:
+            print(f"First: {subtitles[0].start_time} - {subtitles[0].text[:50]}...")
+            print(f"Last: {subtitles[-1].start_time} - {subtitles[-1].text[:50]}...")
+            total_duration_ms = subtitles[-1].end_ms
+            hours = total_duration_ms // 3600000
+            minutes = (total_duration_ms % 3600000) // 60000
+            seconds = (total_duration_ms % 60000) // 1000
+            print(f"Duration: {hours:02d}:{minutes:02d}:{seconds:02d}")
+        print()
+
+    print("Configuration OK")
+
+
+def generate_report(
+    project_path: Path, srt_path: Path | None, output_path: Path | None, verbose: bool
+):
+    """レポートを生成"""
+    if verbose:
+        print(f"Loading project: {project_path}", file=sys.stderr)
+        if srt_path:
+            print(f"Loading SRT: {srt_path}", file=sys.stderr)
+
+    generator = ReportGenerator()
+    latex = generator.generate(project_path, srt_path)
+
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(latex)
+        if verbose:
+            print(f"Output written to: {output_path}", file=sys.stderr)
+    else:
+        print(latex)
+
+
+if __name__ == "__main__":
+    main()

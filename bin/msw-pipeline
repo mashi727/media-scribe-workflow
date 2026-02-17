@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""
+msw-pipeline - VCE プロジェクトからレポート PDF を一括生成
+
+全工程を統合:
+  1. 設定読み込み (.vce.json)
+  2. SRT 解析
+  3. LaTeX レポート生成 (msw-report)
+  4. PDF コンパイル (msw-compile)
+
+Usage:
+    msw-pipeline <project.vce.json> [options]
+
+Options:
+    -s, --srt FILE        SRT ファイルを指定
+    -o, --output FILE     出力ファイル名（拡張子で形式を判断）
+    --skip-compile        TeXのみ生成（PDFはスキップ）
+    --keep-tex            PDF生成後もTeXファイルを保持
+    --keep-aux            補助ファイルを保持
+    -v, --verbose         詳細ログを表示
+
+Examples:
+    # 基本的な使用法（SRT指定）
+    msw-pipeline project.vce.json --srt video.srt
+
+    # 出力ファイル名を指定
+    msw-pipeline project.vce.json --srt video.srt -o lesson_report.pdf
+
+    # TeXのみ生成
+    msw-pipeline project.vce.json --srt video.srt --skip-compile
+
+    # 詳細ログ
+    msw-pipeline project.vce.json --srt video.srt -v
+"""
+
+import argparse
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+# パッケージのインポートパスを追加
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from media_scribe_workflow.config import ConfigLoader
+from media_scribe_workflow.pipeline import ReportGenerator, ReportMetadata
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="VCE プロジェクトからレポート PDF を一括生成",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    msw-pipeline project.vce.json --srt video.srt
+    msw-pipeline project.vce.json --srt video.srt -o report.pdf
+    msw-pipeline project.vce.json --srt video.srt --skip-compile
+        """,
+    )
+    parser.add_argument("project", type=Path, help="プロジェクトファイル (.vce.json)")
+    parser.add_argument("-s", "--srt", type=Path, help="SRT ファイルのパス")
+    parser.add_argument(
+        "-o", "--output", type=Path, help="出力ファイル名（拡張子で形式を判断）"
+    )
+    parser.add_argument(
+        "--skip-compile", action="store_true", help="TeXのみ生成（PDFはスキップ）"
+    )
+    parser.add_argument(
+        "--keep-tex", action="store_true", help="PDF生成後もTeXファイルを保持"
+    )
+    parser.add_argument("--keep-aux", action="store_true", help="補助ファイルを保持")
+    parser.add_argument("-v", "--verbose", action="store_true", help="詳細ログを表示")
+
+    args = parser.parse_args()
+
+    # プロジェクトファイルの存在確認
+    if not args.project.exists():
+        print(f"Error: Project file not found: {args.project}", file=sys.stderr)
+        sys.exit(1)
+
+    # SRT ファイルの存在確認
+    if args.srt and not args.srt.exists():
+        print(f"Error: SRT file not found: {args.srt}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        run_pipeline(
+            project_path=args.project,
+            srt_path=args.srt,
+            output_path=args.output,
+            skip_compile=args.skip_compile,
+            keep_tex=args.keep_tex,
+            keep_aux=args.keep_aux,
+            verbose=args.verbose,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+
+            traceback.print_exc()
+        sys.exit(1)
+
+
+def run_pipeline(
+    project_path: Path,
+    srt_path: Path | None,
+    output_path: Path | None,
+    skip_compile: bool,
+    keep_tex: bool,
+    keep_aux: bool,
+    verbose: bool,
+):
+    """パイプラインを実行"""
+    project_path = project_path.resolve()
+
+    # 設定読み込み
+    log_step("Loading configuration", verbose)
+    loader = ConfigLoader()
+    config = loader.get_merged_config(project_path)
+    metadata = ReportMetadata.from_config(config)
+
+    if verbose:
+        print(f"  Template: {config.get('template', '(none)')}")
+        print(f"  Date: {metadata.date}")
+        print(f"  Instructor: {metadata.instructor}")
+
+    # 出力パスの決定
+    output_path = determine_output_path(
+        project_path, config, output_path, skip_compile
+    )
+    tex_path = output_path.with_suffix(".tex")
+    pdf_path = output_path.with_suffix(".pdf")
+
+    log_step(f"Output: {pdf_path if not skip_compile else tex_path}", verbose)
+
+    # Step 1: レポート生成
+    log_step("Generating LaTeX report", verbose)
+    generator = ReportGenerator(config_loader=loader)
+    latex = generator.generate(project_path, srt_path)
+
+    # TeXファイルを書き出し
+    tex_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write(latex)
+
+    if verbose:
+        print(f"  Generated: {tex_path}")
+        if srt_path:
+            from media_scribe_workflow.pipeline import SRTParser
+
+            parser = SRTParser()
+            subtitles = parser.parse(srt_path)
+            print(f"  SRT entries: {len(subtitles)}")
+
+    # Step 2: PDFコンパイル
+    if not skip_compile:
+        log_step("Compiling to PDF", verbose)
+        success = compile_pdf(tex_path, keep_aux, verbose)
+
+        if not success:
+            print("Error: PDF compilation failed", file=sys.stderr)
+            sys.exit(1)
+
+        # TeXファイルの削除（--keep-tex がない場合）
+        if not keep_tex and tex_path.exists():
+            tex_path.unlink()
+            if verbose:
+                print(f"  Removed: {tex_path}")
+
+        log_step(f"Done: {pdf_path}", verbose)
+    else:
+        log_step(f"Done: {tex_path} (compile skipped)", verbose)
+
+    # 最終出力
+    print()
+    print("=" * 60)
+    print("Pipeline completed successfully!")
+    print("=" * 60)
+    print(f"Project: {project_path.name}")
+    if srt_path:
+        print(f"SRT: {srt_path.name}")
+    if skip_compile:
+        print(f"Output: {tex_path}")
+    else:
+        print(f"Output: {pdf_path}")
+
+
+def determine_output_path(
+    project_path: Path,
+    config: dict,
+    output_path: Path | None,
+    skip_compile: bool,
+) -> Path:
+    """出力パスを決定"""
+    if output_path:
+        return output_path.resolve()
+
+    # 設定から出力ファイル名を取得
+    output_config = config.get("output", {})
+    report_name = output_config.get("report", "")
+
+    if report_name:
+        # プレースホルダーの置換
+        metadata = config.get("metadata", {})
+        report_name = report_name.replace("{source_filename}", project_path.stem)
+        report_name = report_name.replace("{date}", metadata.get("date", ""))
+        report_name = report_name.replace("{instrument}", metadata.get("instrument", ""))
+        report_name = report_name.replace(
+            "{lesson_topic}", metadata.get("lesson_topic", "")
+        )
+        return project_path.parent / report_name
+
+    # デフォルト: プロジェクト名_report.pdf
+    return project_path.parent / f"{project_path.stem}_report.pdf"
+
+
+def compile_pdf(tex_path: Path, keep_aux: bool, verbose: bool) -> bool:
+    """PDFをコンパイル"""
+    # msw-compile を使用
+    bin_dir = Path(__file__).resolve().parent
+    msw_compile = bin_dir / "msw-compile"
+
+    if msw_compile.exists():
+        cmd = [str(msw_compile), str(tex_path)]
+        if keep_aux:
+            cmd.append("--keep-aux")
+        if verbose:
+            cmd.append("-v")
+    else:
+        # フォールバック: luatex-pdf を直接呼び出し
+        compiler = shutil.which("luatex-pdf") or shutil.which("lualatex")
+        if not compiler:
+            print("Error: No LaTeX compiler found", file=sys.stderr)
+            return False
+        cmd = [compiler, tex_path.name]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=tex_path.parent,
+            capture_output=not verbose,
+            text=True,
+            timeout=300,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print("Error: Compilation timed out", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return False
+
+
+def log_step(message: str, verbose: bool):
+    """ステップをログ出力"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    if verbose:
+        print(f"[{timestamp}] {message}")
+    else:
+        print(f"[*] {message}")
+
+
+if __name__ == "__main__":
+    main()
