@@ -9,6 +9,8 @@ Options:
     -o, --output PATH     出力ファイルパス（デフォルト: プロジェクト設定に従う）
     -e, --encoder ID      エンコーダ (libx264, h264_videotoolbox, hevc_videotoolbox)
     -q, --quality INDEX   品質インデックス (0=最高, 1=高, 2=中, 3=低)
+    --cover-image PATH    カバー画像（音声のみのソース用）
+    --overlay-title       チャプター名を映像に焼き込む
     --no-chapters         チャプター埋め込みを無効化
     --no-cut              除外チャプター（--で始まる）をカットしない
     --dry-run             実行せずに計画を表示
@@ -60,12 +62,70 @@ def get_ffprobe_path() -> str:
     raise RuntimeError("ffprobe not found.")
 
 
+AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg', '.wma'}
+
+
+def is_audio_file(path: Path) -> bool:
+    """音声ファイルかどうかを判定"""
+    return path.suffix.lower() in AUDIO_EXTENSIONS
+
+
+def detect_system_font() -> str:
+    """プラットフォーム別のシステムフォントパスを取得"""
+    import platform
+    system = platform.system()
+
+    if system == "Darwin":
+        # macOS: ヒラギノ角ゴシック（W6=Bold推奨）
+        candidates = [
+            "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+            "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+            "/System/Library/Fonts/ヒラギノ角ゴ ProN W6.otf",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ]
+    elif system == "Windows":
+        # Windows: MS Gothic or Meiryo
+        candidates = [
+            "C:/Windows/Fonts/msgothic.ttc",
+            "C:/Windows/Fonts/meiryo.ttc",
+            "C:/Windows/Fonts/YuGothM.ttc",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+    else:
+        # Linux
+        candidates = [
+            "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+
+    for font_path in candidates:
+        if Path(font_path).exists():
+            return font_path
+
+    # フォールバック
+    return ""
+
+
+def escape_drawtext(text: str) -> str:
+    """drawtextフィルター用のエスケープ処理"""
+    # ffmpegのdrawtextフィルターで特殊文字をエスケープ
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'", "\\'")
+    text = text.replace(":", "\\:")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+    return text
+
+
 @dataclass
 class SourceFile:
     """ソースファイル情報"""
     path: Path
     duration_ms: int = 0
     video_params: Optional['VideoParams'] = None
+    is_audio_only: bool = False
 
 
 @dataclass
@@ -487,14 +547,19 @@ class ProjectEncoder:
 
             self.debug(f"Detecting duration: {source_name}")
             duration_ms = detect_duration_ms(source_path)
-            video_params = detect_video_params(source_path)
+            audio_only = is_audio_file(source_path)
+            video_params = None if audio_only else detect_video_params(source_path)
             self.sources.append(SourceFile(
                 path=source_path,
                 duration_ms=duration_ms,
-                video_params=video_params
+                video_params=video_params,
+                is_audio_only=audio_only
             ))
-            params_str = f", {video_params}" if video_params else ""
-            self.log(f"  [{i+1}] {source_name} ({format_time_short(duration_ms)}{params_str})")
+            if audio_only:
+                self.log(f"  [{i+1}] {source_name} ({format_time_short(duration_ms)}, audio)")
+            else:
+                params_str = f", {video_params}" if video_params else ""
+                self.log(f"  [{i+1}] {source_name} ({format_time_short(duration_ms)}{params_str})")
 
     def load_chapters(self):
         """チャプターを読み込み"""
@@ -638,6 +703,201 @@ class ProjectEncoder:
             return False
         return True
 
+    def extract_audio_segment(self, source: SourceFile, segment: SegmentInfo,
+                               output_path: Path) -> bool:
+        """音声セグメントを抽出"""
+        start_sec = segment.start_ms / 1000.0
+        duration_sec = segment.duration_ms / 1000.0
+
+        ffmpeg = get_ffmpeg_path()
+
+        cmd = [
+            ffmpeg, '-y', '-hide_banner', '-loglevel', 'warning',
+            '-i', str(source.path),
+            '-ss', f'{start_sec:.6f}',
+            '-t', f'{duration_sec:.6f}',
+            '-vn',  # 映像なし
+            '-c:a', 'aac', '-b:a', '192k',
+            str(output_path)
+        ]
+
+        self.debug(f"Extracting audio: {' '.join(cmd[:10])}...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "(no error message)"
+            print(f"ERROR: {error_msg[:1000]}", file=sys.stderr, flush=True)
+            return False
+        return True
+
+    def concat_audio_segments(self, segment_files: List[Path], output_path: Path) -> bool:
+        """音声セグメントを結合"""
+        if len(segment_files) == 1:
+            import shutil
+            shutil.copy(segment_files[0], output_path)
+            return True
+
+        ffmpeg = get_ffmpeg_path()
+
+        # concat demuxer用リスト
+        list_file = Path(tempfile.gettempdir()) / "concat_audio_list.txt"
+        with open(list_file, 'w', encoding='utf-8') as f:
+            for seg_file in segment_files:
+                escaped = str(seg_file).replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+        self.temp_files.append(list_file)
+
+        cmd = [
+            ffmpeg, '-y', '-hide_banner', '-loglevel', 'warning',
+            '-f', 'concat', '-safe', '0',
+            '-i', str(list_file),
+            '-c:a', 'aac', '-b:a', '192k',
+            str(output_path)
+        ]
+
+        self.debug(f"Concatenating {len(segment_files)} audio segments...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "(no error message)"
+            print(f"ERROR: {error_msg[:1000]}", file=sys.stderr, flush=True)
+            return False
+        return True
+
+    def combine_audio_with_cover(self, audio_path: Path, cover_image_path: Optional[Path],
+                                  output_path: Path, encoder_id: str,
+                                  bitrate_kbps: int, crf: int,
+                                  chapters: Optional[List[ChapterInfo]] = None,
+                                  total_duration_ms: int = 0,
+                                  overlay_title: bool = False) -> bool:
+        """音声とカバー画像を結合して動画を作成
+
+        Args:
+            audio_path: 音声ファイルパス
+            cover_image_path: カバー画像パス（Noneの場合は黒背景）
+            output_path: 出力ファイルパス
+            encoder_id: エンコーダID
+            bitrate_kbps: ビットレート
+            crf: CRF値
+            chapters: チャプターリスト（overlay_title用）
+            total_duration_ms: 総再生時間（ミリ秒）
+            overlay_title: チャプター名を焼き込むか
+        """
+        ffmpeg = get_ffmpeg_path()
+
+        # 音声の長さを取得
+        audio_duration_ms = detect_duration_ms(audio_path)
+        audio_duration_sec = audio_duration_ms / 1000.0
+
+        # 動画フィルター構築
+        vf_parts = []
+
+        # チャプター名焼き込み
+        if overlay_title and chapters:
+            font_path = detect_system_font()
+            if font_path:
+                self.log(f"  Overlay titles: {len(chapters)} chapters")
+
+                # 除外チャプター（--で始まる）を除外
+                valid_chapters = [ch for ch in chapters if not ch.title.startswith("--")]
+
+                for i, ch in enumerate(valid_chapters):
+                    start_sec = ch.local_time_ms / 1000.0
+                    # 次のチャプターの開始時間、または動画終了時間
+                    if i + 1 < len(valid_chapters):
+                        end_sec = valid_chapters[i + 1].local_time_ms / 1000.0
+                    else:
+                        end_sec = (total_duration_ms / 1000.0) if total_duration_ms > 0 else audio_duration_sec
+
+                    # テキストをエスケープ
+                    escaped_title = escape_drawtext(ch.title)
+
+                    # drawtext フィルター
+                    # フォントサイズ56px、半透明ボックス背景、中央配置
+                    drawtext = (
+                        f"drawtext=fontfile='{font_path}':"
+                        f"text='{escaped_title}':"
+                        f"fontsize=56:"
+                        f"fontcolor=white:"
+                        f"borderw=2:"
+                        f"bordercolor=black:"
+                        f"box=1:"
+                        f"boxcolor=black@0.6:"
+                        f"boxborderw=15:"
+                        f"x=(w-text_w)/2:"
+                        f"y=h*0.325-th/2:"
+                        f"enable='between(t,{start_sec:.3f},{end_sec:.3f})'"
+                    )
+                    vf_parts.append(drawtext)
+            else:
+                self.log("  WARNING: No system font found, skipping title overlay")
+
+        # パディング追加（偶数サイズ保証）
+        vf_parts.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
+        vf = ",".join(vf_parts)
+
+        # 静止画向けエンコード設定（mp3tomp4準拠）
+        # -preset ultrafast: 静止画なので高速エンコード
+        # -tune stillimage: 静止画向けチューニング
+        # -crf 32: 静止画なので高圧縮でOK
+        # -threads 0: 全スレッド使用
+        # -c:a aac -b:a 192k: 音声品質設定
+        stillimage_video_args = [
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-tune', 'stillimage',
+            '-crf', '32',
+            '-threads', '0',
+        ]
+        stillimage_audio_args = ['-c:a', 'aac', '-b:a', '192k']
+
+        if cover_image_path and cover_image_path.exists():
+            # カバー画像がある場合
+            self.log(f"  Using cover image: {cover_image_path}")
+
+            cmd = [
+                ffmpeg, '-y', '-hide_banner', '-loglevel', 'warning',
+                '-loop', '1',
+                '-i', str(cover_image_path),
+                '-i', str(audio_path),
+                '-vf', vf,
+            ]
+            cmd.extend(stillimage_video_args)
+            cmd.extend(stillimage_audio_args)
+            cmd.extend([
+                '-t', f'{audio_duration_sec:.6f}',
+                '-pix_fmt', 'yuv420p',
+                '-shortest',
+                '-movflags', '+faststart',
+                str(output_path)
+            ])
+        else:
+            # カバー画像がない場合は黒背景（1920x1080）
+            self.log("  Generating black background video")
+
+            cmd = [
+                ffmpeg, '-y', '-hide_banner', '-loglevel', 'warning',
+                '-f', 'lavfi',
+                '-i', f'color=c=black:s=1920x1080:r=1:d={audio_duration_sec:.6f}',
+                '-i', str(audio_path),
+                '-vf', vf,
+            ]
+            cmd.extend(stillimage_video_args)
+            cmd.extend(stillimage_audio_args)
+            cmd.extend([
+                '-pix_fmt', 'yuv420p',
+                '-shortest',
+                '-movflags', '+faststart',
+                str(output_path)
+            ])
+
+        self.debug(f"Combining audio with cover: {' '.join(cmd[:15])}...")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "(no error message)"
+            print(f"ERROR: {error_msg[:1000]}", file=sys.stderr, flush=True)
+            print(f"Command was: {' '.join(cmd)}", file=sys.stderr, flush=True)
+            return False
+        return True
+
     def embed_chapters(self, input_path: Path, output_path: Path,
                        chapters: List[ChapterInfo], total_duration_ms: int) -> bool:
         """チャプターを埋め込み"""
@@ -692,12 +952,23 @@ class ProjectEncoder:
                auto_bitrate: bool = False,
                embed_chapters: bool = True,
                cut_excluded: bool = True,
+               cover_image: Optional[Path] = None,
+               overlay_title: bool = False,
                dry_run: bool = False) -> bool:
         """エンコード実行"""
         try:
             # ソースとチャプター読み込み
             self.load_sources()
             self.load_chapters()
+
+            # 全ソースが音声のみかチェック
+            all_audio_only = all(s.is_audio_only for s in self.sources)
+            if all_audio_only:
+                self.log("All sources are audio-only")
+                if cover_image and cover_image.exists():
+                    self.log(f"Cover image: {cover_image}")
+                else:
+                    self.log("No cover image provided - will generate black background")
 
             # 設定取得
             settings = self.project.get('encode_settings', {})
@@ -766,118 +1037,193 @@ class ProjectEncoder:
                     self.log(f"  {format_time_short(ch.local_time_ms)} {ch.title}")
                 return True
 
-            # セグメント抽出
             temp_dir = Path(tempfile.gettempdir())
-            extracted_files: List[Path] = []
 
-            # 異なるパラメータのソースがあるかチェック
-            has_different_params = False
-            if target_params and len(self.sources) > 1:
-                for src in self.sources:
-                    if src.video_params and (
-                        src.video_params.display_width != target_params.width or
-                        src.video_params.display_height != target_params.height or
-                        src.video_params.fps_num != target_params.fps_num or
-                        src.video_params.fps_den != target_params.fps_den or
-                        src.video_params.is_interlaced
-                    ):
-                        has_different_params = True
-                        break
+            # === 音声のみのソースの場合 ===
+            if all_audio_only:
+                self.log("=== Extracting Audio Segments ===")
+                extracted_audio_files: List[Path] = []
 
-                if has_different_params:
-                    self.log(f"Note: Sources will be normalized to target format")
+                for i, segment in enumerate(segments):
+                    source = self.sources[segment.source_index]
 
-            self.log("=== Extracting Segments ===")
-            for i, segment in enumerate(segments):
-                source = self.sources[segment.source_index]
-
-                # ソース全体でかつパラメータが統一されていれば抽出不要
-                # ただし以下の場合は再エンコードが必要:
-                # - 異なるパラメータのソースがある
-                # - ソースがインターレース
-                # - SAR != 1:1 (アナモルフィック)
-                source_needs_processing = False
-                if source.video_params:
-                    source_needs_processing = (
-                        source.video_params.is_interlaced or
-                        source.video_params.sar_num != 1 or
-                        source.video_params.sar_den != 1
+                    # ソース全体なら抽出不要
+                    can_skip = (
+                        segment.start_ms == 0 and
+                        segment.end_ms >= source.duration_ms - 100
                     )
+                    if can_skip:
+                        self.log(f"  [{i+1}/{len(segments)}] {source.path.name} (full, skip extraction)")
+                        extracted_audio_files.append(source.path)
+                        continue
 
-                can_skip = (
-                    segment.start_ms == 0 and
-                    segment.end_ms >= source.duration_ms - 100 and
-                    not has_different_params and
-                    not source_needs_processing
-                )
-                if can_skip:
-                    self.log(f"  [{i+1}/{len(segments)}] {source.path.name} (full, skip extraction)")
-                    extracted_files.append(source.path)
-                    continue
+                    temp_file = temp_dir / f"audio_segment_{i:03d}.m4a"
+                    self.temp_files.append(temp_file)
 
-                temp_file = temp_dir / f"segment_{i:03d}.mp4"
-                self.temp_files.append(temp_file)
+                    self.log(f"  [{i+1}/{len(segments)}] {source.path.name} "
+                             f"({format_time_short(segment.start_ms)}-{format_time_short(segment.end_ms)})")
 
-                self.log(f"  [{i+1}/{len(segments)}] {source.path.name} "
-                         f"({format_time_short(segment.start_ms)}-{format_time_short(segment.end_ms)})")
+                    if not self.extract_audio_segment(source, segment, temp_file):
+                        return False
 
-                if not self.extract_segment(
-                    source, segment, temp_file, encoder_id, bitrate, crf,
-                    target_params=target_params,
-                    source_params=source.video_params
-                ):
+                    # 検証
+                    audio_ms = detect_duration_ms(temp_file)
+                    expected = segment.duration_ms
+                    audio_diff = abs(audio_ms - expected)
+                    if audio_diff > 1000:
+                        self.log(f"    WARNING: Audio duration mismatch! Expected {format_time_short(expected)}, "
+                                 f"got {format_time_short(audio_ms)}")
+                    else:
+                        self.debug(f"Audio segment verified: {format_time_short(audio_ms)}")
+
+                    extracted_audio_files.append(temp_file)
+
+                # 音声結合
+                self.log("")
+                self.log("=== Concatenating Audio ===")
+                concat_audio = temp_dir / "concat_audio.m4a"
+                self.temp_files.append(concat_audio)
+
+                if not self.concat_audio_segments(extracted_audio_files, concat_audio):
                     return False
+                self.log(f"  Concatenated {len(extracted_audio_files)} audio segments")
 
-                # セグメントファイルの検証（映像・音声を個別にチェック）
-                video_ms, audio_ms = detect_stream_durations(temp_file)
-                expected = segment.duration_ms
+                # カバー画像と結合して動画作成
+                self.log("")
+                self.log("=== Creating Video with Cover Image ===")
+                concat_output = temp_dir / "concat_output.mp4"
+                self.temp_files.append(concat_output)
 
-                video_diff = abs(video_ms - expected)
-                audio_diff = abs(audio_ms - expected)
+                if not self.combine_audio_with_cover(concat_audio, cover_image, concat_output,
+                                                      encoder_id, bitrate, crf,
+                                                      chapters=adjusted_chapters,
+                                                      total_duration_ms=total_duration,
+                                                      overlay_title=overlay_title):
+                    return False
+                self.log(f"  Created video with cover image")
 
-                if video_diff > 1000:
-                    self.log(f"    WARNING: Video duration mismatch! Expected {format_time_short(expected)}, "
-                             f"got {format_time_short(video_ms)}")
-                if audio_diff > 1000:
-                    self.log(f"    WARNING: Audio duration mismatch! Expected {format_time_short(expected)}, "
+                # 検証
+                video_ms, audio_ms = detect_stream_durations(concat_output)
+                expected_total = sum(seg.duration_ms for seg in segments)
+                audio_diff = abs(audio_ms - expected_total)
+                if audio_diff > 2000:
+                    self.log(f"  WARNING: Audio duration mismatch! Expected {format_time_short(expected_total)}, "
                              f"got {format_time_short(audio_ms)}")
-                if abs(video_ms - audio_ms) > 1000:
-                    self.log(f"    WARNING: Video/Audio mismatch! Video={format_time_short(video_ms)}, "
-                             f"Audio={format_time_short(audio_ms)}")
+                else:
+                    self.debug(f"Video verified: V={format_time_short(video_ms)}, A={format_time_short(audio_ms)}")
 
-                if video_diff <= 1000 and audio_diff <= 1000:
-                    self.debug(f"Segment verified: V={format_time_short(video_ms)}, A={format_time_short(audio_ms)}")
-
-                extracted_files.append(temp_file)
-
-            # 結合
-            self.log("")
-            self.log("=== Concatenating ===")
-            concat_output = temp_dir / "concat_output.mp4"
-            self.temp_files.append(concat_output)
-
-            if not self.concat_segments(extracted_files, concat_output):
-                return False
-            self.log(f"  Concatenated {len(extracted_files)} segments")
-
-            # 結合結果の検証（映像・音声を個別にチェック）
-            video_ms, audio_ms = detect_stream_durations(concat_output)
-            expected_total = sum(seg.duration_ms for seg in segments)
-
-            video_diff = abs(video_ms - expected_total)
-            audio_diff = abs(audio_ms - expected_total)
-
-            if video_diff > 2000:
-                self.log(f"  WARNING: Video duration mismatch! Expected {format_time_short(expected_total)}, "
-                         f"got {format_time_short(video_ms)}")
-            if audio_diff > 2000:
-                self.log(f"  WARNING: Audio duration mismatch! Expected {format_time_short(expected_total)}, "
-                         f"got {format_time_short(audio_ms)}")
-            if abs(video_ms - audio_ms) > 2000:
-                self.log(f"  WARNING: Video/Audio mismatch! Video={format_time_short(video_ms)}, "
-                         f"Audio={format_time_short(audio_ms)}")
+            # === 動画ソースの場合（既存処理） ===
             else:
-                self.debug(f"Concat verified: V={format_time_short(video_ms)}, A={format_time_short(audio_ms)}")
+                extracted_files: List[Path] = []
+
+                # 異なるパラメータのソースがあるかチェック
+                has_different_params = False
+                if target_params and len(self.sources) > 1:
+                    for src in self.sources:
+                        if src.video_params and (
+                            src.video_params.display_width != target_params.width or
+                            src.video_params.display_height != target_params.height or
+                            src.video_params.fps_num != target_params.fps_num or
+                            src.video_params.fps_den != target_params.fps_den or
+                            src.video_params.is_interlaced
+                        ):
+                            has_different_params = True
+                            break
+
+                    if has_different_params:
+                        self.log(f"Note: Sources will be normalized to target format")
+
+                self.log("=== Extracting Segments ===")
+                for i, segment in enumerate(segments):
+                    source = self.sources[segment.source_index]
+
+                    # ソース全体でかつパラメータが統一されていれば抽出不要
+                    # ただし以下の場合は再エンコードが必要:
+                    # - 異なるパラメータのソースがある
+                    # - ソースがインターレース
+                    # - SAR != 1:1 (アナモルフィック)
+                    source_needs_processing = False
+                    if source.video_params:
+                        source_needs_processing = (
+                            source.video_params.is_interlaced or
+                            source.video_params.sar_num != 1 or
+                            source.video_params.sar_den != 1
+                        )
+
+                    can_skip = (
+                        segment.start_ms == 0 and
+                        segment.end_ms >= source.duration_ms - 100 and
+                        not has_different_params and
+                        not source_needs_processing
+                    )
+                    if can_skip:
+                        self.log(f"  [{i+1}/{len(segments)}] {source.path.name} (full, skip extraction)")
+                        extracted_files.append(source.path)
+                        continue
+
+                    temp_file = temp_dir / f"segment_{i:03d}.mp4"
+                    self.temp_files.append(temp_file)
+
+                    self.log(f"  [{i+1}/{len(segments)}] {source.path.name} "
+                             f"({format_time_short(segment.start_ms)}-{format_time_short(segment.end_ms)})")
+
+                    if not self.extract_segment(
+                        source, segment, temp_file, encoder_id, bitrate, crf,
+                        target_params=target_params,
+                        source_params=source.video_params
+                    ):
+                        return False
+
+                    # セグメントファイルの検証（映像・音声を個別にチェック）
+                    video_ms, audio_ms = detect_stream_durations(temp_file)
+                    expected = segment.duration_ms
+
+                    video_diff = abs(video_ms - expected)
+                    audio_diff = abs(audio_ms - expected)
+
+                    if video_diff > 1000:
+                        self.log(f"    WARNING: Video duration mismatch! Expected {format_time_short(expected)}, "
+                                 f"got {format_time_short(video_ms)}")
+                    if audio_diff > 1000:
+                        self.log(f"    WARNING: Audio duration mismatch! Expected {format_time_short(expected)}, "
+                                 f"got {format_time_short(audio_ms)}")
+                    if abs(video_ms - audio_ms) > 1000:
+                        self.log(f"    WARNING: Video/Audio mismatch! Video={format_time_short(video_ms)}, "
+                                 f"Audio={format_time_short(audio_ms)}")
+
+                    if video_diff <= 1000 and audio_diff <= 1000:
+                        self.debug(f"Segment verified: V={format_time_short(video_ms)}, A={format_time_short(audio_ms)}")
+
+                    extracted_files.append(temp_file)
+
+                # 結合
+                self.log("")
+                self.log("=== Concatenating ===")
+                concat_output = temp_dir / "concat_output.mp4"
+                self.temp_files.append(concat_output)
+
+                if not self.concat_segments(extracted_files, concat_output):
+                    return False
+                self.log(f"  Concatenated {len(extracted_files)} segments")
+
+                # 結合結果の検証（映像・音声を個別にチェック）
+                video_ms, audio_ms = detect_stream_durations(concat_output)
+                expected_total = sum(seg.duration_ms for seg in segments)
+
+                video_diff = abs(video_ms - expected_total)
+                audio_diff = abs(audio_ms - expected_total)
+
+                if video_diff > 2000:
+                    self.log(f"  WARNING: Video duration mismatch! Expected {format_time_short(expected_total)}, "
+                             f"got {format_time_short(video_ms)}")
+                if audio_diff > 2000:
+                    self.log(f"  WARNING: Audio duration mismatch! Expected {format_time_short(expected_total)}, "
+                             f"got {format_time_short(audio_ms)}")
+                if abs(video_ms - audio_ms) > 2000:
+                    self.log(f"  WARNING: Video/Audio mismatch! Video={format_time_short(video_ms)}, "
+                             f"Audio={format_time_short(audio_ms)}")
+                else:
+                    self.debug(f"Concat verified: V={format_time_short(video_ms)}, A={format_time_short(audio_ms)}")
 
             # チャプター埋め込み
             if embed_chapters and adjusted_chapters:
@@ -925,6 +1271,8 @@ Examples:
     parser.add_argument('--auto', action='store_true', help='ソースのビットレートを自動検出して使用')
     parser.add_argument('--no-chapters', action='store_true', help='チャプター埋め込みを無効化')
     parser.add_argument('--no-cut', action='store_true', help='除外チャプターをカットしない')
+    parser.add_argument('--cover-image', type=Path, help='カバー画像（音声のみのソース用）')
+    parser.add_argument('--overlay-title', action='store_true', help='チャプター名を映像に焼き込む')
     parser.add_argument('--dry-run', action='store_true', help='実行せずに計画を表示')
     parser.add_argument('-v', '--verbose', action='store_true', help='詳細ログを表示')
 
@@ -943,6 +1291,8 @@ Examples:
         auto_bitrate=args.auto,
         embed_chapters=not args.no_chapters,
         cut_excluded=not args.no_cut,
+        cover_image=args.cover_image,
+        overlay_title=args.overlay_title,
         dry_run=args.dry_run
     )
 
