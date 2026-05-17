@@ -2,35 +2,41 @@
 # ============================================================
 # rehearsal-finalize-audio
 # ============================================================
-# リハーサル録音用の音声仕上げ。同階層の 32bit float WAV を順次連結し、
-# 二系統のノーマライズ出力を生成する:
+# リハーサル録音用の音声仕上げ。WAV を連結し、二系統のノーマライズ出力を生成:
 #   <basename>_archive.wav     ピークノーマライズ（演奏品質保持）
 #   <basename>_rehearsal.wav   loudnorm（指示が聞こえる、振り返り用）
 #
 # Usage:
-#   rehearsal-finalize-audio                          # basename はディレクトリ名
+#   rehearsal-finalize-audio                          # cwd を 1 ディレクトリとして処理
 #   rehearsal-finalize-audio --basename foo           # 出力 prefix 指定
-#   rehearsal-finalize-audio --basename foo --dry-run # 計画のみ
+#   rehearsal-finalize-audio --recursive              # cwd 配下の各サブディレクトリを処理
+#   rehearsal-finalize-audio --recursive --dry-run    # 計画のみ
 #   rehearsal-finalize-audio --keep-concat            # 連結中間ファイルを残す
+#
+# --recursive の挙動:
+#   cwd 直下を出力ディレクトリとして扱い、cwd/<sub>/...*.wav を含む各サブディレクトリで
+#   パイプラインを実行する。出力ファイルは全て cwd に集約され、サブディレクトリ名を
+#   アンダースコア連結したものを basename にする (例: L/AM -> L_AM_archive.wav)。
 # ============================================================
 
 set -euo pipefail
 
-# このスクリプトと同じディレクトリの advanced/ から下位ツールを呼ぶ
 SCRIPT_DIR="${0:A:h}"
 ADV_DIR="${SCRIPT_DIR}/advanced"
 
 basename=""
 dry_run=0
 keep_concat=0
+recursive=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --basename) basename="$2"; shift 2 ;;
     --dry-run)  dry_run=1; shift ;;
     --keep-concat) keep_concat=1; shift ;;
+    --recursive|-r) recursive=1; shift ;;
     -h|--help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,22p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     *)
@@ -40,45 +46,113 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# basename 未指定なら cwd 名を使う
-if [[ -z "$basename" ]]; then
-  basename="${PWD:t}"
-fi
+# ------------------------------------------------------------
+# process_dir: 1 ソースディレクトリに対してパイプラインを実行
+#   $1: source_dir   — 入力 WAV 群があるディレクトリ
+#   $2: out_basename — 出力ファイル名の prefix
+#   $3: out_dir      — 出力先ディレクトリ
+# ------------------------------------------------------------
+process_dir() {
+  local source_dir="$1"
+  local out_basename="$2"
+  local out_dir="$3"
 
-concat="${basename}.wav"
-archive="${basename}_archive.wav"
-rehearsal="${basename}_rehearsal.wav"
+  local concat="${out_dir}/${out_basename}.wav"
+  local archive="${out_dir}/${out_basename}_archive.wav"
+  local rehearsal="${out_dir}/${out_basename}_rehearsal.wav"
 
-echo "rehearsal-finalize-audio: pipeline"
-echo "  basename   : ${basename}"
-echo "  concat     : ${concat}"
-echo "  archive    : ${archive}   (peak normalize)"
-echo "  rehearsal  : ${rehearsal} (loudnorm)"
-echo ""
+  echo "================================================================"
+  echo "source     : ${source_dir}"
+  echo "basename   : ${out_basename}"
+  echo "archive    : ${archive##*/}   (peak normalize)"
+  echo "rehearsal  : ${rehearsal##*/} (loudnorm)"
+  echo "================================================================"
 
-dry_flag=""
-(( dry_run )) && dry_flag="--dry-run"
+  # ソース WAV 収集（出力命名規則のファイルは除外して再実行 idempotency を確保）
+  local -a wavs
+  for f in "${source_dir}"/*.wav(.N); do
+    case "${f:t}" in
+      *_archive.wav|*_rehearsal.wav) continue ;;
+    esac
+    wavs+=("$f")
+  done
 
-# Step 1: concat
-echo "[1/3] audio-concat..."
-"${ADV_DIR}/audio-concat" -o "${concat}" $dry_flag
+  if (( ${#wavs[@]} == 0 )); then
+    echo "  (skip: no source WAV files)"
+    echo ""
+    return 0
+  fi
 
-# Step 2: archive (peak)
-echo ""
-echo "[2/3] audio-normalize-peak (-> ${archive})..."
-"${ADV_DIR}/audio-normalize-peak" "${concat}" -o "${archive}" $dry_flag
+  local dry_flag=""
+  (( dry_run )) && dry_flag="--dry-run"
 
-# Step 3: rehearsal (loudnorm)
-echo ""
-echo "[3/3] audio-normalize-loudnorm (-> ${rehearsal})..."
-"${ADV_DIR}/audio-normalize-loudnorm" "${concat}" -o "${rehearsal}" $dry_flag
+  local input_for_normalize
+  local concat_created=0
 
-# クリーンアップ
-if (( ! dry_run && ! keep_concat )); then
+  # Step 1: concat (2 ファイル以上のときのみ)
+  if (( ${#wavs[@]} >= 2 )); then
+    echo "[1/3] audio-concat (${#wavs[@]} files)..."
+    "${ADV_DIR}/audio-concat" "${wavs[@]}" -o "${concat}" $dry_flag
+    input_for_normalize="${concat}"
+    concat_created=1
+  else
+    echo "[1/3] (single file, skipping concat: ${wavs[1]:t})"
+    input_for_normalize="${wavs[1]}"
+  fi
+
+  # Step 2: archive (peak)
   echo ""
-  echo "Removing intermediate ${concat} (use --keep-concat to retain)"
-  rm -f "${concat}"
+  echo "[2/3] audio-normalize-peak..."
+  "${ADV_DIR}/audio-normalize-peak" "${input_for_normalize}" -o "${archive}" $dry_flag
+
+  # Step 3: rehearsal (loudnorm)
+  echo ""
+  echo "[3/3] audio-normalize-loudnorm..."
+  "${ADV_DIR}/audio-normalize-loudnorm" "${input_for_normalize}" -o "${rehearsal}" $dry_flag
+
+  # 中間 concat の掃除
+  if (( ! dry_run && ! keep_concat && concat_created )); then
+    echo ""
+    echo "Removing intermediate ${concat##*/} (use --keep-concat to retain)"
+    rm -f "${concat}"
+  fi
+  echo ""
+}
+
+invocation_dir="${PWD}"
+
+if (( recursive )); then
+  # サブディレクトリのみ走査 (-mindepth 2 で cwd 直下は除外、出力衝突回避)
+  typeset -aU leaf_dirs
+  while IFS= read -r d; do
+    leaf_dirs+=("$d")
+  done < <(find "${invocation_dir}" -mindepth 2 -type f -name "*.wav" -exec dirname {} \; | sort -u)
+
+  if (( ${#leaf_dirs[@]} == 0 )); then
+    echo "rehearsal-finalize-audio: no WAV files found in subdirectories of ${invocation_dir}" >&2
+    exit 1
+  fi
+
+  echo "rehearsal-finalize-audio: recursive mode"
+  echo "  invocation_dir : ${invocation_dir}"
+  echo "  output_dir     : ${invocation_dir}"
+  echo "  source dirs    : ${#leaf_dirs[@]}"
+  for d in "${leaf_dirs[@]}"; do
+    echo "                   - ${d#${invocation_dir}/}"
+  done
+  echo ""
+
+  for leaf in "${leaf_dirs[@]}"; do
+    rel="${leaf#${invocation_dir}/}"
+    out_basename="${rel//\//_}"
+    process_dir "${leaf}" "${out_basename}" "${invocation_dir}"
+  done
+else
+  # 単一ディレクトリモード (cwd を source & output 両方に使う)
+  if [[ -z "$basename" ]]; then
+    basename="${invocation_dir:t}"
+  fi
+  process_dir "${invocation_dir}" "${basename}" "${invocation_dir}"
 fi
 
-echo ""
 echo "rehearsal-finalize-audio: done"
