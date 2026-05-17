@@ -83,13 +83,24 @@ def main() -> int:
         die("ffmpeg not found in PATH")
 
     input_path = Path(args.input)
-    if not input_path.is_file():
-        die(f"input not found: {input_path}")
 
     if args.output:
         output_path = Path(args.output)
     else:
         output_path = input_path.with_name(input_path.stem + "_archive.wav")
+
+    # 入力が無い場合: --dry-run なら計画だけ表示して終了（上流が dry-run で
+    # 中間ファイル未生成のケース）。それ以外はエラー。
+    if not input_path.is_file():
+        if args.dry_run:
+            print(f"audio-normalize-peak: dry-run (input not yet present: {input_path})",
+                  file=sys.stderr)
+            print(f"  target peak  : {args.target:+.2f} dBFS", file=sys.stderr)
+            print(f"  output       : {output_path}", file=sys.stderr)
+            print(f"  (volume analysis skipped — input file does not exist yet)",
+                  file=sys.stderr)
+            return 0
+        die(f"input not found: {input_path}")
 
     print(f"audio-normalize-peak: analyzing {input_path}", file=sys.stderr)
     max_db = detect_max_volume_db(input_path)

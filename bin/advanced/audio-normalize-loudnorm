@@ -131,13 +131,26 @@ def main() -> int:
         die("ffmpeg not found in PATH")
 
     input_path = Path(args.input)
-    if not input_path.is_file():
-        die(f"input not found: {input_path}")
 
     if args.output:
         output_path = Path(args.output)
     else:
         output_path = input_path.with_name(input_path.stem + "_rehearsal.wav")
+
+    # 入力が無い場合: --dry-run なら計画だけ表示。上流ツール dry-run 連鎖の救済。
+    if not input_path.is_file():
+        if args.dry_run:
+            mode = "two-pass (linear)" if args.two_pass else "single-pass (dynamic)"
+            print(f"audio-normalize-loudnorm: dry-run [{mode}] "
+                  f"(input not yet present: {input_path})", file=sys.stderr)
+            print(f"  output       : {output_path}", file=sys.stderr)
+            print(f"  target I     : {args.I:+.1f} LUFS", file=sys.stderr)
+            print(f"  target TP    : {args.TP:+.1f} dBTP", file=sys.stderr)
+            print(f"  target LRA   : {args.LRA:.1f} LU", file=sys.stderr)
+            print(f"  (measurement skipped — input file does not exist yet)",
+                  file=sys.stderr)
+            return 0
+        die(f"input not found: {input_path}")
 
     mode = "two-pass (linear)" if args.two_pass else "single-pass (dynamic)"
     print(f"audio-normalize-loudnorm: {mode}", file=sys.stderr)
