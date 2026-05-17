@@ -5,33 +5,31 @@ build-backend = "hatchling.build"
 [project]
 name = "media-scribe-workflow"
 version = "2.1.34"
-description = "メディアファイルから字幕・チャプター付き動画を生成するワークフローツール"
+description = "メディアから字幕・チャプター・LaTeX レポート PDF を生成する CLI ツール群とレポートパイプライン"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "mashi727"}
 ]
-keywords = ["media", "scribe", "video", "chapter", "subtitle", "workflow"]
+keywords = ["media", "video", "subtitle", "srt", "whisper", "latex", "report", "cli", "pipeline"]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Environment :: MacOS X",
+    "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Video",
+    "Topic :: Text Processing :: Markup :: LaTeX",
 ]
 
 dependencies = [
-    "PySide6>=6.6.0",
     "PyYAML>=6.0",
-    "numpy>=1.24.0",
-    "opencv-python>=4.8.0",
-    "static-ffmpeg>=2.0",
     "yt-dlp>=2024.0.0",
 ]
 
@@ -45,10 +43,10 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/mashi727/media-scribe-workflow"
 Repository = "https://github.com/mashi727/media-scribe-workflow"
+"GUI (Chaptr)" = "https://github.com/mashi727/chaptr"
 
-[project.scripts]
-video-chapter-editor = "media_scribe_workflow.ui.app:main"
-scribe-workflow = "media_scribe_workflow.scribe_workflow:main"
+# CLI コマンドは bin/ ディレクトリのスクリプトで提供（pip 経由でなく PATH 経由を想定）
+# 必要な場合は将来 [project.scripts] にエントリポイントを追加
 
 [tool.hatch.build.targets.wheel]
 packages = ["media_scribe_workflow"]
