@@ -6,16 +6,21 @@ audio-normalize-loudnorm — EBU R128 ベースの動的ラウドネスノーマ
 小さい音（指揮者の口頭指示など）を聞こえるレベルまで持ち上げ、
 大きい音（演奏）を程よく抑える。リハーサル振り返り用。
 
+実装上の注意:
+    loudnorm フィルタは内部で 192kHz にアップサンプルする。出力サンプル
+    レートを明示しないと結果ファイルが 192kHz になりサイズ爆発するため、
+    入力 SR を ffprobe で取得し ffmpeg に -ar で明示する。
+
 実装:
-    - デフォルト: 単一パスの dynamic mode
-        ffmpeg -af loudnorm=I=-14:TP=-1.5:LRA=11
-    - --two-pass: より正確な二段階測定
-        1. measured stats を JSON 取得
-        2. linear mode で適用
+    - デフォルト: 単一パス dynamic mode
+        ffmpeg -af loudnorm=I=-14:TP=-1.5:LRA=11 -ar <input_sr>
+    - --two-pass: 測定→適用の二段階（より正確、遅い）
+    - 出力ビット深度: 24 / 32f / 16 (default 24)
 
 Usage:
     audio-normalize-loudnorm input.wav -o input_rehearsal.wav
     audio-normalize-loudnorm input.wav -o out.wav -i -14 -lra 11 -tp -1.5
+    audio-normalize-loudnorm input.wav --bit-depth 32f
     audio-normalize-loudnorm input.wav --two-pass
 """
 from __future__ import annotations
@@ -29,13 +34,40 @@ import sys
 from pathlib import Path
 
 
+BIT_DEPTH_CODECS = {
+    "16":  "pcm_s16le",
+    "24":  "pcm_s24le",
+    "32f": "pcm_f32le",
+}
+
+
 def die(msg: str, code: int = 1) -> None:
     print(f"audio-normalize-loudnorm: error: {msg}", file=sys.stderr)
     sys.exit(code)
 
 
+def get_sample_rate(input_path: Path) -> int:
+    """ffprobe で入力サンプルレートを取得。"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=sample_rate",
+        "-of", "json",
+        str(input_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        die(f"ffprobe failed for {input_path}: {result.stderr.strip()}")
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+    if not streams:
+        die(f"no audio stream in {input_path}")
+    return int(streams[0]["sample_rate"])
+
+
 def loudnorm_single_pass(input_path: Path, output_path: Path,
                          I: float, TP: float, LRA: float,
+                         codec: str, sample_rate: int,
                          verbose: bool) -> None:
     af = f"loudnorm=I={I}:TP={TP}:LRA={LRA}:dual_mono=true"
     cmd = [
@@ -43,7 +75,8 @@ def loudnorm_single_pass(input_path: Path, output_path: Path,
         "-y",
         "-i", str(input_path),
         "-af", af,
-        "-c:a", "pcm_f32le",
+        "-ar", str(sample_rate),
+        "-c:a", codec,
         str(output_path),
     ]
     if verbose:
@@ -81,6 +114,7 @@ def loudnorm_measure(input_path: Path,
 def loudnorm_apply_linear(input_path: Path, output_path: Path,
                           stats: dict,
                           I: float, TP: float, LRA: float,
+                          codec: str, sample_rate: int,
                           verbose: bool) -> None:
     """二段階目: measured stats を使った linear mode 適用。"""
     af = (
@@ -97,7 +131,8 @@ def loudnorm_apply_linear(input_path: Path, output_path: Path,
         "-y",
         "-i", str(input_path),
         "-af", af,
-        "-c:a", "pcm_f32le",
+        "-ar", str(sample_rate),
+        "-c:a", codec,
         str(output_path),
     ]
     if verbose:
@@ -121,15 +156,19 @@ def main() -> int:
                         dest="TP", help="True peak ceiling dBTP (default: -1.5)")
     parser.add_argument("-lra", "--loudness-range", type=float, default=11.0,
                         dest="LRA", help="目標 loudness range LU (default: 11.0)")
+    parser.add_argument("--bit-depth", choices=list(BIT_DEPTH_CODECS.keys()),
+                        default="24",
+                        help="出力ビット深度: 16 / 24 / 32f (default: 24)")
     parser.add_argument("--two-pass", action="store_true",
                         help="二段階測定で精度向上（遅い）")
     parser.add_argument("--dry-run", action="store_true", help="計画のみ表示")
     parser.add_argument("-v", "--verbose", action="store_true", help="ffmpeg コマンドを表示")
     args = parser.parse_args()
 
-    if not shutil.which("ffmpeg"):
-        die("ffmpeg not found in PATH")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        die("ffmpeg/ffprobe not found in PATH")
 
+    codec = BIT_DEPTH_CODECS[args.bit_depth]
     input_path = Path(args.input)
 
     if args.output:
@@ -147,18 +186,22 @@ def main() -> int:
             print(f"  target I     : {args.I:+.1f} LUFS", file=sys.stderr)
             print(f"  target TP    : {args.TP:+.1f} dBTP", file=sys.stderr)
             print(f"  target LRA   : {args.LRA:.1f} LU", file=sys.stderr)
+            print(f"  bit-depth    : {args.bit_depth} ({codec})", file=sys.stderr)
             print(f"  (measurement skipped — input file does not exist yet)",
                   file=sys.stderr)
             return 0
         die(f"input not found: {input_path}")
 
+    sample_rate = get_sample_rate(input_path)
     mode = "two-pass (linear)" if args.two_pass else "single-pass (dynamic)"
     print(f"audio-normalize-loudnorm: {mode}", file=sys.stderr)
     print(f"  input        : {input_path}", file=sys.stderr)
     print(f"  output       : {output_path}", file=sys.stderr)
+    print(f"  sample_rate  : {sample_rate} Hz (preserved across loudnorm)", file=sys.stderr)
     print(f"  target I     : {args.I:+.1f} LUFS", file=sys.stderr)
     print(f"  target TP    : {args.TP:+.1f} dBTP", file=sys.stderr)
     print(f"  target LRA   : {args.LRA:.1f} LU", file=sys.stderr)
+    print(f"  bit-depth    : {args.bit_depth} ({codec})", file=sys.stderr)
 
     if args.dry_run:
         print("audio-normalize-loudnorm: --dry-run, skipping ffmpeg", file=sys.stderr)
@@ -172,10 +215,12 @@ def main() -> int:
         print(f"  measured TP  : {stats['input_tp']} dBTP", file=sys.stderr)
         print("audio-normalize-loudnorm: pass 2/2 — applying...", file=sys.stderr)
         loudnorm_apply_linear(input_path, output_path, stats,
-                              args.I, args.TP, args.LRA, args.verbose)
+                              args.I, args.TP, args.LRA,
+                              codec, sample_rate, args.verbose)
     else:
         loudnorm_single_pass(input_path, output_path,
-                             args.I, args.TP, args.LRA, args.verbose)
+                             args.I, args.TP, args.LRA,
+                             codec, sample_rate, args.verbose)
 
     print(f"audio-normalize-loudnorm: wrote {output_path}", file=sys.stderr)
     return 0

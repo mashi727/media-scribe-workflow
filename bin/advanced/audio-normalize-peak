@@ -8,21 +8,31 @@ audio-normalize-peak — ピークノーマライズ。
 実装:
     1. ffmpeg -af volumedetect で max_volume を測定
     2. 必要なゲイン量を計算 (target - max_volume)
-    3. ffmpeg -af volume=<gain>dB で適用、32bit float で出力
+    3. ffmpeg -af volume=<gain>dB で適用、指定ビット深度で出力
+       (float → integer 変換時は ffmpeg が自動で triangular_hp ディザ適用)
 
 Usage:
     audio-normalize-peak input.wav -o input_archive.wav
     audio-normalize-peak input.wav -o output.wav --target -1.0
+    audio-normalize-peak input.wav --bit-depth 32f
     audio-normalize-peak input.wav --dry-run
 """
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+BIT_DEPTH_CODECS = {
+    "16":  "pcm_s16le",
+    "24":  "pcm_s24le",
+    "32f": "pcm_f32le",
+}
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -47,14 +57,35 @@ def detect_max_volume_db(input_path: Path) -> float:
     return float(m.group(1))
 
 
-def apply_gain(input_path: Path, output_path: Path, gain_db: float, verbose: bool) -> None:
-    """ffmpeg で gain を適用、32bit float で出力。"""
+def get_sample_rate(input_path: Path) -> int:
+    """ffprobe で入力サンプルレートを取得。"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=sample_rate",
+        "-of", "json",
+        str(input_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        die(f"ffprobe failed for {input_path}: {result.stderr.strip()}")
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+    if not streams:
+        die(f"no audio stream in {input_path}")
+    return int(streams[0]["sample_rate"])
+
+
+def apply_gain(input_path: Path, output_path: Path, gain_db: float,
+               codec: str, sample_rate: int, verbose: bool) -> None:
+    """ffmpeg で gain を適用、指定 codec / sample rate で出力。"""
     cmd = [
         "ffmpeg", "-hide_banner",
         "-y",
         "-i", str(input_path),
         "-af", f"volume={gain_db:+.4f}dB",
-        "-c:a", "pcm_f32le",
+        "-ar", str(sample_rate),
+        "-c:a", codec,
         str(output_path),
     ]
     if verbose:
@@ -74,14 +105,18 @@ def main() -> int:
                         help="出力パス（省略時: <input>_archive.wav）")
     parser.add_argument("--target", type=float, default=-1.0,
                         help="目標ピーク dBFS (default: -1.0)")
+    parser.add_argument("--bit-depth", choices=list(BIT_DEPTH_CODECS.keys()),
+                        default="24",
+                        help="出力ビット深度: 16 / 24 / 32f (default: 24)")
     parser.add_argument("--dry-run", action="store_true",
                         help="ゲイン計算のみ表示、ffmpeg は実行しない")
     parser.add_argument("-v", "--verbose", action="store_true", help="ffmpeg コマンドを表示")
     args = parser.parse_args()
 
-    if not shutil.which("ffmpeg"):
-        die("ffmpeg not found in PATH")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        die("ffmpeg/ffprobe not found in PATH")
 
+    codec = BIT_DEPTH_CODECS[args.bit_depth]
     input_path = Path(args.input)
 
     if args.output:
@@ -89,13 +124,13 @@ def main() -> int:
     else:
         output_path = input_path.with_name(input_path.stem + "_archive.wav")
 
-    # 入力が無い場合: --dry-run なら計画だけ表示して終了（上流が dry-run で
-    # 中間ファイル未生成のケース）。それ以外はエラー。
+    # 入力が無い場合: --dry-run なら計画だけ表示して終了。
     if not input_path.is_file():
         if args.dry_run:
             print(f"audio-normalize-peak: dry-run (input not yet present: {input_path})",
                   file=sys.stderr)
             print(f"  target peak  : {args.target:+.2f} dBFS", file=sys.stderr)
+            print(f"  bit-depth    : {args.bit_depth} ({codec})", file=sys.stderr)
             print(f"  output       : {output_path}", file=sys.stderr)
             print(f"  (volume analysis skipped — input file does not exist yet)",
                   file=sys.stderr)
@@ -103,19 +138,23 @@ def main() -> int:
         die(f"input not found: {input_path}")
 
     print(f"audio-normalize-peak: analyzing {input_path}", file=sys.stderr)
+    sample_rate = get_sample_rate(input_path)
     max_db = detect_max_volume_db(input_path)
     gain_db = args.target - max_db
 
+    print(f"  sample_rate  : {sample_rate} Hz", file=sys.stderr)
     print(f"  max_volume   : {max_db:+.2f} dBFS", file=sys.stderr)
     print(f"  target peak  : {args.target:+.2f} dBFS", file=sys.stderr)
     print(f"  applied gain : {gain_db:+.2f} dB", file=sys.stderr)
+    print(f"  bit-depth    : {args.bit_depth} ({codec})", file=sys.stderr)
     print(f"  output       : {output_path}", file=sys.stderr)
 
     if args.dry_run:
         print("audio-normalize-peak: --dry-run, skipping ffmpeg", file=sys.stderr)
         return 0
 
-    apply_gain(input_path, output_path, gain_db, verbose=args.verbose)
+    apply_gain(input_path, output_path, gain_db, codec, sample_rate,
+               verbose=args.verbose)
     print(f"audio-normalize-peak: wrote {output_path}", file=sys.stderr)
     return 0
 
