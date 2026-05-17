@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""
+audio-normalize-peak — ピークノーマライズ。
+
+ダイナミクスを完全に保持したまま、最大ピークを指定 dBFS にスケール。
+演奏品質を保つ用途（コンクール・演奏研究用アーカイブ）。
+
+実装:
+    1. ffmpeg -af volumedetect で max_volume を測定
+    2. 必要なゲイン量を計算 (target - max_volume)
+    3. ffmpeg -af volume=<gain>dB で適用、32bit float で出力
+
+Usage:
+    audio-normalize-peak input.wav -o input_archive.wav
+    audio-normalize-peak input.wav -o output.wav --target -1.0
+    audio-normalize-peak input.wav --dry-run
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-normalize-peak: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def detect_max_volume_db(input_path: Path) -> float:
+    """ffmpeg volumedetect で最大音量 (dBFS) を取得。"""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats",
+        "-i", str(input_path),
+        "-af", "volumedetect",
+        "-vn", "-sn", "-dn",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    # volumedetect prints to stderr: "[Parsed_volumedetect_0 @ ...] max_volume: -3.5 dB"
+    m = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", result.stderr)
+    if not m:
+        die(f"could not parse max_volume from ffmpeg output:\n{result.stderr[-500:]}")
+    return float(m.group(1))
+
+
+def apply_gain(input_path: Path, output_path: Path, gain_db: float, verbose: bool) -> None:
+    """ffmpeg で gain を適用、32bit float で出力。"""
+    cmd = [
+        "ffmpeg", "-hide_banner",
+        "-y",
+        "-i", str(input_path),
+        "-af", f"volume={gain_db:+.4f}dB",
+        "-c:a", "pcm_f32le",
+        str(output_path),
+    ]
+    if verbose:
+        print("audio-normalize-peak: ffmpeg cmd:", " ".join(cmd), file=sys.stderr)
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        die(f"ffmpeg exited {result.returncode}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="audio-normalize-peak",
+        description="ピークノーマライズ（ダイナミクス保持、コンクール/演奏研究用）。",
+    )
+    parser.add_argument("input", help="入力 WAV パス")
+    parser.add_argument("-o", "--output",
+                        help="出力パス（省略時: <input>_archive.wav）")
+    parser.add_argument("--target", type=float, default=-1.0,
+                        help="目標ピーク dBFS (default: -1.0)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="ゲイン計算のみ表示、ffmpeg は実行しない")
+    parser.add_argument("-v", "--verbose", action="store_true", help="ffmpeg コマンドを表示")
+    args = parser.parse_args()
+
+    if not shutil.which("ffmpeg"):
+        die("ffmpeg not found in PATH")
+
+    input_path = Path(args.input)
+    if not input_path.is_file():
+        die(f"input not found: {input_path}")
+
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = input_path.with_name(input_path.stem + "_archive.wav")
+
+    print(f"audio-normalize-peak: analyzing {input_path}", file=sys.stderr)
+    max_db = detect_max_volume_db(input_path)
+    gain_db = args.target - max_db
+
+    print(f"  max_volume   : {max_db:+.2f} dBFS", file=sys.stderr)
+    print(f"  target peak  : {args.target:+.2f} dBFS", file=sys.stderr)
+    print(f"  applied gain : {gain_db:+.2f} dB", file=sys.stderr)
+    print(f"  output       : {output_path}", file=sys.stderr)
+
+    if args.dry_run:
+        print("audio-normalize-peak: --dry-run, skipping ffmpeg", file=sys.stderr)
+        return 0
+
+    apply_gain(input_path, output_path, gain_db, verbose=args.verbose)
+    print(f"audio-normalize-peak: wrote {output_path}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

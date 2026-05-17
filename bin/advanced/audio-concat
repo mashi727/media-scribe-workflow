@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""
+audio-concat — 32-bit float WAV ファイルを順次連結。
+
+入力ファイルがすべて同じ:
+    - sample format  (pcm_f32le 等)
+    - sample rate    (例: 96000)
+    - channels       (例: 2)
+であることを ffprobe で検証し、ffmpeg の concat demuxer + stream copy で
+ロスレスに連結する（再エンコードなし）。
+
+Usage:
+    audio-concat                              # 同階層の *.wav をソート順で連結
+    audio-concat in1.wav in2.wav -o out.wav   # 明示指定
+    audio-concat --list list.txt -o out.wav   # ファイルリストから
+    audio-concat --output out.wav             # -o の長形式
+    audio-concat --dry-run                    # 実行計画のみ表示
+    audio-concat --any-format                 # 32f 以外も許容（同一性チェックのみ）
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Iterable
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-concat: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def ffprobe_stream(path: Path) -> dict:
+    """ffprobe で音声ストリーム情報を取得。"""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=sample_fmt,sample_rate,channels,codec_name",
+            "-of", "json",
+            str(path),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        die(f"ffprobe failed for {path}: {result.stderr.strip()}")
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+    if not streams:
+        die(f"no audio stream in {path}")
+    return streams[0]
+
+
+def collect_inputs(args: argparse.Namespace) -> list[Path]:
+    if args.list:
+        list_path = Path(args.list)
+        if not list_path.is_file():
+            die(f"list file not found: {list_path}")
+        lines = [ln.strip() for ln in list_path.read_text(encoding="utf-8").splitlines()]
+        return [Path(ln) for ln in lines if ln and not ln.startswith("#")]
+    if args.inputs:
+        return [Path(p) for p in args.inputs]
+    # default: sorted *.wav in cwd
+    cwd_wavs = sorted(Path.cwd().glob("*.wav"))
+    if not cwd_wavs:
+        die("no input files: pass paths, --list, or run in a directory with *.wav")
+    return cwd_wavs
+
+
+def validate_inputs(paths: list[Path], require_32f: bool) -> dict:
+    """すべてのファイルが同一フォーマットで、(任意で)32bit float であることを検証。"""
+    if len(paths) < 2:
+        die(f"need at least 2 inputs to concat, got {len(paths)}")
+    for p in paths:
+        if not p.is_file():
+            die(f"input not found: {p}")
+    first = ffprobe_stream(paths[0])
+    if require_32f and first.get("sample_fmt") not in ("flt", "fltp"):
+        die(
+            f"{paths[0]} is not 32-bit float "
+            f"(sample_fmt={first.get('sample_fmt')}); pass --any-format to override"
+        )
+    for p in paths[1:]:
+        info = ffprobe_stream(p)
+        for key in ("sample_fmt", "sample_rate", "channels"):
+            if str(info.get(key)) != str(first.get(key)):
+                die(
+                    f"format mismatch on {p}: {key}={info.get(key)} "
+                    f"vs first={first.get(key)}"
+                )
+    return first
+
+
+def run_ffmpeg_concat(paths: list[Path], output: Path, verbose: bool) -> None:
+    """ffmpeg -f concat -c copy で連結。"""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as f:
+        manifest_path = Path(f.name)
+        for p in paths:
+            # ffmpeg concat demuxer requires absolute or relative-to-manifest paths
+            # and shell-escaped single quotes
+            escaped = str(p.resolve()).replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+    try:
+        cmd = [
+            "ffmpeg", "-hide_banner",
+            "-y" if not output.exists() else "-n",
+            "-f", "concat", "-safe", "0",
+            "-i", str(manifest_path),
+            "-c", "copy",
+            str(output),
+        ]
+        # if -n: ffmpeg refuses to overwrite. Use -y explicitly when desired.
+        cmd[2] = "-y"   # always overwrite (consistent with other tools in this repo)
+        if verbose:
+            print("audio-concat: ffmpeg cmd:", " ".join(cmd), file=sys.stderr)
+        result = subprocess.run(cmd, check=False)
+        if result.returncode != 0:
+            die(f"ffmpeg exited {result.returncode}")
+    finally:
+        manifest_path.unlink(missing_ok=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="audio-concat",
+        description="32-bit float WAV ファイルを順次連結（ロスレス）。",
+    )
+    parser.add_argument("inputs", nargs="*", help="入力 WAV パス（省略時は cwd の *.wav をソート順）")
+    parser.add_argument("-o", "--output", default="concat.wav", help="出力パス (default: concat.wav)")
+    parser.add_argument("--list", help="入力ファイルリスト（1 行 1 パス、# でコメント）")
+    parser.add_argument("--any-format", action="store_true",
+                        help="32bit float 制約を外す（同一性チェックのみ）")
+    parser.add_argument("--dry-run", action="store_true", help="実行計画のみ表示")
+    parser.add_argument("-v", "--verbose", action="store_true", help="ffmpeg コマンドを表示")
+    args = parser.parse_args()
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        die("ffmpeg/ffprobe not found in PATH")
+
+    paths = collect_inputs(args)
+    info = validate_inputs(paths, require_32f=not args.any_format)
+    output = Path(args.output)
+
+    print(f"audio-concat: {len(paths)} inputs", file=sys.stderr)
+    print(f"  sample_fmt   : {info.get('sample_fmt')}", file=sys.stderr)
+    print(f"  sample_rate  : {info.get('sample_rate')}", file=sys.stderr)
+    print(f"  channels     : {info.get('channels')}", file=sys.stderr)
+    print(f"  codec_name   : {info.get('codec_name')}", file=sys.stderr)
+    print(f"  output       : {output}", file=sys.stderr)
+    if args.verbose:
+        for i, p in enumerate(paths, 1):
+            print(f"  [{i:3d}] {p}", file=sys.stderr)
+
+    if args.dry_run:
+        print("audio-concat: --dry-run, skipping ffmpeg", file=sys.stderr)
+        return 0
+
+    run_ffmpeg_concat(paths, output, verbose=args.verbose)
+    print(f"audio-concat: wrote {output}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

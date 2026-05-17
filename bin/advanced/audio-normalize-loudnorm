@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+audio-normalize-loudnorm — EBU R128 ベースの動的ラウドネスノーマライズ。
+
+放送基準（EBU R128 / ITU BS.1770）の loudnorm フィルタを適用し、
+小さい音（指揮者の口頭指示など）を聞こえるレベルまで持ち上げ、
+大きい音（演奏）を程よく抑える。リハーサル振り返り用。
+
+実装:
+    - デフォルト: 単一パスの dynamic mode
+        ffmpeg -af loudnorm=I=-14:TP=-1.5:LRA=11
+    - --two-pass: より正確な二段階測定
+        1. measured stats を JSON 取得
+        2. linear mode で適用
+
+Usage:
+    audio-normalize-loudnorm input.wav -o input_rehearsal.wav
+    audio-normalize-loudnorm input.wav -o out.wav -i -14 -lra 11 -tp -1.5
+    audio-normalize-loudnorm input.wav --two-pass
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-normalize-loudnorm: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def loudnorm_single_pass(input_path: Path, output_path: Path,
+                         I: float, TP: float, LRA: float,
+                         verbose: bool) -> None:
+    af = f"loudnorm=I={I}:TP={TP}:LRA={LRA}:dual_mono=true"
+    cmd = [
+        "ffmpeg", "-hide_banner",
+        "-y",
+        "-i", str(input_path),
+        "-af", af,
+        "-c:a", "pcm_f32le",
+        str(output_path),
+    ]
+    if verbose:
+        print("audio-normalize-loudnorm: ffmpeg cmd:", " ".join(cmd), file=sys.stderr)
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        die(f"ffmpeg exited {result.returncode}")
+
+
+def loudnorm_measure(input_path: Path,
+                     I: float, TP: float, LRA: float) -> dict:
+    """二段階測定: ffmpeg を測定モードで走らせて統計を取得。"""
+    af = (
+        f"loudnorm=I={I}:TP={TP}:LRA={LRA}:"
+        "print_format=json:dual_mono=true"
+    )
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats",
+        "-i", str(input_path),
+        "-af", af,
+        "-vn", "-sn", "-dn",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    # JSON 出力は stderr の末尾にある。最後の {...} ブロックを拾う
+    m = re.search(r"\{[^{}]*\"input_i\".*\}", result.stderr, re.DOTALL)
+    if not m:
+        die(f"could not parse loudnorm measure JSON:\n{result.stderr[-500:]}")
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError as e:
+        die(f"loudnorm JSON decode error: {e}")
+
+
+def loudnorm_apply_linear(input_path: Path, output_path: Path,
+                          stats: dict,
+                          I: float, TP: float, LRA: float,
+                          verbose: bool) -> None:
+    """二段階目: measured stats を使った linear mode 適用。"""
+    af = (
+        f"loudnorm=I={I}:TP={TP}:LRA={LRA}:"
+        f"measured_I={stats['input_i']}:"
+        f"measured_LRA={stats['input_lra']}:"
+        f"measured_TP={stats['input_tp']}:"
+        f"measured_thresh={stats['input_thresh']}:"
+        f"offset={stats['target_offset']}:"
+        "linear=true:dual_mono=true"
+    )
+    cmd = [
+        "ffmpeg", "-hide_banner",
+        "-y",
+        "-i", str(input_path),
+        "-af", af,
+        "-c:a", "pcm_f32le",
+        str(output_path),
+    ]
+    if verbose:
+        print("audio-normalize-loudnorm: ffmpeg cmd:", " ".join(cmd), file=sys.stderr)
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        die(f"ffmpeg exited {result.returncode}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="audio-normalize-loudnorm",
+        description="EBU R128 ベースの動的ラウドネスノーマライズ（指示が聞こえる、振り返り用）。",
+    )
+    parser.add_argument("input", help="入力 WAV パス")
+    parser.add_argument("-o", "--output",
+                        help="出力パス（省略時: <input>_rehearsal.wav）")
+    parser.add_argument("-i", "--integrated", type=float, default=-14.0,
+                        dest="I", help="目標 integrated loudness LUFS (default: -14.0)")
+    parser.add_argument("-tp", "--true-peak", type=float, default=-1.5,
+                        dest="TP", help="True peak ceiling dBTP (default: -1.5)")
+    parser.add_argument("-lra", "--loudness-range", type=float, default=11.0,
+                        dest="LRA", help="目標 loudness range LU (default: 11.0)")
+    parser.add_argument("--two-pass", action="store_true",
+                        help="二段階測定で精度向上（遅い）")
+    parser.add_argument("--dry-run", action="store_true", help="計画のみ表示")
+    parser.add_argument("-v", "--verbose", action="store_true", help="ffmpeg コマンドを表示")
+    args = parser.parse_args()
+
+    if not shutil.which("ffmpeg"):
+        die("ffmpeg not found in PATH")
+
+    input_path = Path(args.input)
+    if not input_path.is_file():
+        die(f"input not found: {input_path}")
+
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = input_path.with_name(input_path.stem + "_rehearsal.wav")
+
+    mode = "two-pass (linear)" if args.two_pass else "single-pass (dynamic)"
+    print(f"audio-normalize-loudnorm: {mode}", file=sys.stderr)
+    print(f"  input        : {input_path}", file=sys.stderr)
+    print(f"  output       : {output_path}", file=sys.stderr)
+    print(f"  target I     : {args.I:+.1f} LUFS", file=sys.stderr)
+    print(f"  target TP    : {args.TP:+.1f} dBTP", file=sys.stderr)
+    print(f"  target LRA   : {args.LRA:.1f} LU", file=sys.stderr)
+
+    if args.dry_run:
+        print("audio-normalize-loudnorm: --dry-run, skipping ffmpeg", file=sys.stderr)
+        return 0
+
+    if args.two_pass:
+        print("audio-normalize-loudnorm: pass 1/2 — measuring...", file=sys.stderr)
+        stats = loudnorm_measure(input_path, args.I, args.TP, args.LRA)
+        print(f"  measured I   : {stats['input_i']} LUFS", file=sys.stderr)
+        print(f"  measured LRA : {stats['input_lra']} LU", file=sys.stderr)
+        print(f"  measured TP  : {stats['input_tp']} dBTP", file=sys.stderr)
+        print("audio-normalize-loudnorm: pass 2/2 — applying...", file=sys.stderr)
+        loudnorm_apply_linear(input_path, output_path, stats,
+                              args.I, args.TP, args.LRA, args.verbose)
+    else:
+        loudnorm_single_pass(input_path, output_path,
+                             args.I, args.TP, args.LRA, args.verbose)
+
+    print(f"audio-normalize-loudnorm: wrote {output_path}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

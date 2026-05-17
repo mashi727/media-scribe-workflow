@@ -1,0 +1,74 @@
+#!/usr/bin/env zsh
+# ============================================================
+# performance-finalize-audio
+# ============================================================
+# 本番録音用の音声仕上げ。同階層の 32bit float WAV を順次連結し、
+# ピークノーマライズのみ実施（ダイナミクス完全保持）:
+#   <basename>_archive.wav     ピークノーマライズ
+#
+# 本番録音にはダイナミクスを潰す loudnorm 系を当てないので、
+# rehearsal-finalize-audio の archive 部分だけを実行する形。
+#
+# Usage:
+#   performance-finalize-audio                       # basename はディレクトリ名
+#   performance-finalize-audio --basename foo
+#   performance-finalize-audio --dry-run
+#   performance-finalize-audio --keep-concat
+# ============================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="${0:A:h}"
+ADV_DIR="${SCRIPT_DIR}/advanced"
+
+basename=""
+dry_run=0
+keep_concat=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --basename) basename="$2"; shift 2 ;;
+    --dry-run)  dry_run=1; shift ;;
+    --keep-concat) keep_concat=1; shift ;;
+    -h|--help)
+      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      exit 0
+      ;;
+    *)
+      echo "performance-finalize-audio: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$basename" ]]; then
+  basename="${PWD:t}"
+fi
+
+concat="${basename}.wav"
+archive="${basename}_archive.wav"
+
+echo "performance-finalize-audio: pipeline"
+echo "  basename   : ${basename}"
+echo "  concat     : ${concat}"
+echo "  archive    : ${archive}   (peak normalize, dynamics preserved)"
+echo ""
+
+dry_flag=""
+(( dry_run )) && dry_flag="--dry-run"
+
+echo "[1/2] audio-concat..."
+"${ADV_DIR}/audio-concat" -o "${concat}" $dry_flag
+
+echo ""
+echo "[2/2] audio-normalize-peak (-> ${archive})..."
+"${ADV_DIR}/audio-normalize-peak" "${concat}" -o "${archive}" $dry_flag
+
+if (( ! dry_run && ! keep_concat )); then
+  echo ""
+  echo "Removing intermediate ${concat} (use --keep-concat to retain)"
+  rm -f "${concat}"
+fi
+
+echo ""
+echo "performance-finalize-audio: done"

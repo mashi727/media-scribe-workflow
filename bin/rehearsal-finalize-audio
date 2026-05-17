@@ -1,0 +1,84 @@
+#!/usr/bin/env zsh
+# ============================================================
+# rehearsal-finalize-audio
+# ============================================================
+# リハーサル録音用の音声仕上げ。同階層の 32bit float WAV を順次連結し、
+# 二系統のノーマライズ出力を生成する:
+#   <basename>_archive.wav     ピークノーマライズ（演奏品質保持）
+#   <basename>_rehearsal.wav   loudnorm（指示が聞こえる、振り返り用）
+#
+# Usage:
+#   rehearsal-finalize-audio                          # basename はディレクトリ名
+#   rehearsal-finalize-audio --basename foo           # 出力 prefix 指定
+#   rehearsal-finalize-audio --basename foo --dry-run # 計画のみ
+#   rehearsal-finalize-audio --keep-concat            # 連結中間ファイルを残す
+# ============================================================
+
+set -euo pipefail
+
+# このスクリプトと同じディレクトリの advanced/ から下位ツールを呼ぶ
+SCRIPT_DIR="${0:A:h}"
+ADV_DIR="${SCRIPT_DIR}/advanced"
+
+basename=""
+dry_run=0
+keep_concat=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --basename) basename="$2"; shift 2 ;;
+    --dry-run)  dry_run=1; shift ;;
+    --keep-concat) keep_concat=1; shift ;;
+    -h|--help)
+      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      exit 0
+      ;;
+    *)
+      echo "rehearsal-finalize-audio: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# basename 未指定なら cwd 名を使う
+if [[ -z "$basename" ]]; then
+  basename="${PWD:t}"
+fi
+
+concat="${basename}.wav"
+archive="${basename}_archive.wav"
+rehearsal="${basename}_rehearsal.wav"
+
+echo "rehearsal-finalize-audio: pipeline"
+echo "  basename   : ${basename}"
+echo "  concat     : ${concat}"
+echo "  archive    : ${archive}   (peak normalize)"
+echo "  rehearsal  : ${rehearsal} (loudnorm)"
+echo ""
+
+dry_flag=""
+(( dry_run )) && dry_flag="--dry-run"
+
+# Step 1: concat
+echo "[1/3] audio-concat..."
+"${ADV_DIR}/audio-concat" -o "${concat}" $dry_flag
+
+# Step 2: archive (peak)
+echo ""
+echo "[2/3] audio-normalize-peak (-> ${archive})..."
+"${ADV_DIR}/audio-normalize-peak" "${concat}" -o "${archive}" $dry_flag
+
+# Step 3: rehearsal (loudnorm)
+echo ""
+echo "[3/3] audio-normalize-loudnorm (-> ${rehearsal})..."
+"${ADV_DIR}/audio-normalize-loudnorm" "${concat}" -o "${rehearsal}" $dry_flag
+
+# クリーンアップ
+if (( ! dry_run && ! keep_concat )); then
+  echo ""
+  echo "Removing intermediate ${concat} (use --keep-concat to retain)"
+  rm -f "${concat}"
+fi
+
+echo ""
+echo "rehearsal-finalize-audio: done"
