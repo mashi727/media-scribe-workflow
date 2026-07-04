@@ -2,13 +2,17 @@
 # ============================================================
 # rehearsal-finalize-audio
 # ============================================================
-# リハーサル録音用の音声仕上げ。WAV を連結し、二系統のノーマライズ出力を生成:
-#   <basename>_archive.wav     ピークノーマライズ（演奏品質保持）
-#   <basename>_rehearsal.wav   loudnorm（指示が聞こえる、振り返り用）
+# リハーサル録音用の音声仕上げ。WAV を連結し、loudnorm でノーマライズした
+# 振り返り用の単一ファイルを生成する:
+#   <basename>.wav             loudnorm（指示が聞こえる、振り返り用）
+#
+# --archive を付けるとピークノーマライズ（演奏品質保持）の出力も追加生成する:
+#   <basename>_archive.wav     ピークノーマライズ
 #
 # Usage:
 #   rehearsal-finalize-audio                          # cwd を 1 ディレクトリとして処理
 #   rehearsal-finalize-audio --basename foo           # 出力 prefix 指定
+#   rehearsal-finalize-audio --archive                # peak 出力も追加生成
 #   rehearsal-finalize-audio --recursive              # cwd 配下の各サブディレクトリを処理
 #   rehearsal-finalize-audio --recursive --dry-run    # 計画のみ
 #   rehearsal-finalize-audio --keep-concat            # 連結中間ファイルを残す
@@ -16,7 +20,7 @@
 # --recursive の挙動:
 #   cwd 直下を出力ディレクトリとして扱い、cwd/<sub>/...*.wav を含む各サブディレクトリで
 #   パイプラインを実行する。出力ファイルは全て cwd に集約され、サブディレクトリ名を
-#   アンダースコア連結したものを basename にする (例: L/AM -> L_AM_archive.wav)。
+#   アンダースコア連結したものを basename にする (例: L/AM -> L_AM.wav)。
 # ============================================================
 
 set -euo pipefail
@@ -28,15 +32,17 @@ basename=""
 dry_run=0
 keep_concat=0
 recursive=0
+archive=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --basename) basename="$2"; shift 2 ;;
     --dry-run)  dry_run=1; shift ;;
     --keep-concat) keep_concat=1; shift ;;
+    --archive)  archive=1; shift ;;
     --recursive|-r) recursive=1; shift ;;
     -h|--help)
-      sed -n '2,22p' "$0" | sed 's/^# \?//'
+      sed -n '2,26p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     *)
@@ -57,22 +63,27 @@ process_dir() {
   local out_basename="$2"
   local out_dir="$3"
 
-  local concat="${out_dir}/${out_basename}.wav"
-  local archive="${out_dir}/${out_basename}_archive.wav"
-  local rehearsal="${out_dir}/${out_basename}_rehearsal.wav"
+  local concat="${out_dir}/${out_basename}_concat.wav"
+  local output="${out_dir}/${out_basename}.wav"
+  local archive_out="${out_dir}/${out_basename}_archive.wav"
+
+  # 総ステップ数（archive の有無で変動）
+  local nsteps=2
+  (( archive )) && nsteps=3
 
   echo "================================================================"
   echo "source     : ${source_dir}"
   echo "basename   : ${out_basename}"
-  echo "archive    : ${archive##*/}   (peak normalize)"
-  echo "rehearsal  : ${rehearsal##*/} (loudnorm)"
+  echo "output     : ${output##*/}   (loudnorm)"
+  (( archive )) && echo "archive    : ${archive_out##*/}   (peak normalize)"
   echo "================================================================"
 
   # ソース WAV 収集（出力命名規則のファイルは除外して再実行 idempotency を確保）
   local -a wavs
   for f in "${source_dir}"/*.wav(.N); do
     case "${f:t}" in
-      *_archive.wav|*_rehearsal.wav) continue ;;
+      "${out_basename}.wav") continue ;;
+      *_concat.wav|*_archive.wav|*_rehearsal.wav) continue ;;
     esac
     wavs+=("$f")
   done
@@ -88,27 +99,33 @@ process_dir() {
 
   local input_for_normalize
   local concat_created=0
+  local step=1
 
-  # Step 1: concat (2 ファイル以上のときのみ)
+  # Step: concat (2 ファイル以上のときのみ)
   if (( ${#wavs[@]} >= 2 )); then
-    echo "[1/3] audio-concat (${#wavs[@]} files)..."
+    echo "[${step}/${nsteps}] audio-concat (${#wavs[@]} files)..."
     "${ADV_DIR}/audio-concat" "${wavs[@]}" -o "${concat}" $dry_flag
     input_for_normalize="${concat}"
     concat_created=1
   else
-    echo "[1/3] (single file, skipping concat: ${wavs[1]:t})"
+    echo "[${step}/${nsteps}] (single file, skipping concat: ${wavs[1]:t})"
     input_for_normalize="${wavs[1]}"
   fi
+  (( step++ ))
 
-  # Step 2: archive (peak)
+  # Step: output (loudnorm)
   echo ""
-  echo "[2/3] audio-normalize-peak..."
-  "${ADV_DIR}/audio-normalize-peak" "${input_for_normalize}" -o "${archive}" $dry_flag
+  echo "[${step}/${nsteps}] audio-normalize-loudnorm..."
+  "${ADV_DIR}/audio-normalize-loudnorm" "${input_for_normalize}" -o "${output}" $dry_flag
+  (( step++ ))
 
-  # Step 3: rehearsal (loudnorm)
-  echo ""
-  echo "[3/3] audio-normalize-loudnorm..."
-  "${ADV_DIR}/audio-normalize-loudnorm" "${input_for_normalize}" -o "${rehearsal}" $dry_flag
+  # Step: archive (peak) — opt-in
+  if (( archive )); then
+    echo ""
+    echo "[${step}/${nsteps}] audio-normalize-peak..."
+    "${ADV_DIR}/audio-normalize-peak" "${input_for_normalize}" -o "${archive_out}" $dry_flag
+    (( step++ ))
+  fi
 
   # 中間 concat の掃除
   if (( ! dry_run && ! keep_concat && concat_created )); then
