@@ -9,9 +9,13 @@ YAML 設定 1 枚で「同期・差し替え済み映像」までを全自動生
 
 処理段（各段は既存ツールを配管）:
     1. 映像連結        （分割セグメント → ロスレス concat）
-    2. L/R 連結+正規化 （audio-concat → audio-normalize-loudnorm/peak）
-    3. ステレオ結合    （audio-merge-stereo）
-    4. 同期・差し替え  （video-replace-audio、--drift でクロックドリフト補正）
+    2. L/R 連結+正規化 （concat → audio-normalize-loudnorm/peak、任意で個別ドリフト補正）
+    3. 各chを映像へ個別同期（audio-sync-offset）
+    4. 結合して mux    （adelay/atrim + join を 1 パスで、映像は -c:v copy 無劣化）
+
+    重要: L(TX1)/R(TX2) は独立レコーダーで開始時刻もクロックも別。先にステレオ
+    結合すると左右が数十秒ズレ得るため、各chを共通基準の「映像」へ個別に同期して
+    から結合する。結合済みステレオを audio.stereo で渡した場合は 1 本として扱う。
 
 設計:
     - 入力パスは設定ファイル基準の相対（glob 可）。テイクフォルダをどこに
@@ -132,6 +136,53 @@ def normalize_channel(runner: Runner, method: str, norm: dict,
     return dst
 
 
+def audio_sample_rate(path: Path) -> int:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=sample_rate", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        return int(r.stdout.strip())
+    except ValueError:
+        return 48000
+
+
+def measure_offset(video: Path, audio: Path, rate: int) -> float:
+    """audio-sync-offset --value を実行してオフセット秒を返す（実行モード専用）。"""
+    r = subprocess.run(
+        [str(ADV / "audio-sync-offset"), str(video), str(audio),
+         "--rate", str(rate), "--value"],
+        capture_output=True, text=True, check=False,
+    )
+    if r.returncode != 0:
+        die(f"audio-sync-offset failed for {audio}: {r.stderr.strip()}")
+    return float(r.stdout.strip())
+
+
+def acodec_args(codec: str, bitrate: str) -> tuple[list[str], str]:
+    """(ffmpeg 音声コーデック引数, 推奨コンテナ拡張子) を返す。"""
+    if codec == "aac":
+        return (["-c:a", "aac", "-b:a", bitrate], "mp4")
+    if codec == "pcm":
+        return (["-c:a", "pcm_s24le"], "mov")
+    if codec == "alac":
+        return (["-c:a", "alac"], "mov")
+    if codec == "copy":
+        return (["-c:a", "copy"], "mkv")
+    die(f"unknown output.codec: {codec}")
+
+
+def channel_filter(idx: int, offset: float, sr: int, label: str) -> str:
+    """入力 idx の音声を offset[秒] だけ映像 timeline に合わせて焼き込むフィルタ。
+    offset>=0 は adelay（先頭無音）、offset<0 は atrim（先頭トリム）。apad で末尾を埋め、
+    最終段の -shortest で映像長にそろえる。"""
+    ns = round(abs(offset) * sr)
+    if offset >= 0:
+        return f"[{idx}:a]adelay={ns}S:all=1,apad[{label}]"
+    return f"[{idx}:a]atrim=start_sample={ns},asetpts=PTS-STARTPTS,apad[{label}]"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="rehearsal-sync",
@@ -204,43 +255,71 @@ def main() -> int:
     log("[1/4] 映像連結")
     video_single = concat_lossless(runner, videos, work / "video.mp4")
 
-    # --- 2/3. 音声: 連結 + 正規化 + ステレオ結合 ---
+    rate = int(sync.get("rate", 8000))
+    codec = str(out_cfg.get("codec", "aac"))
+    bitrate = str(out_cfg.get("bitrate", "320k"))
+    acodec, _ext = acodec_args(codec, bitrate)
+    drift_on = bool(drift.get("enabled"))
+    drift_win = str(drift.get("window", 120))
+
     if stereo_in:
+        # 既に相互整合したステレオ音源 → 従来どおり 1 本として同期・差し替え
         log("[2/4] 音声連結 + 正規化（stereo 指定）")
         st_concat = concat_lossless(runner, stereo_in, work / "stereo_concat.wav")
         stereo = normalize_channel(runner, method, norm, st_concat, work / "stereo.wav")
         log("[3/4] （ステレオ結合はスキップ: stereo 指定）")
+        log("[4/4] 同期・差し替え")
+        cmd = [ADV / "video-replace-audio", str(video_single), str(stereo),
+               "-o", str(output), "--codec", codec, "--bitrate", bitrate,
+               "--rate", str(rate)]
+        if drift_on:
+            cmd += ["--drift", "--drift-window", drift_win]
+        runner.run(cmd)
     else:
-        log("[2/4] L/R 連結 + 正規化")
+        # L/R は独立録音（開始時刻・クロックが別）。各チャンネルを個別に映像へ
+        # 同期してから結合する（先に結合すると左右が数十秒ズレる）。
+        log("[2/4] L/R 連結 + 正規化" + ("（+ 個別ドリフト補正）" if drift_on else ""))
         l_concat = concat_lossless(runner, lefts, work / "L_concat.wav")
         r_concat = concat_lossless(runner, rights, work / "R_concat.wav")
-        l_norm = normalize_channel(runner, method, norm, l_concat, work / "L.wav")
-        r_norm = normalize_channel(runner, method, norm, r_concat, work / "R.wav")
-        log("[3/4] ステレオ結合")
-        stereo = work / "stereo.wav"
-        runner.run([
-            ADV / "audio-merge-stereo", str(l_norm), str(r_norm),
-            "-o", str(stereo), "--bit-depth", str(norm.get("bit_depth", "24")),
-        ])
+        l_src = normalize_channel(runner, method, norm, l_concat, work / "L.wav")
+        r_src = normalize_channel(runner, method, norm, r_concat, work / "R.wav")
+        if drift_on:
+            for src, dst in ((l_src, work / "L_fix.wav"), (r_src, work / "R_fix.wav")):
+                runner.run([ADV / "audio-drift-correct", str(video_single), str(src),
+                            "-o", str(dst), "--window", drift_win,
+                            "--bit-depth", str(norm.get("bit_depth", "24"))])
+            l_src, r_src = work / "L_fix.wav", work / "R_fix.wav"
 
-    # --- 4. 同期・差し替え ---
-    log("[4/4] 同期・差し替え")
-    cmd = [ADV / "video-replace-audio", str(video_single), str(stereo),
-           "-o", str(output),
-           "--codec", str(out_cfg.get("codec", "aac")),
-           "--bitrate", str(out_cfg.get("bitrate", "320k")),
-           "--rate", str(sync.get("rate", 8000))]
-    offset = sync.get("offset", "auto")
-    if offset != "auto":
-        cmd += ["--offset", str(offset)]
-    if drift.get("enabled"):
-        cmd += ["--drift", "--drift-window", str(drift.get("window", 120))]
-    runner.run(cmd)
+        log("[3/4] 各チャンネルを映像へ個別同期 → [4/4] 結合して mux")
+        if args.dry_run:
+            log("    $ (各chの audio-sync-offset でオフセット測定 → adelay/atrim + join で mux)")
+            log(f"    $ ffmpeg -i {video_single} -i {l_src} -i {r_src} "
+                f"-filter_complex '[1:a]adelay=<DL>[la];[2:a]adelay=<DR>[ra];"
+                f"[la][ra]join=inputs=2:channel_layout=stereo[a]' "
+                f"-map 0:v:0 -map [a] -c:v copy {' '.join(acodec)} -shortest {output}")
+        else:
+            sr = audio_sample_rate(l_src)
+            offL = measure_offset(video_single, l_src, rate)
+            offR = measure_offset(video_single, r_src, rate)
+            log(f"    offset L = {offL:+.4f}s   offset R = {offR:+.4f}s  (@ {sr}Hz)")
+            fc = ";".join([
+                channel_filter(1, offL, sr, "la"),
+                channel_filter(2, offR, sr, "ra"),
+                "[la][ra]join=inputs=2:channel_layout=stereo[a]",
+            ])
+            runner.run([
+                "ffmpeg", "-hide_banner", "-y", "-v", "warning", "-stats",
+                "-i", str(video_single), "-i", str(l_src), "-i", str(r_src),
+                "-filter_complex", fc,
+                "-map", "0:v:0", "-map", "[a]",
+                "-c:v", "copy", *acodec,
+                "-shortest", str(output),
+            ])
 
     # --- 後始末 ---
     if not args.dry_run and not args.keep_work:
         for f in ("video.mp4", "L_concat.wav", "R_concat.wav", "L.wav", "R.wav",
-                  "stereo_concat.wav", "stereo.wav"):
+                  "L_fix.wav", "R_fix.wav", "stereo_concat.wav", "stereo.wav"):
             (work / f).unlink(missing_ok=True)
         try:
             work.rmdir()

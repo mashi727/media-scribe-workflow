@@ -178,8 +178,9 @@ bin/advanced/video-replace-audio video.mp4 external.wav --drift        # 冒頭/
 bin/advanced/audio-drift-correct video.mp4 external.wav -o ext_fixed.wav  # 補正のみ（ppm表示）
 
 # 一次ファイル（カメラ映像 + 別録りL/R）から全自動（YAML 1枚）
-#   フォルダ例: take/{video/*.mp4, L/*.wav, R/*.wav} + take.yaml
-bin/rehearsal-sync take.yaml            # 連結→loudnorm→ステレオ結合→ドリフト補正→差し替え
+#   フォルダ例: take/{VID_*.mp4, L/*.wav, R/*.wav} + take.yaml
+#   L/R は独立レコーダーのため、各chを映像へ個別同期してから結合する
+bin/rehearsal-sync take.yaml            # 連結→loudnorm→各ch個別同期→結合mux
 bin/rehearsal-sync take.yaml --dry-run  # 計画のみ
 bin/rehearsal-sync take.yaml --keep-work -v  # 中間生成物を残す/詳細ログ
 # スキーマ: examples/take.yaml

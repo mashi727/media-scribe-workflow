@@ -14,14 +14,20 @@
 version: 1
 
 # --- 入力（glob 可。分割セグメントは名前順に連結される） ---
+# 想定フォルダ構成（take 直下）:
+#   ./VID_*.mp4    Insta360 Ace Pro 2 の映像（take 直下・単一 or セグメント）
+#   ./L/*.wav      RODE Wireless Pro TX1 の内部録音（分割）
+#   ./R/*.wav      RODE Wireless Pro TX2 の内部録音（分割）
 video:
-  - video/*.mp4            # Insta360 Ace Pro 2 のセグメント（1本でも可）
+  - "VID_*.mp4"            # take 直下に置く場合。video/ サブフォルダなら video/*.mp4
 
 audio:
-  left:  [ L/*.wav ]       # RODE Wireless Pro TX1 → ステレオ左（例: 指揮者マイク）
-  right: [ R/*.wav ]       # RODE Wireless Pro TX2 → ステレオ右
-  # 代わりに結合済みステレオを渡す場合:
-  # stereo: [ mix/*.wav ]  # left/right の代わりに指定（ステレオ結合をスキップ）
+  left:  [ L/*.wav ]       # TX1 → ステレオ左（例: 指揮者マイク）
+  right: [ R/*.wav ]       # TX2 → ステレオ右
+  # 注意: L/R は独立レコーダー（開始時刻・クロックが別）。rehearsal-sync は各chを
+  #       映像へ個別同期してから結合するので、この 2 系統をそのまま渡してよい。
+  # 代わりに相互整合済みステレオを渡す場合:
+  # stereo: [ mix/*.wav ]  # left/right の代わりに指定（1 本として同期・差し替え）
 
 # --- 正規化（各チャンネル個別に適用） ---
 normalize:
