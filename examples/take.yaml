@@ -1,0 +1,51 @@
+# ============================================================
+# take.yaml — rehearsal-sync 用の per-take 設定
+# ============================================================
+# 一次ファイル（カメラ映像 + 別録り L/R 音声）から、同期・差し替え
+# 済み映像を 1 コマンドで生成するための宣言的設定。
+#
+#   rehearsal-sync take.yaml
+#   rehearsal-sync take.yaml --dry-run     # 計画だけ表示
+#
+# パスはすべて「この YAML があるフォルダ」基準の相対（glob 可）。
+# テイクフォルダをどこに置いても、どこから実行しても動く。
+# ============================================================
+
+version: 1
+
+# --- 入力（glob 可。分割セグメントは名前順に連結される） ---
+video:
+  - video/*.mp4            # Insta360 Ace Pro 2 のセグメント（1本でも可）
+
+audio:
+  left:  [ L/*.wav ]       # RODE Wireless Pro TX1 → ステレオ左（例: 指揮者マイク）
+  right: [ R/*.wav ]       # RODE Wireless Pro TX2 → ステレオ右
+  # 代わりに結合済みステレオを渡す場合:
+  # stereo: [ mix/*.wav ]  # left/right の代わりに指定（ステレオ結合をスキップ）
+
+# --- 正規化（各チャンネル個別に適用） ---
+normalize:
+  method: loudnorm         # loudnorm | peak | none
+  I:   -14                 # 目標 integrated loudness (LUFS)
+  TP:  -1.5                # true peak ceiling (dBTP)
+  LRA: 11                  # loudness range (LU)
+  bit_depth: "24"          # 16 | 24 | 32f
+
+# --- クロックドリフト補正（長時間テイク向け） ---
+drift:
+  enabled: true            # 3h 級は true 推奨。短尺は false でよい
+  window: 120              # 冒頭/終端の測定窓（秒）
+
+# --- 同期 ---
+sync:
+  offset: auto             # auto | <秒数>（手動固定するとき）
+  rate: 8000               # 同期検出のサンプルレート
+
+# --- 出力 ---
+output:
+  path: out/final.mp4
+  codec: aac               # aac | pcm | alac | copy
+  bitrate: 320k            # aac のとき有効
+
+# --- 中間生成物の置き場（省略時 .work、完了時に自動削除） ---
+work_dir: .work

@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""
+rehearsal-sync — 一次ファイル（カメラ映像 + 別録り L/R 音声）から、
+YAML 設定 1 枚で「同期・差し替え済み映像」までを全自動生成する。
+
+一次入力（例）:
+    Insta360 Ace Pro 2 の映像セグメント（video/*.mp4）
+    RODE Wireless Pro の TX1/TX2 内部録音（L/*.wav, R/*.wav）
+
+処理段（各段は既存ツールを配管）:
+    1. 映像連結        （分割セグメント → ロスレス concat）
+    2. L/R 連結+正規化 （audio-concat → audio-normalize-loudnorm/peak）
+    3. ステレオ結合    （audio-merge-stereo）
+    4. 同期・差し替え  （video-replace-audio、--drift でクロックドリフト補正）
+
+設計:
+    - 入力パスは設定ファイル基準の相対（glob 可）。テイクフォルダをどこに
+      置いても、どこから実行しても動く。
+    - 既定値で最小設定が動き、各段は上書き可能。
+    - 中間生成物は work_dir（既定 .work）に置き、冪等に再実行できる。
+
+Usage:
+    rehearsal-sync take.yaml
+    rehearsal-sync take.yaml --dry-run
+    rehearsal-sync take.yaml --keep-work -v
+
+設定スキーマは examples/take.yaml を参照。
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ADV = SCRIPT_DIR / "advanced"
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"rehearsal-sync: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+class Runner:
+    def __init__(self, dry_run: bool, verbose: bool):
+        self.dry_run = dry_run
+        self.verbose = verbose
+
+    def run(self, cmd: list[str]) -> None:
+        printable = " ".join(str(c) for c in cmd)
+        if self.dry_run:
+            log(f"    $ {printable}")
+            return
+        if self.verbose:
+            log(f"    $ {printable}")
+        res = subprocess.run([str(c) for c in cmd], check=False)
+        if res.returncode != 0:
+            die(f"command failed ({res.returncode}): {printable}")
+
+
+def as_list(v) -> list:
+    if v is None:
+        return []
+    return v if isinstance(v, list) else [v]
+
+
+def resolve_globs(base: Path, patterns: list[str]) -> list[Path]:
+    """base 基準で各パターンを glob 展開し、ソート順で平坦化。"""
+    out: list[Path] = []
+    for pat in patterns:
+        p = Path(pat)
+        if p.is_absolute():
+            matches = sorted(Path("/").glob(str(p.relative_to("/"))))
+            if not matches and p.exists():
+                matches = [p]
+        else:
+            matches = sorted(base.glob(pat))
+        out.extend(matches)
+    return out
+
+
+def concat_lossless(runner: Runner, inputs: list[Path], output: Path) -> Path:
+    """ffmpeg concat demuxer + stream copy でロスレス連結（映像/音声共通）。"""
+    if len(inputs) == 1:
+        return inputs[0]
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                     encoding="utf-8") as f:
+        manifest = Path(f.name)
+        for p in inputs:
+            esc = str(p.resolve()).replace("'", "'\\''")
+            f.write(f"file '{esc}'\n")
+    try:
+        runner.run([
+            "ffmpeg", "-hide_banner", "-y",
+            "-f", "concat", "-safe", "0", "-i", str(manifest),
+            "-c", "copy", str(output),
+        ])
+    finally:
+        manifest.unlink(missing_ok=True)
+    return output
+
+
+def normalize_channel(runner: Runner, method: str, norm: dict,
+                      src: Path, dst: Path) -> Path:
+    """1 チャンネルを正規化。method=none はそのまま返す。"""
+    if method == "none":
+        return src
+    if method == "loudnorm":
+        runner.run([
+            ADV / "audio-normalize-loudnorm", str(src), "-o", str(dst),
+            "-i", str(norm.get("I", -14)),
+            "-tp", str(norm.get("TP", -1.5)),
+            "-lra", str(norm.get("LRA", 11)),
+            "--bit-depth", str(norm.get("bit_depth", "24")),
+        ])
+    elif method == "peak":
+        runner.run([
+            ADV / "audio-normalize-peak", str(src), "-o", str(dst),
+            "--bit-depth", str(norm.get("bit_depth", "24")),
+        ])
+    else:
+        die(f"unknown normalize.method: {method}")
+    return dst
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="rehearsal-sync",
+        description="YAML 1 枚で一次ファイルから同期・差し替え済み映像を生成。",
+    )
+    ap.add_argument("config", help="take.yaml のパス")
+    ap.add_argument("--dry-run", action="store_true", help="実行せず計画を表示")
+    ap.add_argument("--keep-work", action="store_true", help="中間生成物を消さない")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+
+    cfg_path = Path(args.config).resolve()
+    if not cfg_path.is_file():
+        die(f"config not found: {cfg_path}")
+    base = cfg_path.parent
+    with open(cfg_path, encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh) or {}
+
+    runner = Runner(args.dry_run, args.verbose)
+
+    def rel(p: str) -> Path:
+        pp = Path(p)
+        return pp if pp.is_absolute() else base / pp
+
+    # --- 設定の取り出し（既定つき） ---
+    norm = cfg.get("normalize") or {}
+    method = norm.get("method", "loudnorm")
+    drift = cfg.get("drift") or {}
+    sync = cfg.get("sync") or {}
+    out_cfg = cfg.get("output") or {}
+    if "path" not in out_cfg:
+        die("output.path is required")
+    output = rel(out_cfg["path"])
+    work = rel(cfg.get("work_dir", ".work"))
+
+    # --- 入力の glob 解決 ---
+    videos = resolve_globs(base, [str(x) for x in as_list(cfg.get("video"))])
+    audio = cfg.get("audio") or {}
+    lefts = resolve_globs(base, [str(x) for x in as_list(audio.get("left"))])
+    rights = resolve_globs(base, [str(x) for x in as_list(audio.get("right"))])
+    stereo_in = resolve_globs(base, [str(x) for x in as_list(audio.get("stereo"))])
+
+    if not videos:
+        die("no video inputs matched (check `video:` globs)")
+    if not stereo_in and (not lefts or not rights):
+        die("no audio inputs matched (need audio.left+audio.right or audio.stereo)")
+
+    log("=" * 60)
+    log(f"rehearsal-sync: {cfg_path.name}")
+    log(f"  base dir   : {base}")
+    log(f"  video      : {len(videos)} file(s)")
+    for v in videos:
+        log(f"                 - {v.relative_to(base) if v.is_relative_to(base) else v}")
+    if stereo_in:
+        log(f"  stereo     : {len(stereo_in)} file(s)")
+    else:
+        log(f"  audio L    : {len(lefts)} file(s)")
+        log(f"  audio R    : {len(rights)} file(s)")
+    log(f"  normalize  : {method}")
+    log(f"  drift      : {'on' if drift.get('enabled') else 'off'}")
+    log(f"  output     : {output}")
+    log(f"  work_dir   : {work}")
+    log("=" * 60)
+
+    if not args.dry_run:
+        work.mkdir(parents=True, exist_ok=True)
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- 1. 映像連結 ---
+    log("[1/4] 映像連結")
+    video_single = concat_lossless(runner, videos, work / "video.mp4")
+
+    # --- 2/3. 音声: 連結 + 正規化 + ステレオ結合 ---
+    if stereo_in:
+        log("[2/4] 音声連結 + 正規化（stereo 指定）")
+        st_concat = concat_lossless(runner, stereo_in, work / "stereo_concat.wav")
+        stereo = normalize_channel(runner, method, norm, st_concat, work / "stereo.wav")
+        log("[3/4] （ステレオ結合はスキップ: stereo 指定）")
+    else:
+        log("[2/4] L/R 連結 + 正規化")
+        l_concat = concat_lossless(runner, lefts, work / "L_concat.wav")
+        r_concat = concat_lossless(runner, rights, work / "R_concat.wav")
+        l_norm = normalize_channel(runner, method, norm, l_concat, work / "L.wav")
+        r_norm = normalize_channel(runner, method, norm, r_concat, work / "R.wav")
+        log("[3/4] ステレオ結合")
+        stereo = work / "stereo.wav"
+        runner.run([
+            ADV / "audio-merge-stereo", str(l_norm), str(r_norm),
+            "-o", str(stereo), "--bit-depth", str(norm.get("bit_depth", "24")),
+        ])
+
+    # --- 4. 同期・差し替え ---
+    log("[4/4] 同期・差し替え")
+    cmd = [ADV / "video-replace-audio", str(video_single), str(stereo),
+           "-o", str(output),
+           "--codec", str(out_cfg.get("codec", "aac")),
+           "--bitrate", str(out_cfg.get("bitrate", "320k")),
+           "--rate", str(sync.get("rate", 8000))]
+    offset = sync.get("offset", "auto")
+    if offset != "auto":
+        cmd += ["--offset", str(offset)]
+    if drift.get("enabled"):
+        cmd += ["--drift", "--drift-window", str(drift.get("window", 120))]
+    runner.run(cmd)
+
+    # --- 後始末 ---
+    if not args.dry_run and not args.keep_work:
+        for f in ("video.mp4", "L_concat.wav", "R_concat.wav", "L.wav", "R.wav",
+                  "stereo_concat.wav", "stereo.wav"):
+            (work / f).unlink(missing_ok=True)
+        try:
+            work.rmdir()
+        except OSError:
+            pass
+
+    if args.dry_run:
+        log("rehearsal-sync: --dry-run 完了（実行はしていません）")
+    else:
+        log(f"rehearsal-sync: done → {output}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

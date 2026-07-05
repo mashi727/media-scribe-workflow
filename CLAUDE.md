@@ -141,6 +141,8 @@ media-scribe-workflow/
 - [x] bin/advanced/audio-sync-offset の作成（相互相関で同期オフセット検出）
 - [x] bin/advanced/audio-drift-correct の作成（2窓測定→atempoでクロックドリフト補正）
 - [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え、--driftでドリフト補正）
+- [x] bin/rehearsal-sync の作成（take.yaml 1枚で一次ファイル→同期済み映像を全自動生成）
+- [x] examples/take.yaml の作成（per-take 設定スキーマ）
 
 ## 未実装タスク
 
@@ -174,6 +176,13 @@ bin/advanced/video-replace-audio video.mp4 external.wav --dry-run      # 計画�
 # 長時間テイク（数時間）: クロックドリフトを自動補正してから差し替え
 bin/advanced/video-replace-audio video.mp4 external.wav --drift        # 冒頭/終端2窓でppm補正
 bin/advanced/audio-drift-correct video.mp4 external.wav -o ext_fixed.wav  # 補正のみ（ppm表示）
+
+# 一次ファイル（カメラ映像 + 別録りL/R）から全自動（YAML 1枚）
+#   フォルダ例: take/{video/*.mp4, L/*.wav, R/*.wav} + take.yaml
+bin/rehearsal-sync take.yaml            # 連結→loudnorm→ステレオ結合→ドリフト補正→差し替え
+bin/rehearsal-sync take.yaml --dry-run  # 計画のみ
+bin/rehearsal-sync take.yaml --keep-work -v  # 中間生成物を残す/詳細ログ
+# スキーマ: examples/take.yaml
 
 # LuaTeXコンパイル
 luatex-pdf <file.tex>
