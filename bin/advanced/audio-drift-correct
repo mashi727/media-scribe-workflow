@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""
+audio-drift-correct — 別録り音源のクロックドリフトを補正する。
+
+独立したデバイス（カメラ本体 vs 別録りレコーダー）はサンプルクロックが
+わずかに異なるため、冒頭で同期しても長時間テイク（数時間）では末尾で
+ズレる。本ツールは VIDEO のスクラッチ音声を基準に、REFERENCE の冒頭と
+終端の 2 窓で局所同期オフセットを測定し、その傾き（ppm ドリフト）を
+atempo で補正した REFERENCE を出力する。
+
+全体の時間合わせ（単一オフセット）は行わない。ドリフト除去後は単一
+オフセットが全域で有効になるので、そのまま video-replace-audio に渡す。
+
+補正係数の符号は f = 1∓slope の両候補で残差ドリフトを実測し、残差が
+小さい側を自動採用する（導出の符号ミスに依存しない）。
+
+物理的にはクロック差 = varispeed（asetrate）だが、補正量は ppm オーダー
+で音程変化は不可聴。かつ atempo は正確な浮動小数係数を取れるため本規模
+では atempo を用いる。
+
+Usage:
+    audio-drift-correct video.mp4 external.wav -o external_fixed.wav
+    audio-drift-correct video.mp4 external.wav --window 120 --margin 10
+    audio-drift-correct video.mp4 external.wav --print-params   # f と ppm のみ出力
+    audio-drift-correct video.mp4 external.wav --dry-run
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import wave
+from pathlib import Path
+
+import numpy as np
+
+
+BIT_DEPTH_CODECS = {"16": "pcm_s16le", "24": "pcm_s24le", "32f": "pcm_f32le"}
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-drift-correct: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _extract_mono(path: str, rate: int) -> str:
+    fd, wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", path, "-vn", "-ac", "1",
+         "-ar", str(rate), "-c:a", "pcm_s16le", wav],
+        check=True,
+    )
+    return wav
+
+
+def _load(wav: str) -> np.ndarray:
+    with wave.open(wav, "rb") as wf:
+        n = wf.getnframes()
+        raw = wf.readframes(n)
+    x = np.frombuffer(raw, dtype="<i2").astype(np.float64)
+    return x
+
+
+def _norm(x: np.ndarray) -> np.ndarray:
+    x = x - x.mean()
+    s = x.std()
+    return x / s if s > 0 else x
+
+
+def _xcorr_offset(v: np.ndarray, r: np.ndarray, sr: int) -> tuple[float, float]:
+    """v と r（同一 index 由来の窓）の局所オフセットとスコアを返す。
+    offset[秒] = 「REFERENCE をこの秒数だけ遅らせると VIDEO に一致」。"""
+    v = _norm(v)
+    r = _norm(r)
+    n = v.size + r.size - 1
+    nfft = 1 << (int(n - 1).bit_length())
+    corr = np.fft.irfft(np.fft.rfft(v, nfft) * np.fft.rfft(r[::-1], nfft), nfft)[:n]
+    idx = int(np.argmax(corr))
+    delta = 0.0
+    if 0 < idx < corr.size - 1:
+        y0, y1, y2 = corr[idx - 1], corr[idx], corr[idx + 1]
+        denom = y0 - 2 * y1 + y2
+        if denom != 0:
+            delta = 0.5 * (y0 - y2) / denom
+    lag = (idx + delta) - (r.size - 1)
+    score = (corr[idx] - corr.mean()) / (corr.std() + 1e-12)
+    return lag / sr, float(score)
+
+
+def _resample_speed(x: np.ndarray, f: float) -> np.ndarray:
+    """atempo=f 相当（速度×f, 長さ/f）を numpy で近似（残差評価用）。"""
+    new_len = int(np.floor(x.size / f))
+    if new_len < 2:
+        return x.copy()
+    xp = np.arange(x.size, dtype=np.float64)
+    return np.interp(np.arange(new_len, dtype=np.float64) * f, xp, x)
+
+
+def audio_sample_rate(path: Path) -> int:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=sample_rate", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        return int(r.stdout.strip())
+    except ValueError:
+        return 48000
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        prog="audio-drift-correct",
+        description="別録り音源のクロックドリフトを atempo で補正する。",
+    )
+    p.add_argument("video", help="基準となる映像（スクラッチ音声を含む）")
+    p.add_argument("reference", help="ドリフト補正する別録り音源")
+    p.add_argument("-o", "--output", help="出力パス（省略時: <reference>_fixed.wav）")
+    p.add_argument("--rate", type=int, default=8000, help="測定用サンプルレート (default: 8000)")
+    p.add_argument("--window", type=float, default=120.0, help="各測定窓の秒数 (default: 120)")
+    p.add_argument("--margin", type=float, default=10.0, help="端から空ける秒数 (default: 10)")
+    p.add_argument("--min-ppm", type=float, default=1.0,
+                   help="この ppm 未満は補正不要とみなしコピー出力 (default: 1.0)")
+    p.add_argument("--max-ppm", type=float, default=1000.0,
+                   help="この ppm 超は測定異常とみなし中断 (default: 1000)")
+    p.add_argument("--min-score", type=float, default=8.0,
+                   help="窓の相関スコア下限。下回れば警告 (default: 8.0)")
+    p.add_argument("--bit-depth", choices=list(BIT_DEPTH_CODECS.keys()), default="24")
+    p.add_argument("--print-params", action="store_true",
+                   help="'f ppm audio_sr' のみ標準出力に出す（連携用）")
+    p.add_argument("--force", action="store_true", help="max-ppm 超でも実行")
+    p.add_argument("--dry-run", action="store_true", help="計画のみ")
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args()
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        die("ffmpeg/ffprobe not found in PATH")
+
+    ref_path = Path(args.reference)
+    if not Path(args.video).is_file():
+        die(f"video not found: {args.video}")
+    if not ref_path.is_file():
+        die(f"reference not found: {ref_path}")
+
+    codec = BIT_DEPTH_CODECS[args.bit_depth]
+    output = Path(args.output) if args.output else ref_path.with_name(ref_path.stem + "_fixed.wav")
+
+    # 全体を測定用 mono へ 1 パス抽出（同一 index 由来の窓で seek 誤差を排除）
+    vw = _extract_mono(args.video, args.rate)
+    rw = _extract_mono(str(ref_path), args.rate)
+    try:
+        v = _load(vw)
+        r = _load(rw)
+    finally:
+        os.remove(vw)
+        os.remove(rw)
+
+    sr = args.rate
+    wn = int(args.window * sr)
+    mg = int(args.margin * sr)
+    L = min(v.size, r.size)
+    if L < 2 * wn + 2 * mg:
+        die(f"too short for drift measurement: need >= {2*args.window + 2*args.margin:.0f}s "
+            f"of overlap at rate {sr}")
+
+    i0 = mg
+    i1 = L - mg - wn
+    o_s, sc_s = _xcorr_offset(v[i0:i0 + wn], r[i0:i0 + wn], sr)
+    o_e, sc_e = _xcorr_offset(v[i1:i1 + wn], r[i1:i1 + wn], sr)
+    ts = (i0 + wn / 2) / sr
+    te = (i1 + wn / 2) / sr
+    slope = (o_e - o_s) / (te - ts)
+    ppm = slope * 1e6
+
+    # 符号自動決定: f = 1∓slope の両候補で残差ドリフトを実測し、小さい側を採用
+    best = None
+    for f_cand in (1.0 - slope, 1.0 + slope):
+        r2 = _resample_speed(r, f_cand)
+        L2 = min(v.size, r2.size)
+        if L2 < 2 * wn + 2 * mg:
+            continue
+        j1 = L2 - mg - wn
+        os2, _ = _xcorr_offset(v[i0:i0 + wn], r2[i0:i0 + wn], sr)
+        oe2, _ = _xcorr_offset(v[j1:j1 + wn], r2[j1:j1 + wn], sr)
+        resid = abs(oe2 - os2)
+        if best is None or resid < best[1]:
+            best = (f_cand, resid, os2, oe2)
+    if best is None:
+        die("failed to evaluate drift candidates")
+    f, resid, os2, oe2 = best
+    resid_ppm = (oe2 - os2) / (te - ts) * 1e6
+
+    print("audio-drift-correct:", file=sys.stderr)
+    print(f"  video        : {args.video}", file=sys.stderr)
+    print(f"  reference    : {ref_path}", file=sys.stderr)
+    print(f"  window       : {args.window}s  (score start={sc_s:.1f} end={sc_e:.1f})", file=sys.stderr)
+    print(f"  offset start : {o_s:+.4f}s @ t={ts:.0f}s", file=sys.stderr)
+    print(f"  offset end   : {o_e:+.4f}s @ t={te:.0f}s", file=sys.stderr)
+    print(f"  drift        : {ppm:+.2f} ppm  (span {te-ts:.0f}s)", file=sys.stderr)
+    print(f"  atempo f     : {f:.9f}", file=sys.stderr)
+    print(f"  residual     : {resid_ppm:+.3f} ppm (after correction, target ~0)", file=sys.stderr)
+    print(f"  output       : {output}", file=sys.stderr)
+
+    if min(sc_s, sc_e) < args.min_score:
+        print(f"  WARNING: 相関スコアが低い（<{args.min_score}）。窓を広げる/位置を変える"
+              f"（--window/--margin）か、目視確認を推奨。", file=sys.stderr)
+
+    if abs(ppm) > args.max_ppm and not args.force:
+        die(f"drift {ppm:.1f} ppm exceeds --max-ppm {args.max_ppm} "
+            f"(測定異常の可能性)。--force で強行可。")
+
+    negligible = abs(ppm) < args.min_ppm
+
+    if args.print_params:
+        # 補正不要なら f=1 を返す
+        print(f"{1.0 if negligible else f:.9f} {ppm:.4f} {audio_sample_rate(ref_path)}")
+
+    if args.dry_run:
+        print("audio-drift-correct: --dry-run, skipping ffmpeg", file=sys.stderr)
+        return 0
+
+    if negligible:
+        print(f"audio-drift-correct: |{ppm:.2f}| ppm < min-ppm {args.min_ppm} "
+              f"→ 補正不要。コピー出力。", file=sys.stderr)
+        cmd = ["ffmpeg", "-hide_banner", "-y", "-i", str(ref_path),
+               "-c:a", codec, str(output)]
+    else:
+        cmd = ["ffmpeg", "-hide_banner", "-y", "-i", str(ref_path),
+               "-af", f"atempo={f:.9f}", "-c:a", codec, str(output)]
+    if args.verbose:
+        print("  ffmpeg cmd   : " + " ".join(cmd), file=sys.stderr)
+    res = subprocess.run(cmd, check=False)
+    if res.returncode != 0:
+        die(f"ffmpeg exited {res.returncode}")
+    print(f"audio-drift-correct: wrote {output}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

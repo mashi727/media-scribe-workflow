@@ -16,6 +16,9 @@
 # Options:
 #   -o, --output FILE   出力パス（既定: <video>_synced.mp4）
 #   --offset SEC        同期オフセットを手動指定（自動検出をスキップ）
+#   --drift             クロックドリフト補正を先に適用（長時間テイク向け）
+#   --drift-window SEC  ドリフト測定窓の秒数（既定: 120）
+#   --keep-drift-audio  ドリフト補正した中間音源を残す
 #   --codec NAME        音声コーデック: aac(既定) | pcm | alac | copy
 #   --bitrate RATE      aac 時のビットレート（既定: 320k）
 #   --rate HZ           同期検出のサンプルレート（既定: 8000）
@@ -40,17 +43,23 @@ codec="aac"
 bitrate="320k"
 rate=8000
 dry_run=0
+drift=0
+drift_window=120
+keep_drift_audio=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output)  output="$2"; shift 2 ;;
     --offset)     offset="$2"; shift 2 ;;
+    --drift)      drift=1; shift ;;
+    --drift-window) drift_window="$2"; shift 2 ;;
+    --keep-drift-audio) keep_drift_audio=1; shift ;;
     --codec)      codec="$2"; shift 2 ;;
     --bitrate)    bitrate="$2"; shift 2 ;;
     --rate)       rate="$2"; shift 2 ;;
     --dry-run)    dry_run=1; shift ;;
     -h|--help)
-      sed -n '2,42p' "$0" | sed 's/^# \?//'
+      sed -n '2,31p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     -*)
@@ -91,6 +100,25 @@ case "$codec" in
   alac) acodec_args=(-c:a alac) ;;
   copy) acodec_args=(-c:a copy) ;;
 esac
+
+# クロックドリフト補正（長時間テイク向け）。補正後は単一オフセットが全域で有効。
+drift_tmp=""
+if (( drift )); then
+  if [[ -n "$offset" ]]; then
+    echo "video-replace-audio: --drift と --offset は併用不可（--offset はドリフト無視の固定値）" >&2
+    exit 2
+  fi
+  drift_tmp="${TMPDIR:-/tmp}/vra_drift_$$.wav"
+  echo "[drift] audio-drift-correct で参照音源のクロックドリフトを補正中..."
+  if (( dry_run )); then
+    "${SCRIPT_DIR}/audio-drift-correct" "$video" "$audio" -o "$drift_tmp" \
+      --window "$drift_window" --dry-run
+  else
+    "${SCRIPT_DIR}/audio-drift-correct" "$video" "$audio" -o "$drift_tmp" \
+      --window "$drift_window" --bit-depth 32f
+    audio="$drift_tmp"
+  fi
+fi
 
 # オフセット検出（未指定時）
 if [[ -z "$offset" ]]; then
@@ -156,5 +184,17 @@ fi
 
 echo ""
 "${cmd[@]}"
+
+# ドリフト補正の中間音源を掃除
+if [[ -n "$drift_tmp" && -f "$drift_tmp" ]]; then
+  if (( keep_drift_audio )); then
+    keep_path="${output:r}_driftfixed.wav"
+    mv -f "$drift_tmp" "$keep_path"
+    echo "kept drift-corrected audio: ${keep_path}"
+  else
+    rm -f "$drift_tmp"
+  fi
+fi
+
 echo ""
 echo "video-replace-audio: wrote ${output}"

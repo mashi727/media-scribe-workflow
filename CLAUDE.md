@@ -139,7 +139,8 @@ media-scribe-workflow/
 - [x] bin/advanced/audio-merge-stereo の作成（mono L/R → ステレオ結合）
 - [x] bin/rehearsal-finalize-audio の作成（連結＋loudnorm仕上げ）
 - [x] bin/advanced/audio-sync-offset の作成（相互相関で同期オフセット検出）
-- [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え）
+- [x] bin/advanced/audio-drift-correct の作成（2窓測定→atempoでクロックドリフト補正）
+- [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え、--driftでドリフト補正）
 
 ## 未実装タスク
 
@@ -169,6 +170,10 @@ bin/advanced/video-replace-audio video.mp4 external.wav      # 自動同期し�
 bin/advanced/video-replace-audio video.mp4 external.wav --offset 2.5   # 手動指定
 bin/advanced/video-replace-audio video.mp4 external.wav --codec pcm -o out.mov  # 無劣化mov
 bin/advanced/video-replace-audio video.mp4 external.wav --dry-run      # 計画のみ
+
+# 長時間テイク（数時間）: クロックドリフトを自動補正してから差し替え
+bin/advanced/video-replace-audio video.mp4 external.wav --drift        # 冒頭/終端2窓でppm補正
+bin/advanced/audio-drift-correct video.mp4 external.wav -o ext_fixed.wav  # 補正のみ（ppm表示）
 
 # LuaTeXコンパイル
 luatex-pdf <file.tex>
