@@ -233,9 +233,15 @@ def main() -> int:
     log("=" * 60)
     log(f"rehearsal-sync: {cfg_path.name}")
     log(f"  base dir   : {base}")
+    def _show(p: Path):
+        try:
+            return p.relative_to(base)   # is_relative_to は 3.9+ なので使わない
+        except ValueError:
+            return p
+
     log(f"  video      : {len(videos)} file(s)")
     for v in videos:
-        log(f"                 - {v.relative_to(base) if v.is_relative_to(base) else v}")
+        log(f"                 - {_show(v)}")
     if stereo_in:
         log(f"  stereo     : {len(stereo_in)} file(s)")
     else:

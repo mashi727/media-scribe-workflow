@@ -28,6 +28,8 @@
 #   5 未満は要目視確認。
 # ============================================================
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
