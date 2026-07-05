@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+audio-merge-stereo — mono 2 本（L / R）を 1 本のステレオ WAV に結合。
+
+各チャンネルを個別に loudnorm した後、映像へ差し替えるための
+ステレオ音源を作る用途を想定。第1引数を左(FL)、第2引数を右(FR)に
+確定的に割り当てる（ffmpeg の join フィルタを使用。amerge はレイアウト
+解釈が環境依存になりやすいため避ける）。
+
+入力の検証:
+    - 両ファイルとも mono（channels == 1）
+    - sample_rate が一致
+であることを ffprobe で確認する（不一致なら中断）。
+
+出力ビット深度は既定 24bit（loudnorm 出力に合わせる）。sample_rate は
+入力を保持（join は再サンプルしない）。
+
+Usage:
+    audio-merge-stereo L.wav R.wav -o stereo.wav
+    audio-merge-stereo L.wav R.wav --swap            # L/R 入れ替え
+    audio-merge-stereo L.wav R.wav --bit-depth 32f
+    audio-merge-stereo L.wav R.wav --dry-run
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+BIT_DEPTH_CODECS = {
+    "16":  "pcm_s16le",
+    "24":  "pcm_s24le",
+    "32f": "pcm_f32le",
+}
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-merge-stereo: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def ffprobe_stream(path: Path) -> dict:
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=sample_fmt,sample_rate,channels,codec_name",
+            "-of", "json",
+            str(path),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        die(f"ffprobe failed for {path}: {result.stderr.strip()}")
+    streams = json.loads(result.stdout).get("streams", [])
+    if not streams:
+        die(f"no audio stream in {path}")
+    return streams[0]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="audio-merge-stereo",
+        description="mono 2 本（L / R）を 1 本のステレオ WAV に結合。",
+    )
+    parser.add_argument("left", help="左チャンネル(FL)にする mono WAV")
+    parser.add_argument("right", help="右チャンネル(FR)にする mono WAV")
+    parser.add_argument("-o", "--output", default="stereo.wav",
+                        help="出力パス (default: stereo.wav)")
+    parser.add_argument("--swap", action="store_true",
+                        help="L/R を入れ替える")
+    parser.add_argument("--bit-depth", choices=list(BIT_DEPTH_CODECS.keys()),
+                        default="24",
+                        help="出力ビット深度: 16 / 24 / 32f (default: 24)")
+    parser.add_argument("--dry-run", action="store_true", help="計画のみ表示")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="ffmpeg コマンドを表示")
+    args = parser.parse_args()
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        die("ffmpeg/ffprobe not found in PATH")
+
+    left = Path(args.right if args.swap else args.left)
+    right = Path(args.left if args.swap else args.right)
+    codec = BIT_DEPTH_CODECS[args.bit_depth]
+    output = Path(args.output)
+
+    for label, p in (("left", left), ("right", right)):
+        if not p.is_file():
+            die(f"{label} input not found: {p}")
+
+    li = ffprobe_stream(left)
+    ri = ffprobe_stream(right)
+    for label, info, p in (("left", li, left), ("right", ri, right)):
+        if str(info.get("channels")) != "1":
+            die(f"{label} is not mono (channels={info.get('channels')}): {p}")
+    if str(li.get("sample_rate")) != str(ri.get("sample_rate")):
+        die(f"sample_rate mismatch: left={li.get('sample_rate')} "
+            f"vs right={ri.get('sample_rate')}")
+
+    print("audio-merge-stereo:", file=sys.stderr)
+    print(f"  left (FL)    : {left}", file=sys.stderr)
+    print(f"  right (FR)   : {right}", file=sys.stderr)
+    print(f"  sample_rate  : {li.get('sample_rate')} Hz (preserved)", file=sys.stderr)
+    print(f"  bit-depth    : {args.bit_depth} ({codec})", file=sys.stderr)
+    print(f"  output       : {output}", file=sys.stderr)
+
+    filt = "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-i", str(left),
+        "-i", str(right),
+        "-filter_complex", filt,
+        "-map", "[a]",
+        "-c:a", codec,
+        str(output),
+    ]
+
+    if args.verbose or args.dry_run:
+        print("  ffmpeg cmd   : " + " ".join(cmd), file=sys.stderr)
+    if args.dry_run:
+        print("audio-merge-stereo: --dry-run, skipping ffmpeg", file=sys.stderr)
+        return 0
+
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        die(f"ffmpeg exited {result.returncode}")
+    print(f"audio-merge-stereo: wrote {output}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

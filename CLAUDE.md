@@ -136,6 +136,7 @@ media-scribe-workflow/
 - [x] docs/pad/*.png の生成（PAD図PNG出力）
 - [x] bin/advanced/audio-normalize-{loudnorm,peak} の作成（音量正規化）
 - [x] bin/advanced/audio-concat の作成（WAV連結）
+- [x] bin/advanced/audio-merge-stereo の作成（mono L/R → ステレオ結合）
 - [x] bin/rehearsal-finalize-audio の作成（連結＋loudnorm仕上げ）
 - [x] bin/advanced/audio-sync-offset の作成（相互相関で同期オフセット検出）
 - [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え）
@@ -157,6 +158,10 @@ bin/vce-split project.vce.json
 bin/vce-split project.vce.json --dry-run        # 計画だけ表示
 bin/vce-split project.vce.json --audio-only     # MP3で出力
 bin/vce-split project.vce.json --overlay-title  # タイトル焼き込み
+
+# mono L/R（チャンネル別 loudnorm 済み）を 1 本のステレオに結合
+bin/advanced/audio-merge-stereo L.wav R.wav -o stereo.wav
+bin/advanced/audio-merge-stereo L.wav R.wav --swap        # L/R入れ替え
 
 # 別録り音源で映像の音声を差し替え（カメラのスクラッチ音声を鍵に自動同期）
 bin/advanced/audio-sync-offset video.mp4 external.wav        # オフセットだけ確認
