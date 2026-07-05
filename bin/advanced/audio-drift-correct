@@ -163,15 +163,29 @@ def main() -> int:
     sr = args.rate
     wn = int(args.window * sr)
     mg = int(args.margin * sr)
-    L = min(v.size, r.size)
-    if L < 2 * wn + 2 * mg:
-        die(f"too short for drift measurement: need >= {2*args.window + 2*args.margin:.0f}s "
-            f"of overlap at rate {sr}")
 
-    i0 = mg
-    i1 = L - mg - wn
-    o_s, sc_s = _xcorr_offset(v[i0:i0 + wn], r[i0:i0 + wn], sr)
-    o_e, sc_e = _xcorr_offset(v[i1:i1 + wn], r[i1:i1 + wn], sr)
+    # 映像と音声は開始時刻が大きく違い得る（別録りは尺も違う）。まず粗い全体
+    # オフセットを求め、それに合わせて音声側の窓位置をシフトしてから局所測定する。
+    # 全長相関はメモリ抑制のため間引いて計算（オフセットは窓幅精度で十分）。
+    dec = 4
+    g_off, g_score = _xcorr_offset(v[::dec], r[::dec], sr / dec)
+    glag = int(round(g_off * sr))
+
+    def awin(arr: np.ndarray, i: int, gl: int) -> np.ndarray:
+        a = i - gl
+        a = max(0, min(a, arr.size - wn))
+        return arr[a:a + wn]
+
+    # 両ファイルで窓（+margin）が収まる video-index 範囲
+    lo = max(mg, glag + mg)
+    hi = min(v.size - mg - wn, r.size - mg - wn + glag)
+    if hi - lo < wn:
+        die(f"overlap too short for drift measurement "
+            f"(global offset {g_off:.1f}s, usable span {(hi-lo)/sr:.0f}s). "
+            f"--window を小さくするか素材の重なりを確認。")
+    i0, i1 = lo, hi
+    o_s, sc_s = _xcorr_offset(v[i0:i0 + wn], awin(r, i0, glag), sr)
+    o_e, sc_e = _xcorr_offset(v[i1:i1 + wn], awin(r, i1, glag), sr)
     ts = (i0 + wn / 2) / sr
     te = (i1 + wn / 2) / sr
     slope = (o_e - o_s) / (te - ts)
@@ -181,12 +195,9 @@ def main() -> int:
     best = None
     for f_cand in (1.0 - slope, 1.0 + slope):
         r2 = _resample_speed(r, f_cand)
-        L2 = min(v.size, r2.size)
-        if L2 < 2 * wn + 2 * mg:
-            continue
-        j1 = L2 - mg - wn
-        os2, _ = _xcorr_offset(v[i0:i0 + wn], r2[i0:i0 + wn], sr)
-        oe2, _ = _xcorr_offset(v[j1:j1 + wn], r2[j1:j1 + wn], sr)
+        glag2 = int(round(_xcorr_offset(v[::dec], r2[::dec], sr / dec)[0] * sr))
+        os2, _ = _xcorr_offset(v[i0:i0 + wn], awin(r2, i0, glag2), sr)
+        oe2, _ = _xcorr_offset(v[i1:i1 + wn], awin(r2, i1, glag2), sr)
         resid = abs(oe2 - os2)
         if best is None or resid < best[1]:
             best = (f_cand, resid, os2, oe2)
@@ -198,9 +209,10 @@ def main() -> int:
     print("audio-drift-correct:", file=sys.stderr)
     print(f"  video        : {args.video}", file=sys.stderr)
     print(f"  reference    : {ref_path}", file=sys.stderr)
+    print(f"  coarse offset: {g_off:+.2f}s (窓整列用, score={g_score:.1f})", file=sys.stderr)
     print(f"  window       : {args.window}s  (score start={sc_s:.1f} end={sc_e:.1f})", file=sys.stderr)
-    print(f"  offset start : {o_s:+.4f}s @ t={ts:.0f}s", file=sys.stderr)
-    print(f"  offset end   : {o_e:+.4f}s @ t={te:.0f}s", file=sys.stderr)
+    print(f"  resid start  : {o_s:+.4f}s @ t={ts:.0f}s", file=sys.stderr)
+    print(f"  resid end    : {o_e:+.4f}s @ t={te:.0f}s", file=sys.stderr)
     print(f"  drift        : {ppm:+.2f} ppm  (span {te-ts:.0f}s)", file=sys.stderr)
     print(f"  atempo f     : {f:.9f}", file=sys.stderr)
     print(f"  residual     : {resid_ppm:+.3f} ppm (after correction, target ~0)", file=sys.stderr)
