@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+# ============================================================
+# audio-sync-offset
+# ============================================================
+# 2 つのメディア（映像/音声）の音声トラックを相互相関で突き合わせ、
+# 時間オフセットを推定する。FCP の「クリップ同期」と同原理だが、
+# FFT 相互相関 + パラボラ補間でサブサンプル精度を狙う。
+#
+# Usage:
+#   audio-sync-offset VIDEO REFERENCE [options]
+#
+#   VIDEO       同期の基準となるメディア（例: カメラ本体録画。スクラッチ音声を含む）
+#   REFERENCE   合わせ込みたい別録り音源（例: Wireless Pro の loudnorm 済み WAV）
+#
+# Options:
+#   --rate HZ      相関に使うモノラル・サンプルレート（既定 8000）
+#   --window SEC   各信号の先頭 SEC 秒のみで相関（長尺の高速化。オーバーラップ前提）
+#   --value        オフセット秒（float）だけを標準出力に出す（スクリプト連携用）
+#   --json         結果を JSON で出す
+#
+# オフセットの意味:
+#   出力 offset[秒] は「REFERENCE を VIDEO のタイムラインに合わせるための遅延量」。
+#     offset > 0 : REFERENCE を offset 秒 遅らせる（先頭にパディング）と一致
+#     offset < 0 : REFERENCE を |offset| 秒 早める（先頭をトリム）と一致
+#
+# 信頼度:
+#   score = (ピーク - 平均) / 標準偏差。目安として score >= 10 ならほぼ確実、
+#   5 未満は要目視確認。
+# ============================================================
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import wave
+
+import numpy as np
+
+
+def _extract_mono(path: str, rate: int, window: float | None) -> str:
+    """path の音声を mono/pcm_s16le の WAV に抽出して一時ファイルパスを返す。"""
+    fd, wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    cmd = ["ffmpeg", "-y", "-v", "error"]
+    if window is not None:
+        cmd += ["-t", f"{window}"]
+    cmd += ["-i", path, "-vn", "-ac", "1", "-ar", str(rate),
+            "-c:a", "pcm_s16le", wav]
+    subprocess.run(cmd, check=True)
+    return wav
+
+
+def _load_normalized(wav: str) -> tuple[int, np.ndarray]:
+    # _extract_mono が必ず mono/pcm_s16le を出すので標準 wave で十分（scipy 不要）
+    with wave.open(wav, "rb") as wf:
+        sr = wf.getframerate()
+        n = wf.getnframes()
+        raw = wf.readframes(n)
+    x = np.frombuffer(raw, dtype="<i2").astype(np.float64)
+    x -= x.mean()
+    std = x.std()
+    if std > 0:
+        x /= std
+    return sr, x
+
+
+def _xcorr_full(v: np.ndarray, r: np.ndarray) -> np.ndarray:
+    """scipy.signal.correlate(v, r, mode='full') 相当を numpy.fft で計算する。
+    corr[k] は lag = k - (len(r)-1) に対応（v[n] ~= r[n-lag]）。"""
+    n = v.size + r.size - 1
+    nfft = 1 << (int(n - 1).bit_length())  # n 以上の 2 の冪（FFT 高速化）
+    fv = np.fft.rfft(v, nfft)
+    fr = np.fft.rfft(r[::-1], nfft)        # 相関 = v と反転 r の畳み込み
+    corr = np.fft.irfft(fv * fr, nfft)[:n]
+    return corr
+
+
+def find_offset(video: str, ref: str, rate: int, window: float | None):
+    vw = _extract_mono(video, rate, window)
+    rw = _extract_mono(ref, rate, window)
+    try:
+        srv, v = _load_normalized(vw)
+        srr, r = _load_normalized(rw)
+    finally:
+        os.remove(vw)
+        os.remove(rw)
+    if srv != srr:
+        raise RuntimeError(f"sample rate mismatch: {srv} != {srr}")
+    if v.size == 0 or r.size == 0:
+        raise RuntimeError("empty audio after extraction")
+
+    corr = _xcorr_full(v, r)
+    idx = int(np.argmax(corr))
+
+    # 3 点パラボラ補間でサブサンプル精度のピーク位置を得る
+    delta = 0.0
+    if 0 < idx < corr.size - 1:
+        y0, y1, y2 = corr[idx - 1], corr[idx], corr[idx + 1]
+        denom = y0 - 2 * y1 + y2
+        if denom != 0:
+            delta = 0.5 * (y0 - y2) / denom
+
+    # v[n] ~= r[n - lag] となる lag。offset = REFERENCE に与える遅延量。
+    lag = (idx + delta) - (r.size - 1)
+    offset = lag / srv
+
+    peak = float(corr[idx])
+    score = (peak - float(corr.mean())) / (float(corr.std()) + 1e-12)
+    return offset, score
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("video")
+    ap.add_argument("reference")
+    ap.add_argument("--rate", type=int, default=8000)
+    ap.add_argument("--window", type=float, default=None)
+    ap.add_argument("--value", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    args = ap.parse_args()
+
+    if args.help:
+        # ファイル冒頭のバナーをそのままヘルプに使う
+        with open(__file__, encoding="utf-8") as fh:
+            for line in fh.readlines()[1:40]:
+                if line.startswith("#"):
+                    sys.stdout.write(line[2:] if len(line) > 2 else "\n")
+        return 0
+
+    offset, score = find_offset(args.video, args.reference, args.rate, args.window)
+
+    if args.value:
+        print(f"{offset:.6f}")
+    elif args.json:
+        print(json.dumps({"offset": offset, "score": score, "rate": args.rate}))
+    else:
+        conf = "確実" if score >= 10 else ("要確認" if score < 5 else "良好")
+        print(f"offset : {offset:+.6f} sec   (REFERENCE をこの秒数だけ遅らせると一致)")
+        print(f"score  : {score:.1f}   ({conf})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -134,13 +134,15 @@ media-scribe-workflow/
 - [x] README.md の更新（新構成を反映）
 - [x] docs/advanced/ の作成（環境構築ガイド）
 - [x] docs/pad/*.png の生成（PAD図PNG出力）
+- [x] bin/advanced/audio-normalize-{loudnorm,peak} の作成（音量正規化）
+- [x] bin/advanced/audio-concat の作成（WAV連結）
+- [x] bin/rehearsal-finalize-audio の作成（連結＋loudnorm仕上げ）
+- [x] bin/advanced/audio-sync-offset の作成（相互相関で同期オフセット検出）
+- [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え）
 
 ## 未実装タスク
 
-- [ ] bin/advanced/ の作成（音声処理ツール群）
-  - [ ] audio-normalize（音量正規化）
-  - [ ] audio-extract-channel（チャンネル抽出）
-  - [ ] video-replace-audio（音声差し替え）
+- [ ] bin/advanced/audio-extract-channel（チャンネル抽出）
 
 ## コマンド
 
@@ -155,6 +157,13 @@ bin/vce-split project.vce.json
 bin/vce-split project.vce.json --dry-run        # 計画だけ表示
 bin/vce-split project.vce.json --audio-only     # MP3で出力
 bin/vce-split project.vce.json --overlay-title  # タイトル焼き込み
+
+# 別録り音源で映像の音声を差し替え（カメラのスクラッチ音声を鍵に自動同期）
+bin/advanced/audio-sync-offset video.mp4 external.wav        # オフセットだけ確認
+bin/advanced/video-replace-audio video.mp4 external.wav      # 自動同期して差し替え
+bin/advanced/video-replace-audio video.mp4 external.wav --offset 2.5   # 手動指定
+bin/advanced/video-replace-audio video.mp4 external.wav --codec pcm -o out.mov  # 無劣化mov
+bin/advanced/video-replace-audio video.mp4 external.wav --dry-run      # 計画のみ
 
 # LuaTeXコンパイル
 luatex-pdf <file.tex>

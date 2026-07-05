@@ -1,0 +1,160 @@
+#!/usr/bin/env zsh
+# ============================================================
+# video-replace-audio
+# ============================================================
+# 映像の音声を、別録りの高品質音源で差し替える。
+# audio-sync-offset で自動同期し、映像は無劣化コピー（-c:v copy）で mux する。
+#
+# 想定ワークフロー:
+#   カメラ本体（例: Insta360）にはワイヤレスRXのアナログ音声がスクラッチとして
+#   記録されている。これを鍵に、Wireless Pro 内部録音の loudnorm 済み音源へ
+#   差し替える。FCP の「同期 → 音声差し替え」をコマンドラインで無劣化に行う。
+#
+# Usage:
+#   video-replace-audio VIDEO AUDIO [options]
+#
+# Options:
+#   -o, --output FILE   出力パス（既定: <video>_synced.mp4）
+#   --offset SEC        同期オフセットを手動指定（自動検出をスキップ）
+#   --codec NAME        音声コーデック: aac(既定) | pcm | alac | copy
+#   --bitrate RATE      aac 時のビットレート（既定: 320k）
+#   --rate HZ           同期検出のサンプルレート（既定: 8000）
+#   --dry-run           実行せず計画のみ表示
+#
+# コーデックとコンテナ:
+#   aac  -> mp4（既定, 汎用・配布向き）
+#   pcm  -> mov（24bit 無劣化, アーカイブ向き）
+#   alac -> mov（可逆圧縮）
+#   copy -> 入力 AUDIO のコーデックをそのままコピー
+# ============================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="${0:A:h}"
+
+video=""
+audio=""
+output=""
+offset=""
+codec="aac"
+bitrate="320k"
+rate=8000
+dry_run=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)  output="$2"; shift 2 ;;
+    --offset)     offset="$2"; shift 2 ;;
+    --codec)      codec="$2"; shift 2 ;;
+    --bitrate)    bitrate="$2"; shift 2 ;;
+    --rate)       rate="$2"; shift 2 ;;
+    --dry-run)    dry_run=1; shift ;;
+    -h|--help)
+      sed -n '2,42p' "$0" | sed 's/^# \?//'
+      exit 0
+      ;;
+    -*)
+      echo "video-replace-audio: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      if [[ -z "$video" ]]; then video="$1"
+      elif [[ -z "$audio" ]]; then audio="$1"
+      else echo "video-replace-audio: unexpected arg: $1" >&2; exit 2
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$video" || -z "$audio" ]]; then
+  echo "video-replace-audio: usage: video-replace-audio VIDEO AUDIO [options]" >&2
+  exit 2
+fi
+
+# 出力先とコンテナの決定
+case "$codec" in
+  aac)  ext="mp4" ;;
+  pcm|alac) ext="mov" ;;
+  copy) ext="mkv" ;;   # 任意コーデックを確実に格納できる
+  *) echo "video-replace-audio: unknown codec: $codec" >&2; exit 2 ;;
+esac
+if [[ -z "$output" ]]; then
+  output="${video:r}_synced.${ext}"
+fi
+
+# 音声コーデック引数
+local -a acodec_args
+case "$codec" in
+  aac)  acodec_args=(-c:a aac -b:a "$bitrate") ;;
+  pcm)  acodec_args=(-c:a pcm_s24le) ;;
+  alac) acodec_args=(-c:a alac) ;;
+  copy) acodec_args=(-c:a copy) ;;
+esac
+
+# オフセット検出（未指定時）
+if [[ -z "$offset" ]]; then
+  echo "[1/2] audio-sync-offset で同期検出中..."
+  "${SCRIPT_DIR}/audio-sync-offset" "$video" "$audio" --rate "$rate"
+  offset="$("${SCRIPT_DIR}/audio-sync-offset" "$video" "$audio" --rate "$rate" --value)"
+else
+  echo "[1/2] オフセット手動指定: ${offset} sec"
+fi
+
+# 音源のサンプルレートを取得（オフセットをサンプル単位で焼き込むため）
+audio_sr="$(ffprobe -v error -select_streams a:0 \
+             -show_entries stream=sample_rate -of csv=p=0 "$audio")"
+: "${audio_sr:=48000}"
+
+# アライメントを「実サンプル」として焼き込む（adelay/atrim）。
+#   PTS/エディットリスト依存を避け、あらゆるプレイヤー・後段ツールで確定的に整合させる。
+#   offset >= 0 : 先頭に無音を挿入（音源を遅らせる）
+#   offset <  0 : 先頭をトリム（音源を早める）
+local af="" nsamp
+if (( offset >= 0 )); then
+  nsamp=$(printf '%.0f' $(( offset * audio_sr )))
+  (( nsamp > 0 )) && af="adelay=${nsamp}S:all=1"
+else
+  nsamp=$(printf '%.0f' $(( -offset * audio_sr )))
+  af="atrim=start_sample=${nsamp},asetpts=PTS-STARTPTS"
+fi
+
+# --codec copy はフィルタと併用不可。オフセットが要る場合のみ -itsoffset にフォールバック。
+local -a in_args filt_args
+if [[ "$codec" == "copy" && -n "$af" ]]; then
+  echo "  note: --codec copy はサンプル焼き込み不可 → -itsoffset で近似します" >&2
+  if (( offset >= 0 )); then
+    in_args=(-i "$video" -itsoffset "$offset" -i "$audio")
+  else
+    in_args=(-itsoffset "$(( -offset ))" -i "$video" -i "$audio")
+  fi
+  filt_args=()
+else
+  in_args=(-i "$video" -i "$audio")
+  [[ -n "$af" ]] && filt_args=(-af "$af")
+fi
+
+echo "[2/2] mux (映像は -c:v copy で無劣化)"
+echo "  video    : ${video}"
+echo "  audio    : ${audio}"
+echo "  offset   : ${offset} sec  (${nsamp} samples @ ${audio_sr}Hz)"
+echo "  codec    : ${codec}"
+echo "  output   : ${output}"
+
+local -a cmd
+cmd=(ffmpeg -y -v warning -stats "${in_args[@]}"
+     -map 0:v:0 -map 1:a:0
+     -c:v copy "${filt_args[@]}" "${acodec_args[@]}"
+     -shortest "$output")
+
+if (( dry_run )); then
+  echo ""
+  echo "[dry-run] would run:"
+  print -r -- "  ${(j: :)cmd}"
+  exit 0
+fi
+
+echo ""
+"${cmd[@]}"
+echo ""
+echo "video-replace-audio: wrote ${output}"
