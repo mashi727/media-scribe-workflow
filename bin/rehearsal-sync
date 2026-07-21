@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import tempfile
@@ -148,16 +149,42 @@ def audio_sample_rate(path: Path) -> int:
         return 48000
 
 
-def measure_offset(video: Path, audio: Path, rate: int) -> float:
-    """audio-sync-offset --value を実行してオフセット秒を返す（実行モード専用）。"""
+def measure_offset(video: Path, audio: Path, rate: int) -> tuple[float, float]:
+    """audio-sync-offset を実行して (オフセット秒, 信頼度スコア) を返す（実行モード専用）。
+
+    スコアは相関ピークの z 値。低い場合は「映像と音声に共通の音が無い」または
+    「video: の複数クリップが時間的に不連続」を意味し、そのまま進めると
+    まったく別の音声が乗った成果物ができるため、呼び出し側で検証する。"""
     r = subprocess.run(
         [str(ADV / "audio-sync-offset"), str(video), str(audio),
-         "--rate", str(rate), "--value"],
+         "--rate", str(rate), "--json"],
         capture_output=True, text=True, check=False,
     )
     if r.returncode != 0:
         die(f"audio-sync-offset failed for {audio}: {r.stderr.strip()}")
-    return float(r.stdout.strip())
+    try:
+        d = json.loads(r.stdout)
+        return float(d["offset"]), float(d["score"])
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        die(f"could not parse audio-sync-offset output for {audio}: {e}")
+
+
+def verify_alignment(video: Path, audio: Path, offset: float, rate: int,
+                     probes: int, window: float, min_score: float,
+                     tol: float, label: str) -> bool:
+    """audio-sync-verify で「動画全域」の整合を確認する（実行モード専用）。
+
+    全体相関のスコアが高くても一部しか一致していない場合（例: 時間を空けて撮った
+    複数クリップの連結）を検出するため、単一スコアではなく複数地点で検証する。"""
+    log(f"    [verify {label}] 複数地点で整合性を検証...")
+    r = subprocess.run(
+        [str(ADV / "audio-sync-verify"), str(video), str(audio),
+         "--offset", f"{offset:.6f}", "--probes", str(probes),
+         "--window", str(window), "--rate", str(rate),
+         "--min-score", str(min_score), "--tolerance", str(tol)],
+        check=False,
+    )
+    return r.returncode == 0
 
 
 def acodec_args(codec: str, bitrate: str) -> tuple[list[str], str]:
@@ -191,6 +218,8 @@ def main() -> int:
     ap.add_argument("config", help="take.yaml のパス")
     ap.add_argument("--dry-run", action="store_true", help="実行せず計画を表示")
     ap.add_argument("--keep-work", action="store_true", help="中間生成物を消さない")
+    ap.add_argument("--force", action="store_true",
+                    help="同期の信頼度が低くても中断せず続行する")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -262,6 +291,11 @@ def main() -> int:
     video_single = concat_lossless(runner, videos, work / "video.mp4")
 
     rate = int(sync.get("rate", 8000))
+    min_score = float(sync.get("min_score", 10))
+    verify_on = bool(sync.get("verify", True))
+    verify_probes = int(sync.get("verify_probes", 5))
+    verify_window = float(sync.get("verify_window", 30))
+    tolerance = float(sync.get("tolerance", 0.5))
     codec = str(out_cfg.get("codec", "aac"))
     bitrate = str(out_cfg.get("bitrate", "320k"))
     acodec, _ext = acodec_args(codec, bitrate)
@@ -305,9 +339,42 @@ def main() -> int:
                 f"-map 0:v:0 -map [a] -c:v copy {' '.join(acodec)} -shortest {output}")
         else:
             sr = audio_sample_rate(l_src)
-            offL = measure_offset(video_single, l_src, rate)
-            offR = measure_offset(video_single, r_src, rate)
-            log(f"    offset L = {offL:+.4f}s   offset R = {offR:+.4f}s  (@ {sr}Hz)")
+            offL, scL = measure_offset(video_single, l_src, rate)
+            offR, scR = measure_offset(video_single, r_src, rate)
+            log(f"    offset L = {offL:+.4f}s (score {scL:.1f})   "
+                f"offset R = {offR:+.4f}s (score {scR:.1f})   (@ {sr}Hz)")
+
+            # 信頼度検証: 低スコアのまま進めると「別の音声が乗った成果物」が
+            # 何の警告もなく完成してしまうため、既定では中断する。
+            weak = [(n, s) for n, s in (("L", scL), ("R", scR)) if s < min_score]
+            if weak and not args.force:
+                detail = ", ".join(f"{n} score={s:.1f}" for n, s in weak)
+                die(f"同期の信頼度が低い（{detail} < sync.min_score {min_score:g}）。\n"
+                    f"  想定原因:\n"
+                    f"    (1) video: の複数クリップが時間的に不連続（連続タイムラインが前提。\n"
+                    f"        間を空けて撮った別クリップは先頭以外がズレます）\n"
+                    f"    (2) 映像と音声に共通の音が入っていない / 対応する素材が違う\n"
+                    f"  対処: 入力の対応を確認、または --force で強行 / sync.min_score を下げる")
+            if weak:
+                log(f"    WARNING: 信頼度が低いまま --force で続行します（{len(weak)} ch）")
+
+            # 全体スコアが高くても「一部だけ一致」は見抜けない（時間を空けて撮った
+            # 複数クリップの連結など）。複数地点で整合を確認する。
+            if verify_on:
+                bad_ch = [n for n, src, o in (("L", l_src, offL), ("R", r_src, offR))
+                          if not verify_alignment(video_single, src, o, rate,
+                                                  verify_probes, verify_window,
+                                                  min_score, tolerance, n)]
+                if bad_ch and not args.force:
+                    die(f"整合性検証に失敗（{', '.join(bad_ch)} ch）。\n"
+                        f"  上の NG 行の位置で映像と音声が対応していません。\n"
+                        f"  最も多い原因: video: の複数クリップが時間的に不連続\n"
+                        f"    （連結は 1 本の連続タイムラインが前提。間を空けて撮った\n"
+                        f"      別クリップは先頭以外に別の音声が乗ります）\n"
+                        f"  対処: クリップ毎に take.yaml を分ける / --force で強行 /\n"
+                        f"        sync.verify: false で検証を切る")
+                if bad_ch:
+                    log(f"    WARNING: 整合性検証に失敗したまま --force で続行します")
             fc = ";".join([
                 channel_filter(1, offL, sr, "la"),
                 channel_filter(2, offR, sr, "ra"),

@@ -139,6 +139,7 @@ media-scribe-workflow/
 - [x] bin/advanced/audio-merge-stereo の作成（mono L/R → ステレオ結合）
 - [x] bin/rehearsal-finalize-audio の作成（連結＋loudnorm仕上げ）
 - [x] bin/advanced/audio-sync-offset の作成（相互相関で同期オフセット検出）
+- [x] bin/advanced/audio-sync-verify の作成（複数地点で同期の整合を検証）
 - [x] bin/advanced/audio-drift-correct の作成（2窓測定→atempoでクロックドリフト補正）
 - [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え、--driftでドリフト補正）
 - [x] bin/rehearsal-sync の作成（take.yaml 1枚で一次ファイル→同期済み映像を全自動生成）

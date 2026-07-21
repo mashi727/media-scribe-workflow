@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""
+audio-sync-verify — 与えたオフセットが「動画全域」で成立しているか検証する。
+
+audio-sync-offset は全体相関で単一のオフセットを返すが、そのスコアが高くても
+「一部だけ一致している」場合を見抜けない。例えば時間を空けて撮った複数クリップを
+連結した映像では、先頭クリップだけが一致し全体スコアは高いまま、2 本目以降には
+まったく別の音声が乗る。
+
+本ツールは動画を N 地点に分けて局所相関を取り、各地点で
+    - 相関スコアが閾値以上
+    - 残差（想定オフセットからのズレ）が許容内
+であることを確認する。1 地点でも外れれば異常として非ゼロ終了する。
+
+長尺でも軽い: 全長を展開せず、各プローブ位置だけを -ss で切り出して相関する。
+
+Usage:
+    audio-sync-verify VIDEO AUDIO --offset -168.6
+    audio-sync-verify VIDEO AUDIO --offset -168.6 --probes 7 --window 45
+    audio-sync-verify VIDEO AUDIO --offset -168.6 --json
+
+オフセットの意味は audio-sync-offset と同じ:
+    「AUDIO をこの秒数だけ遅らせると VIDEO に一致する」
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import wave
+
+import numpy as np
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-sync-verify: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def duration(path: str) -> float:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        die(f"could not read duration: {path}")
+
+
+def probe(path: str, ss: float, dur: float, rate: int) -> np.ndarray | None:
+    fd, w = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", f"{ss:.4f}", "-t", f"{dur:.4f}",
+             "-i", path, "-vn", "-ac", "1", "-ar", str(rate),
+             "-c:a", "pcm_s16le", w],
+            check=True,
+        )
+        with wave.open(w, "rb") as wf:
+            x = np.frombuffer(wf.readframes(wf.getnframes()), dtype="<i2").astype(np.float64)
+    except (subprocess.CalledProcessError, wave.Error):
+        return None
+    finally:
+        os.remove(w)
+    if x.size < rate:          # 1 秒未満は無効
+        return None
+    x -= x.mean()
+    s = x.std()
+    return x / s if s > 0 else x
+
+
+def local_offset(a: np.ndarray, b: np.ndarray, rate: int) -> tuple[float, float]:
+    n = a.size + b.size - 1
+    nfft = 1 << (int(n - 1).bit_length())
+    corr = np.fft.irfft(np.fft.rfft(a, nfft) * np.fft.rfft(b[::-1], nfft), nfft)[:n]
+    i = int(np.argmax(corr))
+    lag = i - (b.size - 1)
+    score = (corr[i] - corr.mean()) / (corr.std() + 1e-12)
+    return lag / rate, float(score)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="audio-sync-verify",
+        description="オフセットが動画全域で成立しているか複数地点で検証する。",
+    )
+    ap.add_argument("video")
+    ap.add_argument("audio")
+    ap.add_argument("--offset", type=float, required=True,
+                    help="検証するオフセット秒（AUDIO をこの秒数遅らせると一致）")
+    ap.add_argument("--probes", type=int, default=5, help="検証地点の数 (default: 5)")
+    ap.add_argument("--window", type=float, default=30.0, help="各地点の窓秒 (default: 30)")
+    ap.add_argument("--rate", type=int, default=8000, help="相関のサンプルレート")
+    ap.add_argument("--min-score", type=float, default=10.0,
+                    help="各地点で要求する相関スコア (default: 10)")
+    ap.add_argument("--tolerance", type=float, default=0.5,
+                    help="許容する残差秒 (default: 0.5)")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    vdur = duration(args.video)
+    adur = duration(args.audio)
+    wn = args.window
+    if vdur < wn * 2:
+        die(f"video too short for verification ({vdur:.0f}s < {wn*2:.0f}s)")
+
+    # 動画上のプローブ位置を等間隔に配置（端は窓分だけ内側に寄せる）
+    lo, hi = wn * 0.25, vdur - wn * 1.25
+    n = max(2, args.probes)
+    positions = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+
+    results, failures = [], []
+    for t in positions:
+        a_ss = t - args.offset          # 映像時刻 t に対応する音声時刻
+        if a_ss < 0 or a_ss + wn > adur:
+            results.append({"t": round(t, 1), "status": "out_of_range"})
+            failures.append((t, "音声側が範囲外"))
+            continue
+        v = probe(args.video, t, wn, args.rate)
+        a = probe(args.audio, a_ss, wn, args.rate)
+        if v is None or a is None:
+            results.append({"t": round(t, 1), "status": "extract_failed"})
+            failures.append((t, "抽出失敗"))
+            continue
+        d, sc = local_offset(v, a, args.rate)
+        ok = sc >= args.min_score and abs(d) <= args.tolerance
+        results.append({"t": round(t, 1), "residual": round(d, 4),
+                        "score": round(sc, 1), "ok": ok})
+        if not ok:
+            reason = "相関なし" if sc < args.min_score else f"残差 {d:+.3f}s 超過"
+            failures.append((t, f"{reason} (score={sc:.1f})"))
+
+    if args.json:
+        print(json.dumps({"offset": args.offset, "probes": results,
+                          "passed": not failures}, ensure_ascii=False))
+    else:
+        print(f"audio-sync-verify: offset={args.offset:+.4f}s を {n} 地点で検証",
+              file=sys.stderr)
+        for r in results:
+            if "residual" in r:
+                mark = "OK " if r["ok"] else "NG "
+                print(f"  {mark} t={r['t']:>8.1f}s  residual={r['residual']:+.4f}s  "
+                      f"score={r['score']:.1f}", file=sys.stderr)
+            else:
+                print(f"  NG  t={r['t']:>8.1f}s  {r['status']}", file=sys.stderr)
+
+    if failures:
+        print(f"audio-sync-verify: FAILED — {len(failures)}/{n} 地点で不整合", file=sys.stderr)
+        return 1
+    print(f"audio-sync-verify: PASSED — 全 {n} 地点で整合", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

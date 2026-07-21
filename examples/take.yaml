@@ -18,6 +18,10 @@ version: 1
 #   ./VID_*.mp4    Insta360 Ace Pro 2 の映像（take 直下・単一 or セグメント）
 #   ./L/*.wav      RODE Wireless Pro TX1 の内部録音（分割）
 #   ./R/*.wav      RODE Wireless Pro TX2 の内部録音（分割）
+# 注意: video: の glob は「1 本の連続タイムライン」を成すこと。カメラの自動分割
+#       セグメント（ギャップなし）は OK。間を空けて撮った別クリップを並べると
+#       先頭以外に別の音声が乗るため、テイクを分けて take.yaml を別々にする。
+#       （sync.verify がこの不整合を検出して中断します）
 video:
   - "VID_*.mp4"            # take 直下に置く場合。video/ サブフォルダなら video/*.mp4
 
@@ -44,8 +48,12 @@ drift:
 
 # --- 同期 ---
 sync:
-  offset: auto             # auto | <秒数>（手動固定するとき）
   rate: 8000               # 同期検出のサンプルレート
+  min_score: 10            # 全体相関の信頼度下限。下回れば中断
+  verify: true             # 複数地点で整合を検証（「一部だけ一致」を検出）
+  verify_probes: 5         # 検証地点の数
+  verify_window: 30        # 各地点の窓（秒）
+  tolerance: 0.5           # 各地点で許容する残差（秒）
 
 # --- 出力 ---
 output:
