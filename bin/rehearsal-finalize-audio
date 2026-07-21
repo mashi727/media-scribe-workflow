@@ -9,6 +9,9 @@
 # --archive を付けるとピークノーマライズ（演奏品質保持）の出力も追加生成する:
 #   <basename>_archive.wav     ピークノーマライズ
 #
+# --stereo を付けると、独立録音の L/R を相互同期してステレオ 1 本に仕上げる:
+#   連結 → 各ch正規化 → L↔R同期 → ステレオ結合
+#
 # Usage:
 #   rehearsal-finalize-audio                          # cwd を 1 ディレクトリとして処理
 #   rehearsal-finalize-audio --basename foo           # 出力 prefix 指定
@@ -17,10 +20,20 @@
 #   rehearsal-finalize-audio --recursive --dry-run    # 計画のみ
 #   rehearsal-finalize-audio --keep-concat            # 連結中間ファイルを残す
 #
+#   rehearsal-finalize-audio --stereo                 # cwd の L/ と R/ を同期→ステレオ化
+#   rehearsal-finalize-audio --stereo --left L --right R -o stereo.wav
+#   rehearsal-finalize-audio --stereo --drift          # L↔R のクロックドリフトも補正
+#
 # --recursive の挙動:
 #   cwd 直下を出力ディレクトリとして扱い、cwd/<sub>/...*.wav を含む各サブディレクトリで
 #   パイプラインを実行する。出力ファイルは全て cwd に集約され、サブディレクトリ名を
 #   アンダースコア連結したものを basename にする (例: L/AM -> L_AM.wav)。
+#
+# --stereo の背景:
+#   TX1/TX2 は独立レコーダーで開始時刻もクロックも別。そのまま結合すると左右が
+#   数十秒ズレる。映像があれば映像を共通基準にできるが（bin/rehearsal-sync）、
+#   映像が無い素材（録画忘れ・音声のみの練習など）では L↔R を直接相互相関して
+#   整合させる必要がある。--stereo はそのための経路。
 # ============================================================
 
 set -euo pipefail
@@ -33,6 +46,11 @@ dry_run=0
 keep_concat=0
 recursive=0
 archive=0
+stereo=0
+left_src="L"
+right_src="R"
+stereo_out=""
+drift=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,8 +59,13 @@ while [[ $# -gt 0 ]]; do
     --keep-concat) keep_concat=1; shift ;;
     --archive)  archive=1; shift ;;
     --recursive|-r) recursive=1; shift ;;
+    --stereo)   stereo=1; shift ;;
+    --left)     left_src="$2"; shift 2 ;;
+    --right)    right_src="$2"; shift 2 ;;
+    -o|--output) stereo_out="$2"; shift 2 ;;
+    --drift)    drift=1; shift ;;
     -h|--help)
-      sed -n '2,26p' "$0" | sed 's/^# \?//'
+      sed -n '2,38p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     *)
@@ -137,6 +160,104 @@ process_dir() {
 }
 
 invocation_dir="${PWD}"
+
+# ------------------------------------------------------------
+# prepare_side: 片チャンネルを「連結→正規化」して 1 本の WAV にする
+#   $1: src   — ディレクトリ（中の *.wav を連結）または単一ファイル
+#   $2: label — L / R
+#   $3: out   — 出力 WAV
+# ------------------------------------------------------------
+prepare_side() {
+  local src="$1" label="$2" out="$3"
+  if [[ -d "$src" ]]; then
+    local -a wavs
+    for f in "${src}"/*.wav(.N); do wavs+=("$f"); done
+    if (( ${#wavs[@]} == 0 )); then
+      echo "rehearsal-finalize-audio: no WAV in ${src}" >&2; exit 1
+    fi
+    if (( ${#wavs[@]} >= 2 )); then
+      echo "  [${label}] audio-concat (${#wavs[@]} files)"
+      "${ADV_DIR}/audio-concat" "${wavs[@]}" -o "${out%.wav}_concat.wav"
+      src="${out%.wav}_concat.wav"
+    else
+      src="${wavs[1]}"
+    fi
+  elif [[ ! -f "$src" ]]; then
+    echo "rehearsal-finalize-audio: not found: ${src}" >&2; exit 1
+  fi
+  echo "  [${label}] audio-normalize-loudnorm"
+  "${ADV_DIR}/audio-normalize-loudnorm" "$src" -o "$out"
+}
+
+if (( stereo )); then
+  # --- L/R 相互同期 → ステレオ化 ---
+  [[ -z "$stereo_out" ]] && stereo_out="${invocation_dir}/stereo.wav"
+  work="${invocation_dir}/.finalize_work"
+
+  echo "================================================================"
+  echo "rehearsal-finalize-audio: --stereo"
+  echo "  left   : ${left_src}"
+  echo "  right  : ${right_src}"
+  echo "  drift  : $((drift)) (0=off)"
+  echo "  output : ${stereo_out}"
+  echo "================================================================"
+
+  if (( dry_run )); then
+    echo "[1/4] 各chを連結+正規化 → ${work}/{L,R}.wav"
+    echo "[2/4] audio-sync-offset で L↔R オフセット検出"
+    (( drift )) && echo "[3/4] audio-drift-correct で L↔R ドリフト補正"
+    echo "[4/4] 整合させて audio-merge-stereo → ${stereo_out}"
+    echo "rehearsal-finalize-audio: --dry-run, 実行しません"
+    exit 0
+  fi
+
+  mkdir -p "$work"
+  echo "[1/4] 各chを連結+正規化"
+  prepare_side "$left_src"  "L" "${work}/L.wav"
+  prepare_side "$right_src" "R" "${work}/R.wav"
+
+  right_aligned="${work}/R.wav"
+  if (( drift )); then
+    echo ""
+    echo "[2/4] L↔R クロックドリフト補正"
+    "${ADV_DIR}/audio-drift-correct" "${work}/L.wav" "${work}/R.wav" \
+      -o "${work}/R_fix.wav"
+    right_aligned="${work}/R_fix.wav"
+  fi
+
+  echo ""
+  echo "[3/4] L↔R オフセット検出"
+  "${ADV_DIR}/audio-sync-offset" "${work}/L.wav" "$right_aligned"
+  off="$("${ADV_DIR}/audio-sync-offset" "${work}/L.wav" "$right_aligned" --value)"
+
+  # R を L のタイムラインへ焼き込み（正が遅延、負が先頭トリム）
+  sr="$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate \
+        -of csv=p=0 "$right_aligned")"
+  : "${sr:=48000}"
+  nsamp=$(printf '%.0f' $(( ${off#-} * sr )))
+  if (( off >= 0 )); then
+    af="adelay=${nsamp}S:all=1"
+  else
+    af="atrim=start_sample=${nsamp},asetpts=PTS-STARTPTS"
+  fi
+  echo "  offset ${off}s → ${nsamp} samples @ ${sr}Hz"
+  ffmpeg -hide_banner -y -v warning -i "$right_aligned" -af "$af" \
+    -c:a pcm_s24le "${work}/R_aligned.wav"
+
+  echo ""
+  echo "[4/4] ステレオ結合"
+  "${ADV_DIR}/audio-merge-stereo" "${work}/L.wav" "${work}/R_aligned.wav" \
+    -o "$stereo_out"
+
+  if (( ! keep_concat )); then
+    rm -rf "$work"
+  else
+    echo "kept intermediates: ${work}"
+  fi
+  echo ""
+  echo "rehearsal-finalize-audio: wrote ${stereo_out}"
+  exit 0
+fi
 
 if (( recursive )); then
   # サブディレクトリのみ走査 (-mindepth 2 で cwd 直下は除外、出力衝突回避)

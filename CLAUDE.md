@@ -137,7 +137,7 @@ media-scribe-workflow/
 - [x] bin/advanced/audio-normalize-{loudnorm,peak} の作成（音量正規化）
 - [x] bin/advanced/audio-concat の作成（WAV連結）
 - [x] bin/advanced/audio-merge-stereo の作成（mono L/R → ステレオ結合）
-- [x] bin/rehearsal-finalize-audio の作成（連結＋loudnorm仕上げ）
+- [x] bin/rehearsal-finalize-audio の作成（連結＋loudnorm仕上げ、--stereoでL↔R同期→ステレオ化）
 - [x] bin/advanced/audio-sync-offset の作成（相互相関で同期オフセット検出）
 - [x] bin/advanced/audio-sync-verify の作成（複数地点で同期の整合を検証）
 - [x] bin/advanced/audio-drift-correct の作成（2窓測定→atempoでクロックドリフト補正）
