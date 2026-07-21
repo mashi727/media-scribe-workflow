@@ -187,6 +187,45 @@ def verify_alignment(video: Path, audio: Path, offset: float, rate: int,
     return r.returncode == 0
 
 
+def assert_sync_ok(video: Path, results: list, min_score: float, verify_on: bool,
+                   probes: int, window: float, tol: float, rate: int,
+                   force: bool) -> None:
+    """同期結果を検証し、問題があれば中断する。
+
+    results: [(label, audio_path, offset, score), ...]
+    2 段構え:
+      1) 全体相関スコア — 共通の音が無い/対応素材が違う場合を弾く
+      2) 複数地点の整合 — スコアが高くても「一部だけ一致」を弾く
+         （時間を空けて撮った複数クリップの連結など）"""
+    weak = [(n, s) for n, _, _, s in results if s < min_score]
+    if weak and not force:
+        detail = ", ".join(f"{n} score={s:.1f}" for n, s in weak)
+        die(f"同期の信頼度が低い（{detail} < sync.min_score {min_score:g}）。\n"
+            f"  想定原因:\n"
+            f"    (1) video: の複数クリップが時間的に不連続（連続タイムラインが前提。\n"
+            f"        間を空けて撮った別クリップは先頭以外がズレます）\n"
+            f"    (2) 映像と音声に共通の音が入っていない / 対応する素材が違う\n"
+            f"  対処: 入力の対応を確認、または --force で強行 / sync.min_score を下げる")
+    if weak:
+        log(f"    WARNING: 信頼度が低いまま --force で続行します（{len(weak)} 系統）")
+
+    if not verify_on:
+        return
+    bad = [n for n, p, o, _ in results
+           if not verify_alignment(video, p, o, rate, probes, window,
+                                   min_score, tol, n)]
+    if bad and not force:
+        die(f"整合性検証に失敗（{', '.join(bad)}）。\n"
+            f"  上の NG 行の位置で映像と音声が対応していません。\n"
+            f"  最も多い原因: video: の複数クリップが時間的に不連続\n"
+            f"    （連結は 1 本の連続タイムラインが前提。間を空けて撮った\n"
+            f"      別クリップは先頭以外に別の音声が乗ります）\n"
+            f"  対処: クリップ毎に take.yaml を分ける / --force で強行 /\n"
+            f"        sync.verify: false で検証を切る")
+    if bad:
+        log("    WARNING: 整合性検証に失敗したまま --force で続行します")
+
+
 def acodec_args(codec: str, bitrate: str) -> tuple[list[str], str]:
     """(ffmpeg 音声コーデック引数, 推奨コンテナ拡張子) を返す。"""
     if codec == "aac":
@@ -303,18 +342,38 @@ def main() -> int:
     drift_win = str(drift.get("window", 120))
 
     if stereo_in:
-        # 既に相互整合したステレオ音源 → 従来どおり 1 本として同期・差し替え
-        log("[2/4] 音声連結 + 正規化（stereo 指定）")
+        # 既に相互整合したステレオ音源 → 1 本として映像へ同期
+        log("[2/4] 音声連結 + 正規化（stereo 指定）"
+            + ("（+ ドリフト補正）" if drift_on else ""))
         st_concat = concat_lossless(runner, stereo_in, work / "stereo_concat.wav")
         stereo = normalize_channel(runner, method, norm, st_concat, work / "stereo.wav")
-        log("[3/4] （ステレオ結合はスキップ: stereo 指定）")
-        log("[4/4] 同期・差し替え")
-        cmd = [ADV / "video-replace-audio", str(video_single), str(stereo),
-               "-o", str(output), "--codec", codec, "--bitrate", bitrate,
-               "--rate", str(rate)]
         if drift_on:
-            cmd += ["--drift", "--drift-window", drift_win]
-        runner.run(cmd)
+            runner.run([ADV / "audio-drift-correct", str(video_single), str(stereo),
+                        "-o", str(work / "stereo_fix.wav"), "--window", drift_win,
+                        "--bit-depth", str(norm.get("bit_depth", "24"))])
+            stereo = work / "stereo_fix.wav"
+
+        log("[3/4] 映像へ同期 → [4/4] mux")
+        if args.dry_run:
+            log("    $ (audio-sync-offset で測定・検証 → adelay/atrim で mux)")
+            log(f"    $ ffmpeg -i {video_single} -i {stereo} "
+                f"-filter_complex '[1:a]adelay=<D>[a]' -map 0:v:0 -map [a] "
+                f"-c:v copy {' '.join(acodec)} -shortest {output}")
+        else:
+            sr = audio_sample_rate(stereo)
+            off, sc = measure_offset(video_single, stereo, rate)
+            log(f"    offset = {off:+.4f}s (score {sc:.1f})   (@ {sr}Hz)")
+            assert_sync_ok(video_single, [("stereo", stereo, off, sc)],
+                           min_score, verify_on, verify_probes, verify_window,
+                           tolerance, rate, args.force)
+            runner.run([
+                "ffmpeg", "-hide_banner", "-y", "-v", "warning", "-stats",
+                "-i", str(video_single), "-i", str(stereo),
+                "-filter_complex", channel_filter(1, off, sr, "a"),
+                "-map", "0:v:0", "-map", "[a]",
+                "-c:v", "copy", *acodec,
+                "-shortest", str(output),
+            ])
     else:
         # L/R は独立録音（開始時刻・クロックが別）。各チャンネルを個別に映像へ
         # 同期してから結合する（先に結合すると左右が数十秒ズレる）。
@@ -344,37 +403,10 @@ def main() -> int:
             log(f"    offset L = {offL:+.4f}s (score {scL:.1f})   "
                 f"offset R = {offR:+.4f}s (score {scR:.1f})   (@ {sr}Hz)")
 
-            # 信頼度検証: 低スコアのまま進めると「別の音声が乗った成果物」が
-            # 何の警告もなく完成してしまうため、既定では中断する。
-            weak = [(n, s) for n, s in (("L", scL), ("R", scR)) if s < min_score]
-            if weak and not args.force:
-                detail = ", ".join(f"{n} score={s:.1f}" for n, s in weak)
-                die(f"同期の信頼度が低い（{detail} < sync.min_score {min_score:g}）。\n"
-                    f"  想定原因:\n"
-                    f"    (1) video: の複数クリップが時間的に不連続（連続タイムラインが前提。\n"
-                    f"        間を空けて撮った別クリップは先頭以外がズレます）\n"
-                    f"    (2) 映像と音声に共通の音が入っていない / 対応する素材が違う\n"
-                    f"  対処: 入力の対応を確認、または --force で強行 / sync.min_score を下げる")
-            if weak:
-                log(f"    WARNING: 信頼度が低いまま --force で続行します（{len(weak)} ch）")
-
-            # 全体スコアが高くても「一部だけ一致」は見抜けない（時間を空けて撮った
-            # 複数クリップの連結など）。複数地点で整合を確認する。
-            if verify_on:
-                bad_ch = [n for n, src, o in (("L", l_src, offL), ("R", r_src, offR))
-                          if not verify_alignment(video_single, src, o, rate,
-                                                  verify_probes, verify_window,
-                                                  min_score, tolerance, n)]
-                if bad_ch and not args.force:
-                    die(f"整合性検証に失敗（{', '.join(bad_ch)} ch）。\n"
-                        f"  上の NG 行の位置で映像と音声が対応していません。\n"
-                        f"  最も多い原因: video: の複数クリップが時間的に不連続\n"
-                        f"    （連結は 1 本の連続タイムラインが前提。間を空けて撮った\n"
-                        f"      別クリップは先頭以外に別の音声が乗ります）\n"
-                        f"  対処: クリップ毎に take.yaml を分ける / --force で強行 /\n"
-                        f"        sync.verify: false で検証を切る")
-                if bad_ch:
-                    log(f"    WARNING: 整合性検証に失敗したまま --force で続行します")
+            assert_sync_ok(video_single,
+                           [("L", l_src, offL, scL), ("R", r_src, offR, scR)],
+                           min_score, verify_on, verify_probes, verify_window,
+                           tolerance, rate, args.force)
             fc = ";".join([
                 channel_filter(1, offL, sr, "la"),
                 channel_filter(2, offR, sr, "ra"),
@@ -392,7 +424,7 @@ def main() -> int:
     # --- 後始末 ---
     if not args.dry_run and not args.keep_work:
         for f in ("video.mp4", "L_concat.wav", "R_concat.wav", "L.wav", "R.wav",
-                  "L_fix.wav", "R_fix.wav", "stereo_concat.wav", "stereo.wav"):
+                  "L_fix.wav", "R_fix.wav", "stereo_concat.wav", "stereo.wav", "stereo_fix.wav"):
             (work / f).unlink(missing_ok=True)
         try:
             work.rmdir()
