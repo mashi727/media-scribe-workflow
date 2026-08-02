@@ -103,7 +103,7 @@ process_dir() {
 
   # ソース WAV 収集（出力命名規則のファイルは除外して再実行 idempotency を確保）
   local -a wavs
-  for f in "${source_dir}"/*.wav(.N); do
+  for f in "${source_dir}"/*.[wW][aA][vV](.N); do
     case "${f:t}" in
       "${out_basename}.wav") continue ;;
       *_concat.wav|*_archive.wav|*_rehearsal.wav) continue ;;
@@ -171,7 +171,7 @@ prepare_side() {
   local src="$1" label="$2" out="$3"
   if [[ -d "$src" ]]; then
     local -a wavs
-    for f in "${src}"/*.wav(.N); do wavs+=("$f"); done
+    for f in "${src}"/*.[wW][aA][vV](.N); do wavs+=("$f"); done
     if (( ${#wavs[@]} == 0 )); then
       echo "rehearsal-finalize-audio: no WAV in ${src}" >&2; exit 1
     fi
@@ -264,7 +264,7 @@ if (( recursive )); then
   typeset -aU leaf_dirs
   while IFS= read -r d; do
     leaf_dirs+=("$d")
-  done < <(find "${invocation_dir}" -mindepth 2 -type f -name "*.wav" -exec dirname {} \; | sort -u)
+  done < <(find "${invocation_dir}" -mindepth 2 -type f -iname "*.wav" -exec dirname {} \; | sort -u)
 
   if (( ${#leaf_dirs[@]} == 0 )); then
     echo "rehearsal-finalize-audio: no WAV files found in subdirectories of ${invocation_dir}" >&2
