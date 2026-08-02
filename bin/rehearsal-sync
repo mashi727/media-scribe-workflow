@@ -78,17 +78,29 @@ def as_list(v) -> list:
     return v if isinstance(v, list) else [v]
 
 
+def _ci_glob(pat: str) -> str:
+    """glob パターンの ASCII 英字を [xX] 文字クラスに展開し、大小どちらの拡張子
+    （.wav/.WAV, .mp4/.MP4 等）にもマッチさせる。pathlib の case_sensitive 引数は
+    3.12+ 専用なので、3.8+ でも動くこの方式を使う。既に [ を含む場合はユーザーが
+    明示的に指定したものとみなしそのまま返す。"""
+    if "[" in pat:
+        return pat
+    return "".join(f"[{c.lower()}{c.upper()}]" if c.isascii() and c.isalpha()
+                   else c for c in pat)
+
+
 def resolve_globs(base: Path, patterns: list[str]) -> list[Path]:
-    """base 基準で各パターンを glob 展開し、ソート順で平坦化。"""
+    """base 基準で各パターンを glob 展開し、ソート順で平坦化（大小拡張子両対応）。"""
     out: list[Path] = []
     for pat in patterns:
         p = Path(pat)
         if p.is_absolute():
-            matches = sorted(Path("/").glob(str(p.relative_to("/"))))
+            rel = _ci_glob(str(p.relative_to("/")))
+            matches = sorted(Path("/").glob(rel))
             if not matches and p.exists():
                 matches = [p]
         else:
-            matches = sorted(base.glob(pat))
+            matches = sorted(base.glob(_ci_glob(pat)))
         out.extend(matches)
     return out
 
