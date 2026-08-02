@@ -105,24 +105,13 @@ def resolve_globs(base: Path, patterns: list[str]) -> list[Path]:
     return out
 
 
-def concat_lossless(runner: Runner, inputs: list[Path], output: Path) -> Path:
-    """ffmpeg concat demuxer + stream copy でロスレス連結（映像/音声共通）。"""
+def concat_media(runner: Runner, tool: str, inputs: list[Path], output: Path,
+                 extra: list[str] | None = None) -> Path:
+    """配管の *-concat を呼んでロスレス連結。1 本ならそのまま返す（連結不要）。"""
     if len(inputs) == 1:
         return inputs[0]
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                     encoding="utf-8") as f:
-        manifest = Path(f.name)
-        for p in inputs:
-            esc = str(p.resolve()).replace("'", "'\\''")
-            f.write(f"file '{esc}'\n")
-    try:
-        runner.run([
-            "ffmpeg", "-hide_banner", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(manifest),
-            "-c", "copy", str(output),
-        ])
-    finally:
-        manifest.unlink(missing_ok=True)
+    runner.run([str(ADV / tool), *[str(p) for p in inputs],
+                "-o", str(output), *(extra or [])])
     return output
 
 
@@ -339,7 +328,7 @@ def main() -> int:
 
     # --- 1. 映像連結 ---
     log("[1/4] 映像連結")
-    video_single = concat_lossless(runner, videos, work / "video.mp4")
+    video_single = concat_media(runner, "video-concat", videos, work / "video.mp4")
 
     rate = int(sync.get("rate", 8000))
     min_score = float(sync.get("min_score", 10))
@@ -357,7 +346,7 @@ def main() -> int:
         # 既に相互整合したステレオ音源 → 1 本として映像へ同期
         log("[2/4] 音声連結 + 正規化（stereo 指定）"
             + ("（+ ドリフト補正）" if drift_on else ""))
-        st_concat = concat_lossless(runner, stereo_in, work / "stereo_concat.wav")
+        st_concat = concat_media(runner, "audio-concat", stereo_in, work / "stereo_concat.wav", ["--any-format"])
         stereo = normalize_channel(runner, method, norm, st_concat, work / "stereo.wav")
         if drift_on:
             runner.run([ADV / "audio-drift-correct", str(video_single), str(stereo),
@@ -390,8 +379,8 @@ def main() -> int:
         # L/R は独立録音（開始時刻・クロックが別）。各チャンネルを個別に映像へ
         # 同期してから結合する（先に結合すると左右が数十秒ズレる）。
         log("[2/4] L/R 連結 + 正規化" + ("（+ 個別ドリフト補正）" if drift_on else ""))
-        l_concat = concat_lossless(runner, lefts, work / "L_concat.wav")
-        r_concat = concat_lossless(runner, rights, work / "R_concat.wav")
+        l_concat = concat_media(runner, "audio-concat", lefts, work / "L_concat.wav", ["--any-format"])
+        r_concat = concat_media(runner, "audio-concat", rights, work / "R_concat.wav", ["--any-format"])
         l_src = normalize_channel(runner, method, norm, l_concat, work / "L.wav")
         r_src = normalize_channel(runner, method, norm, r_concat, work / "R.wav")
         if drift_on:

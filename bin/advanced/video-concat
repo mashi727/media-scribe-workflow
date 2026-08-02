@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+video-concat — 映像ファイルを順次ロスレス連結（再エンコードなし）。
+
+同一カメラの分割セグメント（Insta360 の VID_*.mp4 等）を、concat demuxer +
+stream copy で 1 本に連結する。連結が破綻しないよう、全入力の映像ストリームが
+    codec_name / width / height / pix_fmt / r_frame_rate / time_base
+で一致することを ffprobe で検証する（特に time_base の不一致は尺が狂う）。
+
+音声など他ストリームがあればまとめて copy する（後段で差し替える場合も無害）。
+
+Usage:
+    video-concat                              # cwd の *.mp4 をソート順で連結
+    video-concat a.mp4 b.mp4 -o out.mp4       # 明示指定
+    video-concat --list list.txt -o out.mp4   # ファイルリストから
+    video-concat --any-format                 # 厳密一致チェックを外す（同一性のみ）
+    video-concat --dry-run                    # 実行計画のみ
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+CHECK_KEYS = ("codec_name", "width", "height", "pix_fmt",
+              "r_frame_rate", "time_base")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"video-concat: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def ffprobe_video(path: Path) -> dict:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries",
+         "stream=codec_name,width,height,pix_fmt,r_frame_rate,time_base",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    if r.returncode != 0:
+        die(f"ffprobe failed for {path}: {r.stderr.strip()}")
+    streams = json.loads(r.stdout).get("streams", [])
+    if not streams:
+        die(f"no video stream in {path}")
+    return streams[0]
+
+
+def collect_inputs(args: argparse.Namespace) -> list[Path]:
+    if args.list:
+        lp = Path(args.list)
+        if not lp.is_file():
+            die(f"list file not found: {lp}")
+        lines = [ln.strip() for ln in lp.read_text(encoding="utf-8").splitlines()]
+        return [Path(ln) for ln in lines if ln and not ln.startswith("#")]
+    if args.inputs:
+        return [Path(p) for p in args.inputs]
+    cwd = sorted(Path.cwd().glob("*.mp4"))
+    if not cwd:
+        die("no input files: pass paths, --list, or run in a directory with *.mp4")
+    return cwd
+
+
+def validate(paths: list[Path], strict: bool) -> dict:
+    if len(paths) < 2:
+        die(f"need at least 2 inputs to concat, got {len(paths)}")
+    for p in paths:
+        if not p.is_file():
+            die(f"input not found: {p}")
+    first = ffprobe_video(paths[0])
+    if strict:
+        for p in paths[1:]:
+            info = ffprobe_video(p)
+            for k in CHECK_KEYS:
+                if str(info.get(k)) != str(first.get(k)):
+                    die(f"video param mismatch on {p}: {k}={info.get(k)} "
+                        f"vs first={first.get(k)}\n"
+                        f"  無劣化連結には全入力が同一パラメータである必要があります。"
+                        f"（--any-format で強行可）")
+    return first
+
+
+def run_concat(paths: list[Path], output: Path, verbose: bool) -> None:
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                     encoding="utf-8") as f:
+        manifest = Path(f.name)
+        for p in paths:
+            esc = str(p.resolve()).replace("'", "'\\''")
+            f.write(f"file '{esc}'\n")
+    try:
+        cmd = ["ffmpeg", "-hide_banner", "-y",
+               "-f", "concat", "-safe", "0", "-i", str(manifest),
+               "-c", "copy", str(output)]
+        if verbose:
+            print("video-concat: " + " ".join(cmd), file=sys.stderr)
+        r = subprocess.run(cmd, check=False)
+        if r.returncode != 0:
+            die(f"ffmpeg exited {r.returncode}")
+    finally:
+        manifest.unlink(missing_ok=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="video-concat",
+                                 description="映像をロスレス連結（再エンコードなし）。")
+    ap.add_argument("inputs", nargs="*", help="入力パス（省略時は cwd の *.mp4 をソート順）")
+    ap.add_argument("-o", "--output", default="concat.mp4", help="出力 (default: concat.mp4)")
+    ap.add_argument("--list", help="入力ファイルリスト（1 行 1 パス、# でコメント）")
+    ap.add_argument("--any-format", action="store_true",
+                    help="厳密一致チェックを外す（同一性チェックのみ）")
+    ap.add_argument("--dry-run", action="store_true", help="実行計画のみ表示")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        die("ffmpeg/ffprobe not found in PATH")
+
+    paths = collect_inputs(args)
+    info = validate(paths, strict=not args.any_format)
+    output = Path(args.output)
+
+    print(f"video-concat: {len(paths)} inputs", file=sys.stderr)
+    print(f"  codec        : {info.get('codec_name')}", file=sys.stderr)
+    print(f"  size         : {info.get('width')}x{info.get('height')} "
+          f"{info.get('pix_fmt')}", file=sys.stderr)
+    print(f"  fps          : {info.get('r_frame_rate')} "
+          f"(time_base {info.get('time_base')})", file=sys.stderr)
+    print(f"  output       : {output}", file=sys.stderr)
+    if args.verbose:
+        for i, p in enumerate(paths, 1):
+            print(f"  [{i:3d}] {p}", file=sys.stderr)
+
+    if args.dry_run:
+        print("video-concat: --dry-run, skipping ffmpeg", file=sys.stderr)
+        return 0
+
+    run_concat(paths, output, verbose=args.verbose)
+    print(f"video-concat: wrote {output}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
