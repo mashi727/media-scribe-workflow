@@ -282,9 +282,19 @@ def main() -> int:
     drift = cfg.get("drift") or {}
     sync = cfg.get("sync") or {}
     out_cfg = cfg.get("output") or {}
-    if "path" not in out_cfg:
-        die("output.path is required")
-    output = rel(out_cfg["path"])
+    codec = str(out_cfg.get("codec", "aac"))
+    bitrate = str(out_cfg.get("bitrate", "320k"))
+    acodec, ext = acodec_args(codec, bitrate)
+    # 出力先の決定（優先順）:
+    #   1. output.path … フルパス指定（拡張子まで明示。最優先）
+    #   2. output.name … ファイル名（拡張子なし）。拡張子は codec から自動、take 直下に置く
+    #   3. どちらも無し … take フォルダ名を採用（<take>/<フォルダ名>.<ext>）
+    if out_cfg.get("path"):
+        output = rel(str(out_cfg["path"]))
+    elif out_cfg.get("name"):
+        output = rel(f"{out_cfg['name']}.{ext}")
+    else:
+        output = rel(f"{base.name}.{ext}")
     work = rel(cfg.get("work_dir", ".work"))
 
     # --- 入力の glob 解決 ---
@@ -336,9 +346,6 @@ def main() -> int:
     verify_probes = int(sync.get("verify_probes", 5))
     verify_window = float(sync.get("verify_window", 30))
     tolerance = float(sync.get("tolerance", 0.5))
-    codec = str(out_cfg.get("codec", "aac"))
-    bitrate = str(out_cfg.get("bitrate", "320k"))
-    acodec, _ext = acodec_args(codec, bitrate)
     drift_on = bool(drift.get("enabled"))
     drift_win = str(drift.get("window", 120))
 
