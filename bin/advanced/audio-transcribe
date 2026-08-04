@@ -33,9 +33,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+# macOS で torch(libomp) と ctranslate2 の OpenMP が二重ロードされると
+# 推論中に segfault する。stable_whisper を import する前に緩和しておく。
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 DEFAULT_MODEL = "kotoba-tech/kotoba-whisper-v2.0-faster"
 
@@ -85,8 +90,13 @@ def main() -> int:
                     help="faster-whisper の VAD で無音/非発話を除外（音楽での幻聴を抑制）")
     ap.add_argument("--no-condition", action="store_true",
                     help="condition_on_previous_text を無効化（反復幻聴を抑制。長尺・音楽混在で有効）")
+    ap.add_argument("--word-timestamps", action="store_true",
+                    help="word 単位タイムスタンプ＋語ごと probability を出す。"
+                         "distil モデル（Kotoba）は非対応。full モデル(large-v3 等)で使う")
     ap.add_argument("--word-srt", action="store_true",
-                    help="SRT も word 単位で出す（既定は segment 単位の可読 SRT）")
+                    help="SRT も word 単位で出す（--word-timestamps 併用時のみ）")
+    ap.add_argument("--threads", type=int, default=4,
+                    help="ctranslate2 CPU スレッド数 (default: 4)")
     ap.add_argument("--dry-run", action="store_true", help="計画のみ。依存の import もしない")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -127,21 +137,25 @@ def main() -> int:
 
     log(f"  loading model（初回は HuggingFace から DL, ~1.5GB）...")
     model = stable_whisper.load_faster_whisper(
-        args.model, device=device, compute_type=compute)
+        args.model, device=device, compute_type=compute, cpu_threads=args.threads)
 
-    log("  transcribing...")
-    result = model.transcribe_stable(
+    log("  transcribing..."
+        + ("（word 単位）" if args.word_timestamps else "（segment 単位）"))
+    # transcribe_stable は新しめの stable-ts で transcribe に統合された。両対応。
+    tr = getattr(model, "transcribe", None) or model.transcribe_stable
+    result = tr(
         str(src),
         language=args.language,
         beam_size=args.beam,
-        word_timestamps=True,
+        word_timestamps=args.word_timestamps,
         vad_filter=args.vad,
         condition_on_previous_text=not args.no_condition,
         verbose=args.verbose or None,
     )
 
-    # (1) 可読な一次テキスト層（segment 単位。--word-srt で word 単位も）
-    result.to_srt_vtt(str(srt_path), word_level=args.word_srt, segment_level=True)
+    # (1) 可読な一次テキスト層（既定 segment 単位。--word-srt は word 併用時のみ）
+    word_srt = args.word_srt and args.word_timestamps
+    result.to_srt_vtt(str(srt_path), word_level=word_srt, segment_level=True)
     # (2) 機械忠実層（word 単位 + probability を保持。再処理の元にもなる）
     result.save_as_json(str(words_path))
 
@@ -164,7 +178,8 @@ def main() -> int:
             "beam_size": args.beam,
             "vad_filter": args.vad,
             "condition_on_previous_text": not args.no_condition,
-            "word_timestamps": True,
+            "word_timestamps": args.word_timestamps,
+            "cpu_threads": args.threads,
         },
         "versions": {
             "stable-ts": pkg_version("stable-ts"),
