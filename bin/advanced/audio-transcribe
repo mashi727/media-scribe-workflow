@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""
+audio-transcribe — 動画/音声から「忠実な一次資料」を CLI で生成する。
+
+Kotoba-Whisper v2.0（日本語特化・distil）を faster-whisper バックエンドで、
+stable-ts から回し、次の 2 + 1 層を同時出力する:
+
+    <base>.srt         可読な一次テキスト層（時系列・媒体へ遡及可能）
+    <base>.words.json  機械忠実層（word 単位タイムスタンプ + 語ごとの確信度 probability）
+    <base>.meta.json   来歴（モデル/パラメータ/ツール版/入力の同一性）
+
+一次資料としての設計方針:
+    - 出力は ASR の生結果。校正はしない（校正は派生の解釈層で行い、ここへ書き戻さない）
+    - probability を保持するので「どこが怪しいか」が後から分かる（＝複数エンジン併用の代替）
+    - すべての cue/語が媒体の時刻へ遡れる
+    - meta.json に来歴を残し、再現とトレーサビリティを担保する
+
+依存（初回のみ導入。CTranslate2 バックエンドなので推論は torch 不要・CPUで実用）:
+    pip install -U stable-ts faster-whisper
+    # モデルは初回実行時に HuggingFace から自動DL（~1.5GB, ~/.cache/huggingface）
+
+Usage:
+    audio-transcribe input.mp4
+    audio-transcribe input.mp4 -o 20260802_practice
+    audio-transcribe input.wav --model kotoba-tech/kotoba-whisper-v2.0-faster --language ja
+    audio-transcribe input.mp4 --compute-type int8 --beam 5 --vad
+    audio-transcribe input.mp4 --dry-run          # 計画のみ（依存の import もしない）
+
+参考: Kotoba-Whisper は日本語で large-v3 を上回りつつ高速（distil-whisper 系）。
+      話者分離まで要るなら v2.2 系 or WhisperX を別途検討（--model で差し替え可）。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_MODEL = "kotoba-tech/kotoba-whisper-v2.0-faster"
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-transcribe: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def probe_duration(path: Path) -> float | None:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        return float(r.stdout.strip())
+    except (ValueError, FileNotFoundError):
+        return None
+
+
+def pkg_version(name: str) -> str:
+    try:
+        from importlib.metadata import version
+        return version(name)
+    except Exception:
+        return "unknown"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="audio-transcribe", add_help=True)
+    ap.add_argument("input", help="動画/音声（ffmpeg が読めるもの）")
+    ap.add_argument("-o", "--output", help="出力 basename（既定: 入力の stem）")
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help=f"faster-whisper/CT2 モデル (default: {DEFAULT_MODEL})")
+    ap.add_argument("--language", default="ja", help="言語 (default: ja)")
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
+                    help="推論デバイス (default: auto。Mac は cpu)")
+    ap.add_argument("--compute-type", default="auto",
+                    help="CT2 compute type: auto|int8|int8_float16|float16|float32")
+    ap.add_argument("--beam", type=int, default=5, help="beam size (default: 5)")
+    ap.add_argument("--vad", action="store_true",
+                    help="faster-whisper の VAD で無音/非発話を除外（音楽での幻聴を抑制）")
+    ap.add_argument("--no-condition", action="store_true",
+                    help="condition_on_previous_text を無効化（反復幻聴を抑制。長尺・音楽混在で有効）")
+    ap.add_argument("--word-srt", action="store_true",
+                    help="SRT も word 単位で出す（既定は segment 単位の可読 SRT）")
+    ap.add_argument("--dry-run", action="store_true", help="計画のみ。依存の import もしない")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+
+    src = Path(args.input)
+    if not src.is_file():
+        die(f"input not found: {src}")
+    base = Path(args.output) if args.output else src.with_suffix("")
+    srt_path = base.with_suffix(".srt")
+    words_path = Path(str(base) + ".words.json")
+    meta_path = Path(str(base) + ".meta.json")
+
+    device = "cpu" if args.device == "auto" else args.device
+    compute = args.compute_type
+    if compute == "auto":
+        compute = "int8" if device == "cpu" else "float16"
+
+    dur = probe_duration(src)
+    log("audio-transcribe:")
+    log(f"  input      : {src}" + (f"  ({dur/3600:.2f}h)" if dur else ""))
+    log(f"  model      : {args.model}")
+    log(f"  language   : {args.language}")
+    log(f"  device     : {device} / compute={compute} / beam={args.beam}"
+        f"{' / vad' if args.vad else ''}"
+        f"{' / no-condition' if args.no_condition else ''}")
+    log(f"  outputs    : {srt_path.name}  {words_path.name}  {meta_path.name}")
+
+    if args.dry_run:
+        log("audio-transcribe: --dry-run（実行しません）")
+        return 0
+
+    try:
+        import stable_whisper
+    except ImportError:
+        die("stable-ts が見つかりません。導入してください:\n"
+            "  pip install -U stable-ts faster-whisper\n"
+            "（CTranslate2 バックエンドなので推論は torch 不要・CPUで実用）")
+
+    log(f"  loading model（初回は HuggingFace から DL, ~1.5GB）...")
+    model = stable_whisper.load_faster_whisper(
+        args.model, device=device, compute_type=compute)
+
+    log("  transcribing...")
+    result = model.transcribe_stable(
+        str(src),
+        language=args.language,
+        beam_size=args.beam,
+        word_timestamps=True,
+        vad_filter=args.vad,
+        condition_on_previous_text=not args.no_condition,
+        verbose=args.verbose or None,
+    )
+
+    # (1) 可読な一次テキスト層（segment 単位。--word-srt で word 単位も）
+    result.to_srt_vtt(str(srt_path), word_level=args.word_srt, segment_level=True)
+    # (2) 機械忠実層（word 単位 + probability を保持。再処理の元にもなる）
+    result.save_as_json(str(words_path))
+
+    # (3) 来歴（再現とトレーサビリティ）
+    seg = getattr(result, "segments", []) or []
+    nwords = sum(len(getattr(s, "words", []) or []) for s in seg)
+    meta = {
+        "tool": "audio-transcribe",
+        "input": {
+            "path": str(src.resolve()),
+            "bytes": src.stat().st_size,
+            "duration_sec": dur,
+        },
+        "asr": {
+            "backend": "faster-whisper (CTranslate2) via stable-ts",
+            "model": args.model,
+            "language": args.language,
+            "device": device,
+            "compute_type": compute,
+            "beam_size": args.beam,
+            "vad_filter": args.vad,
+            "condition_on_previous_text": not args.no_condition,
+            "word_timestamps": True,
+        },
+        "versions": {
+            "stable-ts": pkg_version("stable-ts"),
+            "faster-whisper": pkg_version("faster-whisper"),
+            "ctranslate2": pkg_version("ctranslate2"),
+        },
+        "counts": {"segments": len(seg), "words": nwords},
+        "outputs": {"srt": srt_path.name, "words_json": words_path.name},
+        "note": "ASR の生出力。校正はしていない（校正は派生の解釈層で行う）。"
+                "probability は語ごとの確信度。",
+    }
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+
+    log(f"audio-transcribe: wrote {srt_path.name} / {words_path.name} / {meta_path.name}"
+        f"  (segments={len(seg)}, words={nwords})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
