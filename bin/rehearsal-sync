@@ -24,6 +24,7 @@ YAML 設定 1 枚で「同期・差し替え済み映像」までを全自動生
     - 中間生成物は work_dir（既定 .work）に置き、冪等に再実行できる。
 
 Usage:
+    rehearsal-sync <take_dir> --init      # フォルダを走査して take.yaml を生成
     rehearsal-sync take.yaml
     rehearsal-sync take.yaml --dry-run
     rehearsal-sync take.yaml --keep-work -v
@@ -103,6 +104,200 @@ def resolve_globs(base: Path, patterns: list[str]) -> list[Path]:
             matches = sorted(base.glob(_ci_glob(pat)))
         out.extend(matches)
     return out
+
+
+# ------------------------------------------------------------------
+# --init : 一次ファイルのフォルダを走査して take.yaml の初版を書く
+# ------------------------------------------------------------------
+# 判定は「よくある置き方」に対する当て推量なので、生成物は必ず人が読んで直す前提。
+# 迷った点は yaml のコメントに実測値として残し、後から検証できるようにする。
+VIDEO_DIRS = ("movie", "movies", "video", "videos", "insta360", "cam", "gopro")
+LEFT_DIRS = ("l", "left", "tx1", "ch1")
+RIGHT_DIRS = ("r", "right", "tx2", "ch2")
+STEREO_DIRS = ("stereo", "audio", "mix")
+VIDEO_EXTS = (".mp4", ".mov", ".mts", ".m4v", ".mkv")
+DRIFT_MIN_SEC = 3600.0      # これを超える尺はドリフト補正を既定で有効化
+LONG_TAKE_SEC = 7200.0      # これを超える尺は測定窓と検証地点を増やす
+
+
+def probe_duration(path: Path) -> float:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=False)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def probe_video_params(path: Path) -> str:
+    """連結可否の判断材料。codec/解像度/fps を 1 行にまとめて返す。"""
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=codec_name,width,height,r_frame_rate,pix_fmt",
+         "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=False)
+    return r.stdout.strip()
+
+
+def _find_dir(base: Path, names: tuple) -> Path | None:
+    for child in sorted(base.iterdir()):
+        if child.is_dir() and child.name.lower() in names:
+            return child
+    return None
+
+
+def _media_in(d: Path, exts: tuple) -> list[Path]:
+    return sorted(p for p in d.iterdir()
+                  if p.is_file() and p.suffix.lower() in exts
+                  and not p.name.startswith("."))
+
+
+def _pattern_for(files: list[Path], parent_rel: str) -> str:
+    """ファイル群を代表する glob を作る。共通接頭辞があればそれを使う。"""
+    ext = files[0].suffix.lower()
+    stems = [f.stem for f in files]
+    prefix = ""
+    if len(stems) > 1:
+        for i, ch in enumerate(stems[0]):
+            if all(len(s) > i and s[i] == ch for s in stems[1:]):
+                prefix += ch
+            else:
+                break
+    # 連番の途中まで食い込んだ接頭辞は、桁が増えた瞬間に取りこぼす
+    # （049..057 から "_0" を拾うと _100 に当たらない）。末尾の数字は捨てる。
+    prefix = prefix.rstrip("0123456789")
+    prefix = prefix if len(prefix) >= 3 else ""
+    head = f"{parent_rel}/" if parent_rel else ""
+    return f"{head}{prefix}*{ext}"
+
+
+def scan_take(base: Path) -> dict:
+    """テイクフォルダを走査して、take.yaml を書くのに必要な材料を集める。"""
+    found: dict = {"warnings": []}
+
+    vdir = _find_dir(base, VIDEO_DIRS)
+    vfiles = _media_in(vdir, VIDEO_EXTS) if vdir else _media_in(base, VIDEO_EXTS)
+    if not vfiles:
+        die(f"映像が見つかりません: {base}\n"
+            f"（探した場所: {base.name}/ 直下, {'|'.join(VIDEO_DIRS)}/）")
+    found["video_files"] = vfiles
+    found["video_pattern"] = _pattern_for(vfiles, vdir.name if vdir else "")
+
+    ldir, rdir = _find_dir(base, LEFT_DIRS), _find_dir(base, RIGHT_DIRS)
+    if ldir and rdir:
+        lf, rf = _media_in(ldir, (".wav",)), _media_in(rdir, (".wav",))
+        if not lf or not rf:
+            die(f"L/R フォルダはありますが wav がありません: {ldir.name}/ {rdir.name}/")
+        found["left_files"], found["right_files"] = lf, rf
+        found["left_pattern"] = _pattern_for(lf, ldir.name)
+        found["right_pattern"] = _pattern_for(rf, rdir.name)
+        if len(lf) != len(rf):
+            found["warnings"].append(
+                f"L({len(lf)}本) と R({len(rf)}本) でファイル数が違います")
+    else:
+        sdir = _find_dir(base, STEREO_DIRS)
+        sf = _media_in(sdir, (".wav",)) if sdir else _media_in(base, (".wav",))
+        if not sf:
+            die(f"音声が見つかりません: {base}\n"
+                f"（探した場所: L/ と R/, {'|'.join(STEREO_DIRS)}/, {base.name}/ 直下）")
+        found["stereo_files"] = sf
+        found["stereo_pattern"] = _pattern_for(sf, sdir.name if sdir else "")
+        found["warnings"].append(
+            "L/R 別ソースが見つからず stereo として書きました。"
+            "別録り 2ch なら audio.left / audio.right に直してください")
+
+    # 連結の可否は「全セグメント同一パラメータ」。違えば先に気付けるようにする。
+    params = {probe_video_params(v) for v in vfiles}
+    if len(params) > 1:
+        found["warnings"].append(
+            "映像セグメントのパラメータが揃っていません（無劣化連結に失敗します）: "
+            + " / ".join(sorted(params)))
+    found["video_params"] = sorted(params)[0] if params else ""
+    return found
+
+
+def render_take_yaml(base: Path, f: dict) -> str:
+    vdur = sum(probe_duration(p) for p in f["video_files"])
+    lines = [
+        f"# {base.name} — rehearsal-sync 設定（--init 生成。必ず目を通すこと）",
+        "#",
+        "#   rehearsal-sync take.yaml --dry-run     # 計画だけ確認",
+        "#   rehearsal-sync take.yaml               # 実行",
+        "#",
+        "# 走査で分かった実測値:",
+        f"#   映像 {len(f['video_files'])}本  {f['video_params']}  計 {vdur:.1f}s"
+        f" = {vdur/3600:.2f}h",
+    ]
+    if "left_files" in f:
+        ldur = sum(probe_duration(p) for p in f["left_files"])
+        rdur = sum(probe_duration(p) for p in f["right_files"])
+        lines += [f"#   L {len(f['left_files'])}本 計 {ldur:.1f}s"
+                  f" / R {len(f['right_files'])}本 計 {rdur:.1f}s"]
+        gap = max(ldur, rdur) - vdur
+        if abs(gap) > 60:
+            lines += [f"#   音声が映像より {gap/60:+.1f} 分長い（録り始め/止めの差。"
+                      "頭合わせは自動検出）"]
+    else:
+        sdur = sum(probe_duration(p) for p in f["stereo_files"])
+        lines += [f"#   stereo {len(f['stereo_files'])}本 計 {sdur:.1f}s"]
+    for w in f["warnings"]:
+        lines.append(f"# 要確認: {w}")
+
+    drift_on = vdur > DRIFT_MIN_SEC
+    long_take = vdur > LONG_TAKE_SEC
+    lines += [
+        "",
+        "version: 1",
+        "",
+        "video:",
+        f'  - "{f["video_pattern"]}"',
+        "",
+        "audio:",
+    ]
+    if "left_files" in f:
+        lines += [f'  left:  [ "{f["left_pattern"]}" ]',
+                  f'  right: [ "{f["right_pattern"]}" ]']
+    else:
+        lines += [f'  stereo: [ "{f["stereo_pattern"]}" ]']
+    lines += [
+        "",
+        "normalize:",
+        "  method: loudnorm          # 指示を聞き取る用途。演奏品質優先なら peak",
+        "",
+        "drift:",
+        f"  enabled: {'true' if drift_on else 'false'}"
+        + (f"             # {vdur/3600:.2f}h テイク。15ppm なら末尾で約 {vdur*15e-6:.2f}s ずれる"
+           if drift_on else "            # 1時間未満なので既定は off（迷えば true でよい）"),
+    ]
+    if drift_on:
+        lines.append(f"  window: {240 if long_take else 120}"
+                     + ("               # 長尺なので測定窓を広げる（既定 120）"
+                        if long_take else "               # 既定値"))
+    lines += ["", "sync:", "  verify: true"]
+    if long_take:
+        lines.append("  verify_probes: 7          # 2時間超なので既定の5より増やす")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def cmd_init(target: Path, force: bool) -> int:
+    if not target.is_dir():
+        die(f"--init にはテイクフォルダを渡してください: {target}")
+    base = target.resolve()
+    out = base / "take.yaml"
+    if out.exists() and not force:
+        die(f"既にあります: {out}\n上書きしてよければ --force を付けてください")
+    f = scan_take(base)
+    text = render_take_yaml(base, f)
+    out.write_text(text, encoding="utf-8")
+    log(f"rehearsal-sync: wrote {out}")
+    for w in f["warnings"]:
+        log(f"  要確認: {w}")
+    log("  中身を確認したら: rehearsal-sync "
+        f"{out.name} --dry-run  （{base} で実行）")
+    return 0
 
 
 def concat_media(runner: Runner, tool: str, inputs: list[Path], output: Path,
@@ -188,6 +383,39 @@ def verify_alignment(video: Path, audio: Path, offset: float, rate: int,
     return r.returncode == 0
 
 
+def assert_channels_coherent(l_src: Path, r_src: Path, off_l: float, off_r: float,
+                             rate: int, probes: int, window: float,
+                             min_score: float, tol: float, force: bool) -> None:
+    """L と R の *相対* 整合を検証する。
+
+    なぜ要るか: 各チャンネルは映像へ個別に同期される。映像に対する残差が
+    それぞれ許容内（例 ±0.1s）でも、両者の差はその 2 倍まで開きうる。
+    人間の耳は L/R 間の時間差を 1〜2ms で音像の偏りとして知覚するので、
+    映像基準の tolerance では粗すぎる。実際に 29ms のずれを聞き取られた事例がある。
+
+    ずれが時間とともに増える場合はドリフト補正の残差が食い違っている。
+    その場合は片方を他方へ合わせる（定数シフト＋atempo）必要がある。
+    """
+    log("    [verify L↔R] チャンネル間の相対整合を検証...")
+    r = subprocess.run(
+        [str(ADV / "audio-sync-verify"), str(l_src), str(r_src),
+         "--offset", f"{off_r - off_l:.6f}", "--probes", str(probes),
+         "--window", str(window), "--rate", str(rate),
+         "--min-score", str(min_score), "--tolerance", str(tol)],
+        check=False,
+    )
+    if r.returncode == 0:
+        return
+    msg = (f"L↔R の相対整合が許容 {tol*1000:.0f}ms を超えています。\n"
+           f"  各chは映像に対しては合っていても、左右の差は音像の偏りとして聞こえます。\n"
+           f"  残差が時刻とともに増えているなら、ドリフト補正の残差が食い違っています。\n"
+           f"  対処: sync.channel_tolerance を実態に合わせる / drift.window を広げて\n"
+           f"        再測定する / --force で強行する")
+    if not force:
+        die(msg)
+    log(f"    WARNING: {msg}")
+
+
 def assert_sync_ok(video: Path, results: list, min_score: float, verify_on: bool,
                    probes: int, window: float, tol: float, rate: int,
                    force: bool) -> None:
@@ -255,13 +483,20 @@ def main() -> int:
         prog="rehearsal-sync",
         description="YAML 1 枚で一次ファイルから同期・差し替え済み映像を生成。",
     )
-    ap.add_argument("config", help="take.yaml のパス")
+    ap.add_argument("config", help="take.yaml のパス（--init のときはテイクフォルダ）")
+    ap.add_argument("--init", action="store_true",
+                    help="テイクフォルダを走査して take.yaml を生成し終了する。"
+                         "既存の take.yaml は上書きしない（--force で上書き）")
     ap.add_argument("--dry-run", action="store_true", help="実行せず計画を表示")
     ap.add_argument("--keep-work", action="store_true", help="中間生成物を消さない")
     ap.add_argument("--force", action="store_true",
-                    help="同期の信頼度が低くても中断せず続行する")
+                    help="同期の信頼度が低くても中断せず続行する"
+                         "（--init 時は take.yaml の上書きを許可）")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+
+    if args.init:
+        return cmd_init(Path(args.config), args.force)
 
     cfg_path = Path(args.config).resolve()
     if not cfg_path.is_file():
@@ -415,6 +650,12 @@ def main() -> int:
                            [("L", l_src, offL, scL), ("R", r_src, offR, scR)],
                            min_score, verify_on, verify_probes, verify_window,
                            tolerance, rate, args.force)
+            # 各chが映像に合っていても、L↔R の差は別問題（音像の偏りとして聞こえる）
+            if verify_on:
+                assert_channels_coherent(
+                    l_src, r_src, offL, offR, rate, verify_probes, verify_window,
+                    min_score, float(sync.get("channel_tolerance", 0.005)),
+                    args.force)
             fc = ";".join([
                 channel_filter(1, offL, sr, "la"),
                 channel_filter(2, offR, sr, "ra"),

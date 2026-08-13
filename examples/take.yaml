@@ -4,6 +4,7 @@
 # 一次ファイル（カメラ映像 + 別録り L/R 音声）から、同期・差し替え済み
 # 映像を 1 コマンドで生成するための宣言的設定。
 #
+#   rehearsal-sync <take_dir> --init       # フォルダを走査して take.yaml の初版を書く
 #   rehearsal-sync take.yaml
 #   rehearsal-sync take.yaml --dry-run     # 実行される配管コマンドを列挙するだけ
 #   rehearsal-sync take.yaml --keep-work   # 中間生成物を残す（既定は完了時に削除）
