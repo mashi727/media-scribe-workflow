@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+audio-features — 動画/音声から 1 秒ごとの音響特徴量を作る。
+
+演奏区間の検出に使う。字幕だけでは「小音量の部分合奏」も「演奏中の指示」も
+拾えないので、音の側から独立した根拠を用意する。
+
+出力: <out>.npz
+    db      1秒ごとの実効音圧 dBFS
+    low     30-250Hz のパワー比（低音楽器・ベース）
+    mid     250-1000Hz のパワー比
+    hi      2000-4000Hz のパワー比（子音・シンバル）
+    sr      解析サンプルレート
+    seconds 解析秒数
+
+合奏は概ね -16〜-26 dBFS、発話は -29 dBFS 前後に分離する（実測値・会場依存）。
+**閾値は必ず --report の分位点を見てから決めること。** 会場・マイク位置・
+ゲイン設定で絶対値は動くので、決め打ちの dB を持ち込まない。
+
+ffmpeg で 8kHz モノラルに落としてストリーム処理するため、中間 raw ファイルは
+作らない（3時間半で約 194MB を節約）。
+
+Usage:
+    audio-features rehearsal.mp4 -o feat.npz
+    audio-features take_L.wav -o feat.npz --report
+    audio-features take.mp4 -o feat.npz --report \\
+        --probe 0:15:00-0:18:00:MUSIC --probe 0:02:00-0:08:00:SPEECH
+
+依存: ffmpeg, numpy
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+
+SR = 8000
+CHUNK_SEC = 600      # 一度に処理する秒数
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-features: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def hhmmss(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+
+
+def parse_hhmmss(s: str) -> float:
+    parts = [float(x) for x in s.strip().split(":")]
+    total = 0.0
+    for p in parts:
+        total = total * 60 + p
+    return total
+
+
+def features(path: Path) -> dict:
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path),
+           "-map", "0:a:0", "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    if proc.stdout is None:
+        die("ffmpeg の出力を読めません")
+    win = np.hanning(SR)
+    freq = np.fft.rfftfreq(SR, 1 / SR)
+    sel = {
+        "low": (freq >= 30) & (freq < 250),
+        "mid": (freq >= 250) & (freq < 1000),
+        "hi": (freq >= 2000) & (freq < 4000),
+    }
+    acc: dict = {k: [] for k in ("db", "low", "mid", "hi")}
+    tail = b""
+    bytes_per_chunk = SR * 2 * CHUNK_SEC
+    while True:
+        buf = proc.stdout.read(bytes_per_chunk)
+        if not buf:
+            break
+        buf = tail + buf
+        n = len(buf) // (SR * 2)
+        tail = buf[n * SR * 2:]
+        if n == 0:
+            continue
+        x = np.frombuffer(buf[:n * SR * 2], dtype=np.int16).astype(np.float32) / 32768.0
+        x = x.reshape(n, SR)
+        rms = np.sqrt((x ** 2).mean(axis=1)) + 1e-9
+        acc["db"].append(20 * np.log10(rms))
+        P = np.abs(np.fft.rfft(x * win, axis=1)) ** 2
+        tot = P.sum(axis=1) + 1e-12
+        for k, mask in sel.items():
+            acc[k].append(P[:, mask].sum(axis=1) / tot)
+    proc.stdout.close()
+    rc = proc.wait()
+    if rc != 0:
+        die(f"ffmpeg failed (rc={rc}): {path}")
+    return {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in acc.items()}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="audio-features", add_help=True)
+    ap.add_argument("media", help="mp4 / wav / mp3 など ffmpeg が読めるもの")
+    ap.add_argument("-o", "--out", default="feat.npz", help="出力 npz (default: feat.npz)")
+    ap.add_argument("--report", action="store_true",
+                    help="分位点と probe 区間の統計を表示（閾値決めに使う）")
+    ap.add_argument("--probe", action="append", default=[], metavar="SPEC",
+                    help="'H:MM:SS-H:MM:SS:ラベル'。既知の音楽/発話区間を指定して比較する")
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    src = Path(args.media)
+    if not src.is_file():
+        die(f"input not found: {src}")
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        die(f"出力先が既にあります: {out}（--force で上書き）")
+
+    f = features(src)
+    n = len(f["db"])
+    if n == 0:
+        die("音声を取得できませんでした（音声ストリームがない可能性）")
+    np.savez(out, sr=np.int32(SR), seconds=np.int32(n),
+             db=f["db"], low=f["low"], mid=f["mid"], hi=f["hi"])
+    print(f"audio-features: 解析秒数 {n} ({hhmmss(n)}) -> {out}")
+
+    if args.report:
+        db = f["db"]
+        q = [1, 5, 25, 50, 75, 90, 95, 99]
+        print(f"  dBFS 分位点 {q} = {np.percentile(db, q).round(1).tolist()}")
+        print(f"  低域比 分位点 {q} = {np.percentile(f['low'], q).round(3).tolist()}")
+        for spec in args.probe:
+            rng, _, label = spec.rpartition(":")
+            if "-" not in rng:
+                print(f"  probe の書式が不正です: {spec}", file=sys.stderr)
+                continue
+            s, e = rng.split("-", 1)
+            i, j = int(parse_hhmmss(s)), int(parse_hhmmss(e))
+            i, j = max(0, i), min(n, j)
+            if j <= i:
+                continue
+            print(f"  {label:<24s} dB={db[i:j].mean():6.1f} low={f['low'][i:j].mean():.3f} "
+                  f"mid={f['mid'][i:j].mean():.3f} hi={f['hi'][i:j].mean():.3f}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

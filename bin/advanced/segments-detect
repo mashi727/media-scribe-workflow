@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+segments-detect — 音響特徴と字幕から「演奏 / トーク / 休憩」を切り分ける。
+
+入力:
+    --feat  audio-features が出した npz（1秒ごとの dBFS と帯域比）
+    --sub   字幕 SRT（srt-cap-spans 済みを推奨。複数指定可）
+    --yt    YouTube 自動生成字幕（任意）。[音楽] マーカーを演奏の傍証に足す
+
+判定の考え方:
+    演奏 = 音量あり かつ 字幕なし
+    トーク = 字幕あり
+    休憩 = 音量なし かつ 字幕なし
+
+    字幕だけでは「演奏中の短い指示」で演奏が途切れ、音量だけでは「休憩中の
+    ざわめき」を演奏と誤る。両方を使って初めて分離できる。
+
+閾値:
+    既定は判別分析法（Otsu）で dBFS 分布から自動決定する。会場・マイク位置・
+    ゲインで絶対値が動くので、決め打ちの dB を持ち込まない。--thr で固定も可。
+
+出力:
+    segments.json  … [{start, end, kind, mean_db, speech_ratio}, ...]
+    --chapters FILE … Chaptr / vce-* が読む 'H:MM:SS.mmm タイトル' 形式。
+                      休憩・開始前・終了後は '--' 接頭辞を付ける（除外区間の規約）。
+
+Usage:
+    segments-detect --feat feat.npz --sub work_capped.srt -o segments.json
+    segments-detect --feat feat.npz --sub work_capped.srt \\
+        --chapters chapters_draft.txt --min-play 60 --min-break 120
+
+依存: numpy
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+
+CUE_RE = re.compile(
+    r"(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*\n(.*?)(?=\n\s*\n|\Z)",
+    re.S)
+MUSIC_MARK = re.compile(r"^\s*[\[［(（]\s*(音楽|拍手|Music|MUSIC)\s*[\]］)）]\s*$")
+
+KIND_JA = {"play": "演奏", "talk": "トーク", "break": "休憩"}
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"segments-detect: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def hhmmss_ms(sec: float) -> str:
+    ms = int(round(max(sec, 0.0) * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def hhmmss(sec: float) -> str:
+    s = int(sec)
+    return f"{s//3600}:{s%3600//60:02d}:{s%60:02d}"
+
+
+def parse_cues(path: Path) -> list:
+    out = []
+    for m in CUE_RE.finditer(path.read_text(encoding="utf-8")):
+        g = m.groups()
+        s = int(g[0]) * 3600 + int(g[1]) * 60 + int(g[2]) + int(g[3].ljust(3, "0")) / 1000
+        e = int(g[4]) * 3600 + int(g[5]) * 60 + int(g[6]) + int(g[7].ljust(3, "0")) / 1000
+        out.append((s, e, g[8].strip()))
+    return out
+
+
+def otsu(x: np.ndarray) -> float:
+    """判別分析法で 1 次元データを 2 クラスに分ける閾値を求める。"""
+    lo, hi = np.percentile(x, [1, 99])
+    bins = np.linspace(lo, hi, 256)
+    h, edges = np.histogram(x, bins=bins)
+    h = h.astype(float) / max(h.sum(), 1)
+    centers = (edges[:-1] + edges[1:]) / 2
+    w0 = np.cumsum(h)
+    w1 = 1 - w0
+    m0 = np.cumsum(h * centers) / np.maximum(w0, 1e-12)
+    m1 = (np.sum(h * centers) - np.cumsum(h * centers)) / np.maximum(w1, 1e-12)
+    var = w0 * w1 * (m0 - m1) ** 2
+    return float(centers[int(np.argmax(var))])
+
+
+def smooth_bool(b: np.ndarray, win: int) -> np.ndarray:
+    """多数決の移動窓で 1 秒単位のちらつきを均す。"""
+    if win <= 1:
+        return b
+    k = np.ones(win)
+    s = np.convolve(b.astype(float), k, mode="same")
+    return s > (win / 2.0)
+
+
+def runs(labels: np.ndarray) -> list:
+    out = []
+    start = 0
+    for i in range(1, len(labels) + 1):
+        if i == len(labels) or labels[i] != labels[start]:
+            out.append((start, i, labels[start]))
+            start = i
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="segments-detect", add_help=True)
+    ap.add_argument("--feat", required=True, help="audio-features の npz")
+    ap.add_argument("--sub", action="append", default=[], help="字幕 SRT（複数可）")
+    ap.add_argument("--yt", help="YouTube 自動生成字幕（[音楽] マーカーを傍証に使う）")
+    ap.add_argument("-o", "--out", default="segments.json")
+    ap.add_argument("--chapters", metavar="FILE", help="章立て候補も書き出す")
+    ap.add_argument("--thr", type=float, default=None,
+                    help="演奏とみなす dBFS 下限（既定: Otsu で自動決定）")
+    ap.add_argument("--smooth", type=int, default=9, help="平滑化の窓 秒 (default: 9)")
+    ap.add_argument("--min-play", type=float, default=45, help="演奏の最短秒 (default: 45)")
+    ap.add_argument("--min-break", type=float, default=90, help="休憩の最短秒 (default: 90)")
+    ap.add_argument("--min-talk", type=float, default=20, help="トークの最短秒 (default: 20)")
+    ap.add_argument("--pad", type=float, default=1.0, help="字幕マスクの前後余裕 秒")
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    feat = Path(args.feat)
+    if not feat.is_file():
+        die(f"feat not found: {feat}")
+    for p in (Path(args.out), *( [Path(args.chapters)] if args.chapters else [])):
+        if p.exists() and not args.force:
+            die(f"出力先が既にあります: {p}（--force で上書き）")
+
+    d = np.load(feat)
+    db = d["db"].astype(float)
+    hi = d["hi"].astype(float) if "hi" in d else np.zeros_like(db)
+    n = len(db)
+
+    # --- 字幕マスク ---
+    speech = np.zeros(n, bool)
+    ncue = 0
+    for sp in args.sub:
+        p = Path(sp)
+        if not p.is_file():
+            die(f"sub not found: {p}")
+        for s, e, t in parse_cues(p):
+            if not t or MUSIC_MARK.match(t):
+                continue
+            a = max(0, int(s - args.pad))
+            b = min(n, int(e + args.pad) + 1)
+            if b > a:
+                speech[a:b] = True
+            ncue += 1
+
+    # --- 音量閾値 ---
+    thr = args.thr if args.thr is not None else otsu(db)
+    loud = db > thr
+
+    # --- A系（任意）: [音楽] マーカーを演奏の傍証に足す ---
+    ytmask = np.zeros(n, bool)
+    if args.yt:
+        p = Path(args.yt)
+        if not p.is_file():
+            die(f"yt not found: {p}")
+        for s, e, t in parse_cues(p):
+            if MUSIC_MARK.match(t):
+                ytmask[max(0, int(s)):min(n, int(e) + 1)] = True
+
+    speech_s = smooth_bool(speech, args.smooth)
+    loud_s = smooth_bool(loud | ytmask, args.smooth)
+
+    lab = np.where(speech_s, 1, np.where(loud_s, 0, 2))   # 0=play 1=talk 2=break
+    names = {0: "play", 1: "talk", 2: "break"}
+    minlen = {0: args.min_play, 1: args.min_talk, 2: args.min_break}
+
+    # 短すぎる run を隣へ吸収する。
+    # 「最短の違反 run を1つ潰す」を繰り返す。毎回 run を数え直さないと、
+    # 古い隣接情報を見て逆に分断してしまう（区間数が増える）。
+    # 1 回の吸収で run 数は必ず 1 以上減るので、必ず停止する。
+    while True:
+        rs = runs(lab)
+        viol = [(b - a, i) for i, (a, b, k) in enumerate(rs) if b - a < minlen[k]]
+        if not viol or len(rs) == 1:
+            break
+        _, i = min(viol)
+        a, b, _k = rs[i]
+        prev = rs[i - 1] if i > 0 else None
+        nxt = rs[i + 1] if i + 1 < len(rs) else None
+        if prev and nxt:                       # 長い方に寄せる
+            target = prev[2] if (prev[1] - prev[0]) >= (nxt[1] - nxt[0]) else nxt[2]
+        else:
+            target = (prev or nxt)[2]
+        lab[a:b] = target
+
+    segs = []
+    for a, b, k in runs(lab):
+        segs.append({
+            "start": float(a), "end": float(b), "kind": names[k],
+            "dur": float(b - a),
+            "mean_db": round(float(db[a:b].mean()), 1),
+            "hi_ratio": round(float(hi[a:b].mean()), 3),
+            "speech_ratio": round(float(speech[a:b].mean()), 3),
+        })
+
+    Path(args.out).write_text(json.dumps(segs, ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    tot = {k: 0.0 for k in names.values()}
+    for s in segs:
+        tot[s["kind"]] += s["dur"]
+    log(f"segments-detect: 閾値 {thr:.1f} dBFS"
+        + ("（Otsu で自動決定）" if args.thr is None else "（指定値）"))
+    log(f"  cue        : {ncue}  / 解析 {hhmmss(n)}")
+    log(f"  区間        : {len(segs)}  "
+        + "  ".join(f"{KIND_JA[k]}={tot[k]/60:.0f}min" for k in ("play", "talk", "break")))
+    for s in segs:
+        if s["kind"] == "play" and s["dur"] >= 300:
+            log(f"    演奏 {hhmmss(s['start'])}-{hhmmss(s['end'])} "
+                f"({s['dur']/60:.1f}min, {s['mean_db']}dB)")
+
+    if args.chapters:
+        lines = []
+        nplay = 0
+        for i, s in enumerate(segs):
+            if s["kind"] == "play":
+                nplay += 1
+                title = f"演奏 {nplay:02d}"
+            elif s["kind"] == "talk":
+                title = "トーク"
+            else:
+                # 除外候補。先頭/末尾は開始前・終了後として区別する
+                if i == 0:
+                    title = "--開始前"
+                elif i == len(segs) - 1:
+                    title = "--終了後"
+                else:
+                    title = "--休憩"
+            lines.append(f"{hhmmss_ms(s['start'])} {title}")
+        Path(args.chapters).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        log(f"segments-detect: wrote {args.chapters}（'--' 接頭辞は除外区間）")
+    log(f"segments-detect: wrote {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

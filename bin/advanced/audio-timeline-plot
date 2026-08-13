@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+audio-timeline-plot — 演奏／発話／休憩を目で判定するための一覧画像を作る。
+
+閾値を決める前に、まず素材の全体像を見るための道具。
+1 行 = 既定 30 分の横スクロールなし表示で、上下に時間軸を揃えた 3 段を描く:
+
+    上段  スペクトログラム（0-4kHz）… 演奏か発話かは形で分かる
+    中段  1 秒ごとの dBFS ………………… 音量の絶対値。閾値決めの根拠
+    下段  発話帯（SRT の cue）……………… 字幕があった時間
+
+「音量あり かつ 字幕なし」が演奏、「音量なし かつ 字幕なし」が休憩、
+「字幕あり」が指揮者トーク、という読み方をする。3 段を重ねる意味はそこにある。
+
+Usage:
+    audio-timeline-plot take_L.wav -o overview.png
+    audio-timeline-plot take_L.wav --srt work.srt -o overview.png
+    audio-timeline-plot take_L.wav --srt work.srt --row-min 20 -o overview.png
+
+依存: ffmpeg, numpy, matplotlib
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+
+SR = 8000
+NFFT = 1024
+HOP = 800            # 0.1s
+CUE_RE = re.compile(
+    r"(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d\d):(\d\d):(\d\d)[,.](\d{1,3})")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-timeline-plot: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def read_mono(path: Path) -> np.ndarray:
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path),
+           "-map", "0:a:0", "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
+    r = subprocess.run(cmd, capture_output=True, check=False)
+    if r.returncode != 0:
+        die(f"ffmpeg failed: {r.stderr.decode('utf-8', 'replace')[:400]}")
+    return np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def spectrogram(x: np.ndarray):
+    n = 1 + max(0, (len(x) - NFFT) // HOP)
+    idx = np.arange(NFFT)[None, :] + HOP * np.arange(n)[:, None]
+    frames = x[idx] * np.hanning(NFFT)[None, :]
+    S = np.abs(np.fft.rfft(frames, axis=1)) ** 2
+    return 10 * np.log10(S.T + 1e-12)      # (freq, time)
+
+
+def cue_spans(srt: Path) -> list:
+    spans = []
+    for m in CUE_RE.finditer(srt.read_text(encoding="utf-8")):
+        g = [int(v) for v in m.groups()]
+        s = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
+        e = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
+        spans.append((s, e))
+    return spans
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="audio-timeline-plot", add_help=True)
+    ap.add_argument("media", help="mp4 / wav / mp3 など")
+    ap.add_argument("-o", "--out", default="overview.png")
+    ap.add_argument("--srt", help="発話帯として重ねる SRT（srt-cap-spans 済みを推奨）")
+    ap.add_argument("--segments", help="segments-detect の json。判定結果を色で重ねる")
+    ap.add_argument("--row-min", type=float, default=30.0, help="1 行の分数 (default: 30)")
+    ap.add_argument("--fmax", type=float, default=4000, help="表示する上限周波数 Hz")
+    ap.add_argument("--dpi", type=int, default=110)
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    src = Path(args.media)
+    if not src.is_file():
+        die(f"input not found: {src}")
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        die(f"出力先が既にあります: {out}（--force で上書き）")
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    for cand in ("Hiragino Sans", "Hiragino Maru Gothic Pro", "Noto Sans CJK JP"):
+        if any(f.name == cand for f in matplotlib.font_manager.fontManager.ttflist):
+            matplotlib.rcParams["font.family"] = cand
+            break
+
+    print("audio-timeline-plot: decoding ...", file=sys.stderr)
+    x = read_mono(src)
+    dur = len(x) / SR
+    print(f"  duration   : {dur/3600:.2f}h", file=sys.stderr)
+
+    print("audio-timeline-plot: spectrogram ...", file=sys.stderr)
+    S = spectrogram(x)
+    freqs = np.fft.rfftfreq(NFFT, 1 / SR)
+    fsel = freqs <= args.fmax
+    S = S[fsel]
+    t_spec = np.arange(S.shape[1]) * HOP / SR
+
+    nsec = int(dur)
+    xs = x[:nsec * SR].reshape(nsec, SR)
+    db = 20 * np.log10(np.sqrt((xs ** 2).mean(axis=1)) + 1e-9)
+
+    spans = cue_spans(Path(args.srt)) if args.srt else []
+
+    segs = []
+    if args.segments:
+        import json
+        segs = json.loads(Path(args.segments).read_text(encoding="utf-8"))
+    SEG_COLOR = {"play": "#2ca02c", "talk": "#ff7f0e", "break": "#7f7f7f"}
+
+    row = args.row_min * 60
+    nrow = int(np.ceil(dur / row))
+    fig, axes = plt.subplots(nrow * 2, 1, figsize=(16, 2.6 * nrow),
+                             gridspec_kw={"height_ratios": [3, 1] * nrow})
+    vmin, vmax = np.percentile(S, [40, 99.5])
+
+    for r in range(nrow):
+        t0, t1 = r * row, min((r + 1) * row, dur)
+        ax_s, ax_d = axes[2 * r], axes[2 * r + 1]
+
+        i0 = np.searchsorted(t_spec, t0)
+        i1 = np.searchsorted(t_spec, t1)
+        ax_s.imshow(S[:, i0:i1], aspect="auto", origin="lower", cmap="magma",
+                    vmin=vmin, vmax=vmax, extent=[t0 / 60, t1 / 60, 0, args.fmax / 1000])
+        ax_s.set_ylabel("kHz", fontsize=8)
+        ax_s.set_xlim(t0 / 60, t1 / 60)
+        ax_s.tick_params(labelbottom=False, labelsize=8)
+        ax_s.set_title(f"{int(t0//60)}–{int(t1//60)} min", fontsize=9, loc="left", pad=2)
+        # 判定結果はスペクトログラム上端の帯で示す（絵そのものは隠さない）
+        for sg in segs:
+            s, e = float(sg["start"]), float(sg["end"])
+            if e < t0 or s > t1:
+                continue
+            ax_s.add_patch(Rectangle(
+                (max(s, t0) / 60, args.fmax / 1000 * 0.94),
+                (min(e, t1) - max(s, t0)) / 60, args.fmax / 1000 * 0.06,
+                color=SEG_COLOR.get(sg["kind"], "#ffffff"), alpha=0.9, lw=0))
+
+        tt = np.arange(int(t0), min(int(t1), len(db)))
+        ax_d.plot(tt / 60, db[tt], lw=0.5, color="#1f77b4")
+        ax_d.set_xlim(t0 / 60, t1 / 60)
+        ax_d.set_ylim(-60, 0)
+        ax_d.set_ylabel("dBFS", fontsize=8)
+        ax_d.grid(alpha=0.25, lw=0.4)
+        ax_d.tick_params(labelsize=8)
+        # 発話帯は下端のリボンで示す（音圧の線を隠さない）
+        for s, e in spans:
+            if e < t0 or s > t1:
+                continue
+            ax_d.add_patch(Rectangle((max(s, t0) / 60, -60),
+                                     (min(e, t1) - max(s, t0)) / 60, 5,
+                                     color="#d62728", alpha=0.85, lw=0))
+        if r == nrow - 1:
+            ax_d.set_xlabel("min", fontsize=8)
+
+    sub = "上: スペクトログラム / 中: dBFS / 下端の赤帯: 発話(SRT)"
+    if segs:
+        sub += "  ｜ 上端の帯 = 判定: 緑=演奏 橙=トーク 灰=休憩"
+    fig.suptitle(f"{src.name}  —  {sub}", fontsize=11, y=0.999)
+    fig.tight_layout(h_pad=0.5)
+    fig.savefig(out, dpi=args.dpi)
+    print(f"audio-timeline-plot: wrote {out}  ({nrow} 行 × {args.row_min:g} 分)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
