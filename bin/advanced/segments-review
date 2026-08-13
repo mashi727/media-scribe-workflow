@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""
+segments-review — 合奏1回ごとの「直前の指示」と「直後の講評」を1枚にまとめる。
+
+何のためか:
+    検出した演奏区間をそのまま眺めても、それが何の返しだったか分からない。
+    返しのねらいは**直前の60〜120秒**に、評価は**直後の60秒**にほぼ必ずある。
+    そこだけを抜いて並べれば、動画を頭から見直さずに中身を確認できる。
+
+    全文の context.txt（3エンジン×全区間で数百KB）は人が読む量ではない。
+    こちらは同じ材料を「1区間あたり十数行」に畳む。
+
+複数エンジンの畳み方:
+    同じ発話が3系統に別々の表記・別々の時刻で出る（Whisper は長い区間を1 cue に
+    まとめ、Deepgram は細かく切るので、同一発話でも開始が数秒ずれる）。
+    そこで **長い版から順に採用し、前後 --dup-window 秒に似た版があれば断片として
+    捨てる**。内容が違えば残るので、片方だけが拾った指示は落ちない。
+    要約はしない。校正もしない。**残るのは必ず実在の発話**（選択であって生成ではない）。
+
+    実測: 3系統 2479 発話 → 1562 発話。
+
+Usage:
+    segments-review --segments segments.json --sub a.srt --sub b.srt -o review.md
+    segments-review --segments segments.json --sub *.srt \\
+        --chapters 原本.txt --before 90 --after 60 -o review.md
+
+依存: Python 標準ライブラリのみ
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+CUE_RE = re.compile(
+    r"(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*\n(.*?)(?=\n\s*\n|\Z)",
+    re.S)
+CHAP_RE = re.compile(r"^\s*(\d+):(\d\d):(\d\d)[.,](\d{1,3})\s+(.*\S)\s*$")
+# 意味を持たない相槌だけの行は確認の邪魔になるので落とす
+NOISE = re.compile(r"^[\sはいえっとあのうんそうねまあ、。？?！!ーっ]*$")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"segments-review: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def hms(sec: float) -> str:
+    s = int(sec)
+    return f"{s//3600}:{s%3600//60:02d}:{s%60:02d}"
+
+
+def load_srt(path: Path) -> list:
+    out = []
+    for m in CUE_RE.finditer(path.read_text(encoding="utf-8")):
+        g = m.groups()
+        s = int(g[0])*3600 + int(g[1])*60 + int(g[2]) + int(g[3].ljust(3, "0"))/1000
+        t = re.sub(r"\[spk(\d+)\]\s*", r"", g[8].strip().replace("\n", ""))
+        spk = re.match(r"\[spk(\d+)\]", g[8].strip())
+        if t:
+            out.append((s, t, spk.group(1) if spk else ""))
+    return out
+
+
+def similar(a: str, b: str) -> float:
+    """文字集合の重なり。表記揺れがあっても同一発話なら高くなる。"""
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / min(len(sa), len(sb))
+
+
+def merge_engines(streams: list, win: float, keep_sim: float) -> list:
+    """同じ発話の別エンジン版・断片を畳む。
+
+    エンジン間で同一発話の時刻が数秒ずれる（Whisper は長い区間を1 cue にまとめ、
+    Deepgram は細かく切る）ので、時刻のクラスタリングだけでは畳めない。
+    **長い版から順に採用し、その前後 win 秒に似た版があれば断片として捨てる**。
+    要約ではなく選択なので、残るのは必ず実在の発話。
+    """
+    allc = [c for st in streams for c in st]
+    allc.sort(key=lambda c: (-len(c[1]), c[0]))
+    kept: list = []
+    for c in allc:
+        dup = False
+        for k in kept:
+            if abs(c[0] - k[0]) <= win and similar(c[1], k[1]) >= keep_sim:
+                dup = True
+                break
+        if not dup:
+            kept.append(c)
+    return sorted(kept, key=lambda c: c[0])
+
+
+def load_chapters(path: Path) -> list:
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = CHAP_RE.match(line)
+        if m:
+            g = m.groups()
+            out.append((int(g[0])*3600 + int(g[1])*60 + int(g[2]), g[4]))
+    return sorted(out)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="segments-review", add_help=True)
+    ap.add_argument("--segments", required=True, help="segments-detect の json")
+    ap.add_argument("--sub", action="append", default=[], required=True,
+                    help="字幕 SRT（複数指定可。3系統あるほど取りこぼしが減る）")
+    ap.add_argument("--chapters", help="章立て txt（あれば区間に章名を付ける）")
+    ap.add_argument("-o", "--out", default="review.md")
+    ap.add_argument("--before", type=float, default=90, help="直前を何秒さかのぼるか")
+    ap.add_argument("--after", type=float, default=60, help="直後を何秒見るか")
+    ap.add_argument("--min-dur", type=float, default=20,
+                    help="この秒数未満の区間は出さない（口唱・物音の除去）")
+    ap.add_argument("--merge-gap", type=float, default=45,
+                    help="この秒数以内で途切れた区間は1回の演奏とみなす")
+    ap.add_argument("--dup-window", type=float, default=10.0,
+                    help="この秒数以内の似た発話は同一とみなして畳む")
+    ap.add_argument("--dup-sim", type=float, default=0.62,
+                    help="この類似度以上なら同一発話とみなす")
+    ap.add_argument("--min-chars", type=int, default=6,
+                    help="この文字数未満の断片は出さない")
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    segs = json.loads(Path(args.segments).read_text(encoding="utf-8"))
+    if not segs:
+        die("segments が空です")
+    streams = []
+    for sp in args.sub:
+        p = Path(sp)
+        if not p.is_file():
+            die(f"sub not found: {p}")
+        streams.append(load_srt(p))
+    cues = merge_engines(streams, args.dup_window, args.dup_sim)
+    chaps = load_chapters(Path(args.chapters)) if args.chapters else []
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        die(f"出力先が既にあります: {out}（--force で上書き）")
+
+    # 演奏区間の統合
+    segs = sorted(segs, key=lambda s: s["start"])
+    ev = []
+    for s in segs:
+        if ev and s["start"] - ev[-1]["end"] <= args.merge_gap:
+            ev[-1]["end"] = max(ev[-1]["end"], s["end"])
+        else:
+            ev.append({"start": s["start"], "end": s["end"]})
+    ev = [e for e in ev if e["end"] - e["start"] >= args.min_dur]
+
+    def chap_of(t):
+        cur = ""
+        for cs, ct in chaps:
+            if cs <= t:
+                cur = ct
+            else:
+                break
+        return cur
+
+    def span(a, b):
+        return [c for c in cues if a <= c[0] < b and not NOISE.match(c[1])
+                and len(re.sub(r"[\s、。？?！!ー・]", "", c[1])) >= args.min_chars]
+
+    lines = [f"# 合奏ごとの確認シート", "",
+             f"演奏 {len(ev)} 件 / 直前 {args.before:g}秒・直後 {args.after:g}秒 を抜粋。",
+             "字幕は原文のまま（要約・校正なし）。複数エンジンのうち最も長い版を代表にし、",
+             "内容が大きく違う版は併記している。", ""]
+    prev_ch = None
+    for i, e in enumerate(ev, 1):
+        ch = chap_of(e["start"])
+        if ch != prev_ch:
+            lines += ["", f"## {ch or '（章なし）'}", ""]
+            prev_ch = ch
+        dur = e["end"] - e["start"]
+        lines.append(f"### {i:02d}. {hms(e['start'])}–{hms(e['end'])} "
+                     f"（{dur/60:.1f}分）")
+        lines.append("")
+        lines.append("- [ ] 確認済み")
+        lines.append("")
+        before = span(e["start"] - args.before, e["start"])
+        after = span(e["end"], e["end"] + args.after)
+        lines.append("**直前の指示**")
+        lines += [f"- `{hms(t)}` {tx}" for t, tx, _ in before[-8:]] or ["- （なし）"]
+        lines.append("")
+        lines.append("**直後の講評**")
+        lines += [f"- `{hms(t)}` {tx}" for t, tx, _ in after[:8]] or ["- （なし）"]
+        lines.append("")
+
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"segments-review: wrote {out}  （演奏 {len(ev)} 件 / {len(cues)} 発話から抽出）",
+          file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
