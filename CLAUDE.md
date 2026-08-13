@@ -145,10 +145,29 @@ media-scribe-workflow/
 - [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え、--driftでドリフト補正）
 - [x] bin/rehearsal-sync の作成（take.yaml 1枚で一次ファイル→同期済み映像を全自動生成）
 - [x] examples/take.yaml の作成（per-take 設定スキーマ）
+- [x] bin/advanced/audio-transcribe の作成（Whisper 系。既定 large-v3、SRT + words.json + meta.json）
+- [x] bin/advanced/audio-transcribe-dg の作成（Deepgram Nova-3。同一契約で出力）
+- [x] examples/terms-orchestral.txt の作成（両エンジン共通の語彙注入ファイル）
+- [x] rehearsal-sync --init（テイクフォルダ走査 → take.yaml 生成。尺から drift を自動判定）
 
 ## 未実装タスク
 
 - [ ] bin/advanced/audio-extract-channel（チャンネル抽出）
+- [ ] bin/advanced/transcript-merge（2エンジンの時刻アライン + confidence 重み付き統合）
+- [ ] golden set（代表10分の人手正解）と WER/取りこぼし率の実測
+
+## 文字起こしの一次資料ポリシー
+
+一次資料は **メディア + `.words.json` + `.meta.json`** の3点。`.srt` はそこからの
+派生（可読層）であり、原本ではない。理由は SRT が規格として
+
+- 確信度を持てない（誤認識が確定事実の見た目になる）
+- 来歴を書く場所がない（コメント構文がない）
+- cue 分割・改行が表示上の編集判断で、観測単位へ戻せない
+- 話者・同時発話を表現できない
+
+から。校正は派生の解釈層で行い、`.srt` / `.words.json` へ書き戻さない。
+両エンジンとも `meta.asr.engine`（`whisper` / `deepgram`）と入力の `sha256` を残す。
 
 ## コマンド
 
@@ -182,10 +201,22 @@ bin/advanced/audio-drift-correct video.mp4 external.wav -o ext_fixed.wav  # 補�
 # 一次ファイル（カメラ映像 + 別録りL/R）から全自動（YAML 1枚）
 #   フォルダ例: take/{VID_*.mp4, L/*.wav, R/*.wav} + take.yaml
 #   L/R は独立レコーダーのため、各chを映像へ個別同期してから結合する
+bin/rehearsal-sync <take_dir> --init    # フォルダを走査して take.yaml を生成（要確認）
+bin/rehearsal-sync <take_dir> --init --force  # 既存 take.yaml を上書き
 bin/rehearsal-sync take.yaml            # 連結→loudnorm→各ch個別同期→結合mux
 bin/rehearsal-sync take.yaml --dry-run  # 計画のみ
 bin/rehearsal-sync take.yaml --keep-work -v  # 中間生成物を残す/詳細ログ
 # スキーマ: examples/take.yaml
+
+# 文字起こし（2エンジン並走。出力契約は共通: .srt / .words.json / .meta.json）
+#   入力は原盤の WAV/FLAC を使う（非可逆・低ビットレートは警告が出る）
+#   語彙ファイルは両エンジンで共用（1行1語・# コメント可）
+bin/advanced/audio-transcribe take_L.wav -o take_L_wp --terms examples/terms-orchestral.txt
+bin/advanced/audio-transcribe take_L.wav --no-word-timestamps --model kotoba-tech/kotoba-whisper-v2.0-faster  # 速度優先
+bin/advanced/audio-transcribe-dg take_L.wav -o take_L_dg --terms examples/terms-orchestral.txt --diarize
+bin/advanced/audio-transcribe-dg take_L.wav --dry-run    # 送信せず計画のみ
+#   Deepgram は DEEPGRAM_API_KEY（または --key-file）が必要。音声を外部送信する点に注意
+#   既存の出力があれば停止する（意図した上書きのみ --force）
 
 # LuaTeXコンパイル
 luatex-pdf <file.tex>

@@ -26,6 +26,10 @@
 ├── bin/vce-encode          VCE → チャプター付き単一動画
 └── bin/vce-split           VCE → チャプター分割動画
 
+[文字起こし (bin/advanced)]
+├── bin/advanced/audio-transcribe     Whisper 系 (faster-whisper, 既定 large-v3)
+└── bin/advanced/audio-transcribe-dg  Deepgram Nova-3 (REST)
+
 [統合ワークフロー]
 ├── bin/rehearsal-download  YouTube DL + Whisper 起動
 └── bin/rehearsal-finalize  PDF 生成 + チャプター抽出
@@ -60,6 +64,23 @@ CLI 配管ツール + レポートパイプライン      ⇆      動画チャ�
 | `video-chapters` | 複数動画をチャプター付きで結合 |
 | `ytdl` | YouTube 動画ダウンロード |
 | `jsonl2md` | JSONL → Markdown 変換 |
+
+### 文字起こし（2エンジン並走）
+
+同一素材を2エンジンで転写し、突き合わせて精度を上げるための組。**出力契約は共通**で、
+`<base>.srt`（可読層）/ `<base>.words.json`（機械忠実層・語ごと confidence）/
+`<base>.meta.json`（来歴・入力の sha256）を出す。
+
+| コマンド | 説明 |
+|---------|------|
+| `advanced/audio-transcribe` | Whisper 系（faster-whisper + stable-ts）。既定 `large-v3`。`--terms` で hotwords 注入 |
+| `advanced/audio-transcribe-dg` | Deepgram Nova-3（REST・標準ライブラリのみ）。`--terms` で Keyterm Prompting、`--diarize` で話者分離 |
+
+語彙ファイル（[examples/terms-orchestral.txt](examples/terms-orchestral.txt)）は両者で共用。
+一次資料は **メディア + `.words.json` + `.meta.json`**、`.srt` はその派生（原本ではない）。
+既存の出力があるときは停止する（上書きは `--force`）。
+
+`audio-transcribe-dg` は音声を外部 API へ送信する。`DEEPGRAM_API_KEY` が必要。
 
 ### レポートパイプライン
 
