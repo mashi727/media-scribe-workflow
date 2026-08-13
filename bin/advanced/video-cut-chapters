@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""
+video-cut-chapters — チャプターファイルの '--' 区間を除いて無劣化で切り出す。
+
+「原本＝全記録から不要部分（開始前・休憩・終了後）を除いたもの」を作るための道具。
+再エンコードしないので、原本を非可逆にせずに確定できる。
+
+入力:
+    動画 + チャプター .txt（'H:MM:SS.mmm タイトル'。Chaptr のサイドカー形式）
+    タイトルが '--' で始まる区間を除外する（vce-encode / vce-split と同じ規約）
+
+出力:
+    <out>.mp4          除外区間を取り除いた動画（-c copy 無劣化）
+    <out>.txt          時刻を詰め直したチャプター（原本の章立て）
+    <out>_youtube.txt  YouTube 説明欄用（HH:MM:SS タイトル）
+
+なぜ時刻の詰め直しが要るか:
+    区間を除くと後続の時刻が前へ動く。元のタイムラインのままの章立てを
+    原本に付けると全部ずれる。ここを機械的にやらないと必ず事故る。
+
+キーフレーム境界:
+    -c copy はキーフレームからしか切れない。各境界を「その時刻以前で最も近い
+    キーフレーム」へ寄せる（内容が欠けない方向）。実測でずれ量を報告する。
+
+Usage:
+    video-cut-chapters master.mp4                      # master.txt を自動で使う
+    video-cut-chapters master.mp4 -c chapters.txt -o 原本.mp4
+    video-cut-chapters master.mp4 --dry-run            # 計画のみ
+
+依存: ffmpeg
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+EXCLUDE_PREFIX = "--"
+LINE_RE = re.compile(r"^\s*(\d+):(\d\d):(\d\d)[.,](\d{1,3})\s+(.*\S)\s*$")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"video-cut-chapters: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def hms_ms(sec: float) -> str:
+    ms = int(round(max(sec, 0.0) * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def hms(sec: float) -> str:
+    s = int(sec)
+    return f"{s//3600:02d}:{s%3600//60:02d}:{s%60:02d}"
+
+
+def probe_duration(path: Path) -> float:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        die(f"尺を取得できません: {path}")
+    return 0.0
+
+
+def parse_chapters(path: Path) -> list:
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = LINE_RE.match(line)
+        if not m:
+            continue
+        g = m.groups()
+        t = int(g[0]) * 3600 + int(g[1]) * 60 + int(g[2]) + int(g[3].ljust(3, "0")) / 1000
+        out.append((t, g[4]))
+    return sorted(out)
+
+
+def keyframe_at_or_before(video: Path, t: float, look: float = 4.0) -> float:
+    """t 以前で最も近いキーフレーム時刻を返す（内容を欠かない方向へ寄せる）。"""
+    if t <= 0:
+        return 0.0
+    start = max(0.0, t - look)
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
+         "-show_entries", "frame=pts_time", "-of", "csv=p=0",
+         "-read_intervals", f"{start:.3f}%+{look + 0.5:.3f}", str(video)],
+        capture_output=True, text=True)
+    ts = [float(x) for x in r.stdout.split() if x.strip()]
+    cand = [x for x in ts if x <= t + 1e-6]
+    return max(cand) if cand else t
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="video-cut-chapters", add_help=True)
+    ap.add_argument("video")
+    ap.add_argument("-c", "--chapters", help="チャプター .txt（既定: <video>.txt）")
+    ap.add_argument("-o", "--output", help="出力動画（既定: <video>_cut.mp4）")
+    ap.add_argument("--dry-run", action="store_true", help="計画のみ")
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    video = Path(args.video)
+    if not video.is_file():
+        die(f"input not found: {video}")
+    cpath = Path(args.chapters) if args.chapters else video.with_suffix(".txt")
+    if not cpath.is_file():
+        die(f"チャプターファイルが見つかりません: {cpath}")
+    out = Path(args.output) if args.output else video.with_name(video.stem + "_cut.mp4")
+    out_txt = out.with_suffix(".txt")
+    out_yt = out.with_name(out.stem + "_youtube.txt")
+    if not args.dry_run and not args.force:
+        for p in (out, out_txt, out_yt):
+            if p.exists():
+                die(f"出力先が既にあります: {p}（--force で上書き）")
+
+    dur = probe_duration(video)
+    chapters = parse_chapters(cpath)
+    if not chapters:
+        die(f"チャプターを読めません: {cpath}")
+
+    # チャプター i の範囲は [t_i, t_{i+1})、最後は尺まで
+    spans = []
+    for i, (t, title) in enumerate(chapters):
+        end = chapters[i + 1][0] if i + 1 < len(chapters) else dur
+        spans.append((t, end, title))
+
+    keep = [(s, e, ti) for s, e, ti in spans if not ti.startswith(EXCLUDE_PREFIX)]
+    drop = [(s, e, ti) for s, e, ti in spans if ti.startswith(EXCLUDE_PREFIX)]
+    if not keep:
+        die("残す区間がありません（全部が '--' で始まっています）")
+
+    # 連続する keep をまとめる（無駄に切らない）
+    runs = []
+    for s, e, ti in keep:
+        if runs and abs(s - runs[-1][1]) < 1e-6:
+            runs[-1][1] = e
+            runs[-1][2].append((s, ti))
+        else:
+            runs.append([s, e, [(s, ti)]])
+
+    log(f"video-cut-chapters: {video.name}")
+    log(f"  chapters   : {cpath.name}  ({len(chapters)} 章)")
+    log(f"  除外       : {len(drop)} 区間 / {sum(e-s for s,e,_ in drop)/60:.1f} min")
+    for s, e, ti in drop:
+        log(f"                 {hms(s)}-{hms(e)}  {ti}")
+    log(f"  残す       : {len(runs)} ブロック / {sum(e-s for s,e,_ in runs)/60:.1f} min")
+
+    # キーフレームへ寄せる（開始側のみ。終端は次ブロックの開始で決まる）
+    snapped = []
+    max_shift = 0.0
+    for s, e, items in runs:
+        ks = keyframe_at_or_before(video, s)
+        max_shift = max(max_shift, s - ks)
+        snapped.append((ks, e, items))
+    log(f"  キーフレーム寄せ: 最大 {max_shift*1000:.0f} ms（内容が欠けない方向）")
+
+    if args.dry_run:
+        log("video-cut-chapters: --dry-run（実行しません）")
+        return 0
+
+    # concat demuxer で 1 パス無劣化連結
+    with tempfile.TemporaryDirectory(prefix="video-cut-chapters-") as td:
+        lst = Path(td) / "concat.txt"
+        body = []
+        for ks, e, _ in snapped:
+            body.append(f"file '{video.resolve()}'")
+            body.append(f"inpoint {ks:.6f}")
+            body.append(f"outpoint {e:.6f}")
+        lst.write_text("\n".join(body) + "\n", encoding="utf-8")
+        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-stats", "-f", "concat",
+               "-safe", "0", "-i", str(lst), "-c", "copy",
+               "-movflags", "+faststart", "-y", str(out)]
+        log(f"  writing    : {out.name} ...")
+        r = subprocess.run(cmd, check=False)
+        if r.returncode != 0:
+            die(f"ffmpeg failed (rc={r.returncode})")
+
+    # 章立ての時刻を詰め直す
+    new_ch = []
+    acc = 0.0
+    for ks, e, items in snapped:
+        for orig_t, title in items:
+            new_ch.append((acc + max(0.0, orig_t - ks), title))
+        acc += e - ks
+    out_txt.write_text(
+        f"# source: {out.name}\n"
+        f"# from: {video.name} ({cpath.name})\n"
+        + "".join(f"{hms_ms(t)} {ti}\n" for t, ti in new_ch), encoding="utf-8")
+    out_yt.write_text(
+        "".join(f"{hms(t)} {ti}\n" for t, ti in new_ch), encoding="utf-8")
+
+    log(f"video-cut-chapters: wrote {out.name} / {out_txt.name} / {out_yt.name}")
+    log(f"  出力尺     : {acc/3600:.2f}h（元 {dur/3600:.2f}h）")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
