@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""
+srt-cap-spans — 長尺 Whisper の「引き伸ばされた cue 終端」を発話速度から抑える。
+
+何を直すか:
+    faster-whisper/stable-ts に長尺（数時間）を一度に渡すと、VAD が無音を除いた
+    圧縮タイムライン上でデコードしてから実時間へ戻すため、除去区間をまたぐ
+    セグメントの終端が引き伸ばされる。数秒の発話が 1000 秒超の cue になる。
+    Silero VAD は音楽を発話と判定するので、演奏を含む素材で特に顕著に出る。
+
+    cue の *開始* は発話の立ち上がりに紐づいており信頼できる。壊れるのは終端だけ。
+    そこで「その文字数を喋るのに要する時間」で終端を抑える。
+
+なぜ ASR ツール側でやらないか:
+    audio-transcribe の出力は ASR の生結果（校正しない）という契約なので、
+    この補正は派生層に置く。原本は触らず、補正版を別ファイルとして出す。
+
+発話速度の決め方:
+    既定は自動計測。同じファイルの「引き伸ばされていない短い cue」（既定 0.5〜12秒）
+    から 文字数/秒 の中央値を取る。素材と話者に合った値が得られるので、
+    言語や話速の前提を持ち込まない。--rate で固定もできる。
+
+Usage:
+    srt-cap-spans in.srt -o out.srt
+    srt-cap-spans in.srt -o out.srt --margin 3.0     # 余裕を持たせる
+    srt-cap-spans in.srt --stats                     # 書かずに統計だけ
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import statistics
+import sys
+from pathlib import Path
+
+CUE_RE = re.compile(
+    r"(\d+)\s*\n"
+    r"(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*\n"
+    r"(.*?)(?=\n\s*\n|\Z)", re.S)
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"srt-cap-spans: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def to_sec(h: str, m: str, s: str, ms: str) -> float:
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000
+
+
+def srt_time(sec: float) -> str:
+    ms = int(round(max(sec, 0.0) * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def parse_srt(text: str) -> list:
+    cues = []
+    for m in CUE_RE.finditer(text):
+        g = m.groups()
+        cues.append({"start": to_sec(*g[1:5]), "end": to_sec(*g[5:9]),
+                     "text": g[9].strip()})
+    return cues
+
+
+def measure_rate(cues: list, lo: float, hi: float) -> tuple:
+    """引き伸ばされていない cue から 文字/秒 の中央値を得る。"""
+    samples = [len(c["text"]) / (c["end"] - c["start"])
+               for c in cues if lo < c["end"] - c["start"] < hi and c["text"]]
+    if len(samples) < 20:
+        return 0.0, len(samples)
+    return statistics.median(samples), len(samples)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="srt-cap-spans", add_help=True)
+    ap.add_argument("input", help="入力 SRT")
+    ap.add_argument("-o", "--output", help="出力 SRT（省略時は <input>.capped.srt）")
+    ap.add_argument("--rate", type=float, default=0,
+                    help="文字/秒 を固定する（既定: 入力から自動計測）")
+    ap.add_argument("--margin", type=float, default=2.0,
+                    help="推定発話長に掛ける余裕 (default: 2.0)")
+    ap.add_argument("--min", type=float, default=1.0, dest="min_dur",
+                    help="cue の下限秒 (default: 1.0)")
+    ap.add_argument("--max", type=float, default=60.0, dest="max_dur",
+                    help="cue の上限秒。これは最後の歯止め (default: 60)")
+    ap.add_argument("--sample-lo", type=float, default=0.5,
+                    help="速度計測に使う cue 長の下限 (default: 0.5)")
+    ap.add_argument("--sample-hi", type=float, default=12.0,
+                    help="速度計測に使う cue 長の上限 (default: 12.0)")
+    ap.add_argument("--stats", action="store_true", help="書き込まず統計だけ表示")
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    src = Path(args.input)
+    if not src.is_file():
+        die(f"input not found: {src}")
+    cues = parse_srt(src.read_text(encoding="utf-8"))
+    if not cues:
+        die(f"cue が読めません: {src}")
+
+    rate = args.rate
+    if rate <= 0:
+        rate, n = measure_rate(cues, args.sample_lo, args.sample_hi)
+        if rate <= 0:
+            die("発話速度を計測できません（短い cue が少なすぎる）。--rate で指定してください")
+        log(f"srt-cap-spans: 発話速度 {rate:.2f} 文字/秒（{n} cue から自動計測）")
+    else:
+        log(f"srt-cap-spans: 発話速度 {rate:.2f} 文字/秒（指定値）")
+
+    before = [c["end"] - c["start"] for c in cues]
+    for i, c in enumerate(cues):
+        est = max(args.min_dur, len(c["text"]) / rate * args.margin)
+        # 次の cue の開始を越えない。ただし下限は確保する。
+        nxt = cues[i + 1]["start"] if i + 1 < len(cues) else c["end"]
+        limit = max(nxt, c["start"] + args.min_dur)
+        c["end"] = min(c["end"], c["start"] + est, limit, c["start"] + args.max_dur)
+
+    after = [c["end"] - c["start"] for c in cues]
+    log(f"  cue        : {len(cues)}")
+    log(f"  最長       : {max(before):.1f}s -> {max(after):.1f}s")
+    log(f"  30秒超     : {sum(1 for x in before if x > 30)} -> "
+        f"{sum(1 for x in after if x > 30)} 本")
+    log(f"  総被覆     : {sum(before)/60:.1f}min -> {sum(after)/60:.1f}min")
+
+    if args.stats:
+        return 0
+
+    out = Path(args.output) if args.output else src.with_suffix(".capped.srt")
+    if out.exists() and not args.force:
+        die(f"出力先が既にあります: {out}（--force で上書き）")
+    lines = []
+    for i, c in enumerate(cues, 1):
+        lines += [str(i), f"{srt_time(c['start'])} --> {srt_time(c['end'])}", c["text"], ""]
+    out.write_text("\n".join(lines), encoding="utf-8")
+    log(f"srt-cap-spans: wrote {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+srt-normalize-numbers — 字幕中の漢数字を算用数字へ正規化する（助数詞つきのみ）。
+
+なぜ要るか:
+    リハーサル記録では小節番号が指示の本体で、「二十四小節から」を機械可読に
+    するには 24 が要る。Deepgram の numerals は日本語では効かず（実測: パラメータ
+    true でも「二十四小節」のまま）、Whisper も表記が揺れる。決定論的な変換なので
+    ASR に頼らず後段でやる。
+
+方針:
+    - **助数詞が続くときだけ**変換する。「一応」「第九」「一緒」などを壊さない
+    - 「第」+数字+「番/楽章」も対象（第九交響曲ではなく第9番の意）
+    - 固有名詞は --keep で除外できる。既定で「第九」は曲名として温存する
+    - 十/百/千の位取りを解釈する（二十四→24、百二十→120、千五百→1500）
+
+    出力は ASR の生結果ではないので、原本の .srt は上書きしない（別ファイル）。
+    これは校正ではなく表記の正規化だが、一次資料には書き戻さない原則に従う。
+
+Usage:
+    srt-normalize-numbers in.srt -o out.srt
+    srt-normalize-numbers in.srt --counters 小節,楽章,番,拍 -o out.srt
+    srt-normalize-numbers in.srt --stats           # 書かずに変換候補だけ表示
+
+依存: Python 標準ライブラリのみ
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+          "六": 6, "七": 7, "八": 8, "九": 9}
+UNITS = {"十": 10, "百": 100, "千": 1000}
+KANJI = "".join(list(DIGITS) + list(UNITS))
+
+DEFAULT_COUNTERS = ["小節", "楽章", "番", "拍", "ページ", "ページ目", "度", "回",
+                    "人", "本", "分", "秒", "曲目", "オクターブ"]
+DEFAULT_KEEP = ["第九"]          # 曲名（ベートーヴェン）。第9番の意ではない
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"srt-normalize-numbers: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def kanji_to_int(s: str) -> int | None:
+    """漢数字を整数へ。位取り（十百千）と並記（二〇二六）の両方を扱う。"""
+    if not s:
+        return None
+    if all(c in DIGITS for c in s):          # 二〇二六 のような並記
+        return int("".join(str(DIGITS[c]) for c in s))
+    total, section = 0, 0
+    for c in s:
+        if c in DIGITS:
+            section = DIGITS[c]
+        elif c in UNITS:
+            u = UNITS[c]
+            if u == 10:
+                total += (section or 1) * 10
+            else:
+                total += (section or 1) * u
+            section = 0
+        else:
+            return None
+    return total + section
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="srt-normalize-numbers", add_help=True)
+    ap.add_argument("input", help="入力 SRT")
+    ap.add_argument("-o", "--output", help="出力（既定: <input>.num.srt）")
+    ap.add_argument("--counters", default=",".join(DEFAULT_COUNTERS),
+                    help="変換対象の助数詞をカンマ区切りで指定")
+    ap.add_argument("--keep", default=",".join(DEFAULT_KEEP),
+                    help="変換しない語をカンマ区切りで指定（固有名詞など）")
+    ap.add_argument("--stats", action="store_true", help="書かずに変換候補を表示")
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    src = Path(args.input)
+    if not src.is_file():
+        die(f"input not found: {src}")
+    text = src.read_text(encoding="utf-8")
+
+    counters = [c.strip() for c in args.counters.split(",") if c.strip()]
+    keep = [k.strip() for k in args.keep.split(",") if k.strip()]
+    # 長い助数詞を先に試す（ページ目 が ページ に食われないように）
+    counters.sort(key=len, reverse=True)
+
+    pat = re.compile(rf"(第)?([{KANJI}]+)({'|'.join(map(re.escape, counters))})")
+    hits: list = []
+
+    def repl(m: re.Match) -> str:
+        whole = m.group(0)
+        for k in keep:
+            if k in whole:
+                return whole
+        n = kanji_to_int(m.group(2))
+        if n is None or n == 0:
+            return whole
+        out = f"{m.group(1) or ''}{n}{m.group(3)}"
+        hits.append((whole, out))
+        return out
+
+    new = pat.sub(repl, text)
+
+    from collections import Counter
+    c = Counter(hits)
+    log(f"srt-normalize-numbers: {len(hits)} 箇所を変換（{len(c)} 種類）")
+    for (before, after), n in c.most_common(20):
+        log(f"    {n:4d}  {before} -> {after}")
+    if len(c) > 20:
+        log(f"    ... 他 {len(c)-20} 種類")
+
+    if args.stats:
+        return 0
+    out = Path(args.output) if args.output else src.with_suffix(".num.srt")
+    if out.exists() and not args.force:
+        die(f"出力先が既にあります: {out}（--force で上書き）")
+    out.write_text(new, encoding="utf-8")
+    log(f"srt-normalize-numbers: wrote {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
