@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""
+audio-transcribe-dg — Deepgram Nova-3 で「忠実な一次資料」を CLI で生成する。
+
+audio-transcribe（Whisper 系）と同じ 2 + 1 層の契約で出力する。後段の突き合わせが
+エンジン非依存になるよう、ファイル名も meta のキーも揃えてある:
+
+    <base>.srt         可読な一次テキスト層（utterance 単位）
+    <base>.words.json  機械忠実層（Deepgram の生レスポンス。語ごと confidence を含む）
+    <base>.meta.json   来歴（モデル/パラメータ/入力の同一性 sha256/リクエスト ID）
+
+一次資料としての設計方針（audio-transcribe と同一）:
+    - 出力は ASR の生結果。校正はしない（校正は派生の解釈層で行い、ここへ書き戻さない）
+    - words.json は加工しない生レスポンス。SRT はそこからの派生（再生成可能）
+    - すべての cue/語が媒体の時刻へ遡れる
+    - meta.json に来歴（入力の sha256 を含む）を残す
+    - 既存の一次資料を黙って壊さない（出力先が既にあれば停止。上書きは --force）
+
+固有名詞・専門語彙は --terms で Keyterm Prompting に載せる。audio-transcribe の
+--terms と同じ語彙ファイルをそのまま渡せる（1行1語・# コメント可）。
+Keyterm は Nova-3 系のみ（Nova-2 以前は keywords= が必要）で、全言語で有効。
+制限は 1 リクエストあたり全 keyterm 合計 500 トークン。
+
+依存: Python 標準ライブラリのみ（urllib）。ffmpeg は送信形式の変換に使う。
+
+前提: 環境変数 DEEPGRAM_API_KEY（または --key-file）。
+      音声を外部へ送信する。素材の秘匿性は運用側の判断であることに注意。
+
+Usage:
+    audio-transcribe-dg input.wav
+    audio-transcribe-dg input.wav -o 20260802_practice --terms terms.txt
+    audio-transcribe-dg input.mp4 --diarize          # 話者ラベルを付ける
+    audio-transcribe-dg input.wav --send-raw         # 変換せず原ファイルを送る
+    audio-transcribe-dg input.mp4 --dry-run          # 計画のみ（送信しない）
+
+参考: https://developers.deepgram.com/docs/keyterm
+      https://developers.deepgram.com/reference/speech-to-text/listen-pre-recorded
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+API_URL = "https://api.deepgram.com/v1/listen"
+DEFAULT_MODEL = "nova-3"
+
+# Keyterm Prompting は Nova-3 系のみ。それ以外では黙って無視されるので警告する。
+KEYTERM_MODELS = ("nova-3", "flux")
+KEYTERM_TOKEN_BUDGET = 500
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"audio-transcribe-dg: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def probe_duration(path: Path) -> float | None:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        return float(r.stdout.strip())
+    except (ValueError, FileNotFoundError):
+        return None
+
+
+def probe_audio(path: Path) -> dict:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name,bit_rate,sample_rate,channels",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        streams = json.loads(r.stdout).get("streams") or []
+        return streams[0] if streams else {}
+    except (ValueError, FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def est_tokens(term: str) -> int:
+    """keyterm 1 語のトークン数を安全側で見積もる。
+
+    実測: 日本語 631 文字・111 語で API 上限 500 を超えた（文字数/2 では 295 と
+    見誤り、送信してから 400 で弾かれた）。日本語は 1 文字 ≒ 1 トークン以上、
+    英数字は概ね 4 文字 = 1 トークン。語の区切りに 1 トークン加算する。
+    正確な tokenizer は公開されていないので、切り上げて安全側に倒す。
+    """
+    cjk = sum(1 for c in term if not c.isascii())
+    ascii_n = len(term) - cjk
+    return cjk + (ascii_n + 3) // 4 + 1
+
+
+def fit_terms(terms: list, budget: int) -> tuple:
+    """予算に収まるところまで採用し、落とした語を返す。
+
+    順序は呼び出し側の優先順位そのもの（--terms の指定順）。
+    黙って切ると「効いているつもり」になるので、必ず落とした語を返す。
+    """
+    kept, dropped, total = [], [], 0
+    for t in terms:
+        n = est_tokens(t)
+        if total + n > budget:
+            dropped.append(t)
+            continue
+        kept.append(t)
+        total += n
+    return kept, dropped, total
+
+
+def read_terms(path: Path) -> list:
+    """語彙ファイルを読む。1行1語、# 以降はコメント、空行は無視。"""
+    terms = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        term = line.split("#", 1)[0].strip()
+        if term:
+            terms.append(term)
+    return terms
+
+
+def guard_outputs(paths: list, force: bool) -> None:
+    if force:
+        return
+    existing = [p for p in paths if p.exists()]
+    if existing:
+        die("出力先が既にあります（一次資料を上書きしません）:\n"
+            + "\n".join(f"  {p}" for p in existing)
+            + "\n別の -o を指定するか、意図した上書きなら --force を付けてください")
+
+
+def to_flac(src: Path, workdir: Path) -> Path:
+    """可逆(FLAC)に変換して送る。動画そのものを上げるより桁で小さく、情報は落とさない。
+
+    サンプリングレート・チャンネル数は変えない（何を送ったかを自明に保つため）。
+    """
+    out = workdir / (src.stem + ".flac")
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
+           "-vn", "-map", "a:0", "-c:a", "flac", "-compression_level", "8", str(out)]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode != 0 or not out.is_file():
+        die(f"ffmpeg failed:\n{r.stderr.strip()}")
+    return out
+
+
+def srt_time(sec: float) -> str:
+    if sec < 0:
+        sec = 0.0
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def cues_from_response(resp: dict, diarize: bool) -> list:
+    """SRT の元になる cue を取り出す。utterances があればそれを、無ければ全文1本。"""
+    utterances = (resp.get("results") or {}).get("utterances") or []
+    cues = []
+    for u in utterances:
+        text = (u.get("transcript") or "").strip()
+        if not text:
+            continue
+        if diarize and u.get("speaker") is not None:
+            text = f"[spk{u['speaker']}] {text}"
+        cues.append((float(u.get("start", 0.0)), float(u.get("end", 0.0)), text))
+    if cues:
+        return cues
+
+    # utterances=false で回した場合の退避。全文を 1 cue にする。
+    channels = (resp.get("results") or {}).get("channels") or []
+    alts = (channels[0].get("alternatives") if channels else None) or []
+    text = (alts[0].get("transcript") if alts else "") or ""
+    if not text.strip():
+        return []
+    words = (alts[0].get("words") if alts else []) or []
+    end = float(words[-1].get("end", 0.0)) if words else 0.0
+    return [(0.0, end, text.strip())]
+
+
+def write_srt(path: Path, cues: list) -> None:
+    lines = []
+    for i, (start, end, text) in enumerate(cues, 1):
+        lines.append(str(i))
+        lines.append(f"{srt_time(start)} --> {srt_time(end)}")
+        lines.append(text)
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def count_words(resp: dict) -> tuple:
+    channels = (resp.get("results") or {}).get("channels") or []
+    alts = (channels[0].get("alternatives") if channels else None) or []
+    words = (alts[0].get("words") if alts else []) or []
+    confs = [w.get("confidence") for w in words if isinstance(w.get("confidence"), (int, float))]
+    mean = sum(confs) / len(confs) if confs else None
+    return len(words), mean
+
+
+def build_url(args, terms: list) -> str:
+    params = [
+        ("model", args.model),
+        ("language", args.language),
+        ("smart_format", "true" if args.smart_format else "false"),
+        ("punctuate", "true" if args.punctuate else "false"),
+        ("utterances", "true" if args.utterances else "false"),
+        ("numerals", "true" if args.numerals else "false"),
+        ("filler_words", "true" if args.filler_words else "false"),
+    ]
+    if args.utterances:
+        params.append(("utt_split", str(args.utt_split)))
+    if args.diarize:
+        params.append(("diarize", "true"))
+    # keyterm は繰り返し指定。多語句は urlencode 側でエスケープされる。
+    params.extend(("keyterm", t) for t in terms)
+    return API_URL + "?" + urllib.parse.urlencode(params)
+
+
+def post_audio(url: str, key: str, payload: Path, timeout: int) -> dict:
+    req = urllib.request.Request(
+        url, method="POST",
+        data=payload.read_bytes(),
+        headers={
+            "Authorization": f"Token {key}",
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:2000]
+        die(f"Deepgram HTTP {e.code}: {body}")
+    except urllib.error.URLError as e:
+        die(f"Deepgram への接続に失敗しました: {e.reason}")
+    except json.JSONDecodeError:
+        die("Deepgram のレスポンスが JSON ではありません")
+    return {}
+
+
+def resolve_key(args) -> str:
+    if args.key_file:
+        p = Path(args.key_file)
+        if not p.is_file():
+            die(f"key file not found: {p}")
+        key = p.read_text(encoding="utf-8").strip()
+    else:
+        key = os.environ.get("DEEPGRAM_API_KEY", "").strip()
+    if not key:
+        die("DEEPGRAM_API_KEY が未設定です（--key-file でも指定できます）")
+    return key
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="audio-transcribe-dg", add_help=True)
+    ap.add_argument("input", help="動画/音声（ffmpeg が読めるもの）")
+    ap.add_argument("-o", "--output", help="出力 basename（既定: 入力の stem）")
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help=f"Deepgram モデル (default: {DEFAULT_MODEL})")
+    ap.add_argument("--language", default="ja", help="言語 (default: ja)")
+    ap.add_argument("--terms", metavar="FILE", action="append", default=[],
+                    help="語彙ファイル（1行1語・# コメント可）を keyterm として注入する。"
+                         "複数指定可（汎用リスト + テイク固有）。"
+                         "audio-transcribe の --terms と同じファイルを渡せる")
+    ap.add_argument("--diarize", action="store_true",
+                    help="話者分離を有効にする（words[].speaker / SRT に [spkN] が付く）")
+    ap.add_argument("--no-smart-format", dest="smart_format", action="store_false",
+                    default=True, help="smart_format を無効化（生に近い表記にする）")
+    ap.add_argument("--no-punctuate", dest="punctuate", action="store_false",
+                    default=True, help="句読点付与を無効化")
+    ap.add_argument("--no-utterances", dest="utterances", action="store_false",
+                    default=True, help="utterance 分割を無効化（SRT は全文1本になる）")
+    ap.add_argument("--utt-split", type=float, default=0.8,
+                    help="utterance を切る無音長 秒 (default: 0.8)")
+    ap.add_argument("--numerals", action="store_true",
+                    help="数詞を数字に変換する（小節番号を数字で得たいとき）")
+    ap.add_argument("--filler-words", action="store_true",
+                    help="フィラー（えー等）も文字化する")
+    ap.add_argument("--send-raw", action="store_true",
+                    help="FLAC へ変換せず入力ファイルをそのまま送る")
+    ap.add_argument("--timeout", type=int, default=3600,
+                    help="HTTP タイムアウト 秒 (default: 3600。長尺は延ばす)")
+    ap.add_argument("--key-file", metavar="FILE", help="API キーを書いたファイル")
+    ap.add_argument("--force", action="store_true",
+                    help="出力先が既にあっても上書きする")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="計画のみ。送信も変換もしない")
+    args = ap.parse_args()
+
+    src = Path(args.input)
+    if not src.is_file():
+        die(f"input not found: {src}")
+    base = Path(args.output) if args.output else src.with_suffix("")
+    srt_path = base.with_suffix(".srt")
+    words_path = Path(str(base) + ".words.json")
+    meta_path = Path(str(base) + ".meta.json")
+
+    terms = []
+    for tf in args.terms:
+        tp = Path(tf)
+        if not tp.is_file():
+            die(f"terms file not found: {tp}")
+        for t in read_terms(tp):
+            if t not in terms:      # 重複は keyterm のトークン枠を食うだけ
+                terms.append(t)
+
+    dur = probe_duration(src)
+    ainfo = probe_audio(src)
+
+    log("audio-transcribe-dg:")
+    log(f"  input      : {src}" + (f"  ({dur/3600:.2f}h)" if dur else ""))
+    log(f"  model      : {args.model} / language={args.language}")
+    log(f"  options    : smart_format={args.smart_format} punctuate={args.punctuate}"
+        f" utterances={args.utterances} diarize={args.diarize}")
+    if terms:
+        n_before = len(terms)
+        terms, dropped, approx = fit_terms(terms, KEYTERM_TOKEN_BUDGET)
+        log(f"  keyterms   : {len(terms)}/{n_before} 語 ({', '.join(args.terms)})"
+            f" / 概算 {approx}/{KEYTERM_TOKEN_BUDGET} tokens")
+        if not any(m in args.model for m in KEYTERM_MODELS):
+            log(f"  warning    : keyterm は Nova-3 系のみ有効です（model={args.model}）")
+        if dropped:
+            # 送信してから 400 で弾かれるのを避け、何を落としたかを必ず見せる
+            log(f"  warning    : 上限 {KEYTERM_TOKEN_BUDGET} tokens に収めるため "
+                f"{len(dropped)} 語を除外しました（--terms の指定順が優先順位）:")
+            log("               " + " / ".join(dropped[:15])
+                + (" ..." if len(dropped) > 15 else ""))
+    log(f"  send       : {'raw (原ファイル)' if args.send_raw else 'FLAC へ可逆変換'}")
+    log(f"  outputs    : {srt_path.name}  {words_path.name}  {meta_path.name}")
+
+    if args.dry_run:
+        log("audio-transcribe-dg: --dry-run（送信しません）")
+        return 0
+
+    guard_outputs([srt_path, words_path, meta_path], args.force)
+    key = resolve_key(args)
+
+    with tempfile.TemporaryDirectory(prefix="audio-transcribe-dg-") as td:
+        payload = src if args.send_raw else to_flac(src, Path(td))
+        mb = payload.stat().st_size / 1e6
+        log(f"  uploading  : {payload.name} ({mb:.1f} MB) ...")
+        url = build_url(args, terms)
+        resp = post_audio(url, key, payload, args.timeout)
+        sent_bytes = payload.stat().st_size
+
+    # (2) 機械忠実層は生レスポンスをそのまま置く（SRT はここからの派生）
+    words_path.write_text(json.dumps(resp, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+
+    # (1) 可読な一次テキスト層
+    cues = cues_from_response(resp, args.diarize)
+    if not cues:
+        log("  warning    : 転写結果が空です（音声が無い/言語指定が不適合の可能性）")
+    write_srt(srt_path, cues)
+
+    nwords, mean_conf = count_words(resp)
+    meta_dg = resp.get("metadata") or {}
+
+    # (3) 来歴
+    meta = {
+        "tool": "audio-transcribe-dg",
+        "input": {
+            "path": str(src.resolve()),
+            "bytes": src.stat().st_size,
+            "sha256": sha256_file(src),
+            "duration_sec": dur,
+            "codec": ainfo.get("codec_name"),
+            "sample_rate": ainfo.get("sample_rate"),
+            "channels": ainfo.get("channels"),
+            "bit_rate": ainfo.get("bit_rate"),
+        },
+        "asr": {
+            "engine": "deepgram",
+            "backend": "deepgram /v1/listen (pre-recorded REST)",
+            "model": args.model,
+            "language": args.language,
+            "smart_format": args.smart_format,
+            "punctuate": args.punctuate,
+            "utterances": args.utterances,
+            "utt_split": args.utt_split if args.utterances else None,
+            "diarize": args.diarize,
+            "numerals": args.numerals,
+            "filler_words": args.filler_words,
+            "terms_files": args.terms,
+            "terms_count": len(terms),
+            "terms_applied": bool(terms),
+            "sent_as": "raw" if args.send_raw else "flac",
+            "sent_bytes": sent_bytes,
+        },
+        "provider": {
+            "request_id": meta_dg.get("request_id"),
+            "model_info": meta_dg.get("model_info"),
+            "model_uuid": meta_dg.get("models"),
+            "duration_sec": meta_dg.get("duration"),
+            "channels": meta_dg.get("channels"),
+        },
+        "counts": {"cues": len(cues), "words": nwords,
+                   "mean_word_confidence": mean_conf},
+        "outputs": {"srt": srt_path.name, "words_json": words_path.name},
+        "note": "ASR の生出力。校正はしていない（校正は派生の解釈層で行う）。"
+                "words.json は Deepgram の生レスポンスで、語ごと confidence を含む。",
+    }
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+
+    conf_s = f", mean_conf={mean_conf:.3f}" if mean_conf is not None else ""
+    log(f"audio-transcribe-dg: wrote {srt_path.name} / {words_path.name} / {meta_path.name}"
+        f"  (cues={len(cues)}, words={nwords}{conf_s})")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
