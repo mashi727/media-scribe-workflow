@@ -155,6 +155,7 @@ msw-pipeline rehearsal.vce.json --srt rehearsal.srt -o report.pdf
 
 ## Documentation
 
+- [`docs/workflow-rehearsal-to-dashboard.md`](docs/workflow-rehearsal-to-dashboard.md) — **収録からダッシュボードまでの全手順**（L/R 32-bit float + 映像 → 同期 → 原本の凍結 → 転写 → 記録 PDF → 取り込み）
 - [`docs/snakemake-design.md`](docs/snakemake-design.md) — ワークフロー全体の Snakemake 移行設計（実装予定）
 - [`docs/workflow-diagrams.md`](docs/workflow-diagrams.md) — Mermaid ワークフロー図
 - [`docs/pad/`](docs/pad/) — PAD 図（ソース `.spd` + PNG）
