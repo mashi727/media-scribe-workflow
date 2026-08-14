@@ -151,18 +151,33 @@ def guard_outputs(paths: list, force: bool) -> None:
             + "\n別の -o を指定するか、意図した上書きなら --force を付けてください")
 
 
-def to_flac(src: Path, workdir: Path) -> Path:
-    """可逆(FLAC)に変換して送る。動画そのものを上げるより桁で小さく、情報は落とさない。
+# 非可逆コーデック → そのままコピーして入れる容器
+LOSSY_CONTAINER = {"aac": "m4a", "mp3": "mp3", "opus": "ogg", "vorbis": "ogg",
+                   "ac3": "ac3", "eac3": "eac3", "wmav2": "asf"}
 
-    サンプリングレート・チャンネル数は変えない（何を送ったかを自明に保つため）。
+
+def prepare_upload(src: Path, workdir: Path, codec: str) -> tuple:
+    """送信用の音声を作る。**元が非可逆なら再圧縮も可逆変換もしない。**
+
+    元が WAV 等の非圧縮なら FLAC が有効（可逆のまま小さくなる）。
+    しかし **元が既に非可逆なら FLAC 化は情報を増やさず容量だけ膨らむ**
+    （実測: 477MB の m4a → 2170MB の FLAC。4.5倍で、中身は同じ）。
+    その場合は映像だけ捨てて音声をそのままコピーする。
     """
-    out = workdir / (src.stem + ".flac")
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
-           "-vn", "-map", "a:0", "-c:a", "flac", "-compression_level", "8", str(out)]
+    if codec in LOSSY_CONTAINER:
+        out = workdir / (src.stem + "." + LOSSY_CONTAINER[codec])
+        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
+               "-vn", "-map", "a:0", "-c:a", "copy", str(out)]
+        how = f"音声をコピー（{codec} のまま・再圧縮なし）"
+    else:
+        out = workdir / (src.stem + ".flac")
+        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
+               "-vn", "-map", "a:0", "-c:a", "flac", "-compression_level", "8", str(out)]
+        how = "FLAC へ可逆変換"
     r = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if r.returncode != 0 or not out.is_file():
         die(f"ffmpeg failed:\n{r.stderr.strip()}")
-    return out
+    return out, how
 
 
 def srt_time(sec: float) -> str:
@@ -347,7 +362,10 @@ def main() -> int:
                 f"{len(dropped)} 語を除外しました（--terms の指定順が優先順位）:")
             log("               " + " / ".join(dropped[:15])
                 + (" ..." if len(dropped) > 15 else ""))
-    log(f"  send       : {'raw (原ファイル)' if args.send_raw else 'FLAC へ可逆変換'}")
+    codec = (ainfo.get("codec_name") or "").lower()
+    log(f"  send       : " + ("raw (原ファイル)" if args.send_raw else
+        ("音声をコピー（" + codec + " のまま）" if codec in LOSSY_CONTAINER
+         else "FLAC へ可逆変換")))
     log(f"  outputs    : {srt_path.name}  {words_path.name}  {meta_path.name}")
 
     if args.dry_run:
@@ -358,9 +376,12 @@ def main() -> int:
     key = resolve_key(args)
 
     with tempfile.TemporaryDirectory(prefix="audio-transcribe-dg-") as td:
-        payload = src if args.send_raw else to_flac(src, Path(td))
+        if args.send_raw:
+            payload, how = src, "raw"
+        else:
+            payload, how = prepare_upload(src, Path(td), codec)
         mb = payload.stat().st_size / 1e6
-        log(f"  uploading  : {payload.name} ({mb:.1f} MB) ...")
+        log(f"  uploading  : {payload.name} ({mb:.1f} MB, {how}) ...")
         url = build_url(args, terms)
         resp = post_audio(url, key, payload, args.timeout)
         sent_bytes = payload.stat().st_size
@@ -406,7 +427,8 @@ def main() -> int:
             "terms_files": args.terms,
             "terms_count": len(terms),
             "terms_applied": bool(terms),
-            "sent_as": "raw" if args.send_raw else "flac",
+            "sent_as": "raw" if args.send_raw else
+                       ("copy:" + codec if codec in LOSSY_CONTAINER else "flac"),
             "sent_bytes": sent_bytes,
         },
         "provider": {
