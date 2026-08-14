@@ -12,9 +12,19 @@ tex-link-timestamps — 記録 .tex のタイムスタンプを YouTube への�
       2. 一次資料の確認 — 記録の引用が発話と合っているかを検める
 
 やること:
-    \\ts{HH:MM:SS} を \\tsy{HH:MM:SS}{秒} に書き換え、プリアンブルに
-    リンク版の \\tsy を定義する。時刻→秒の変換は Python で行う（LaTeX で
-    文字列を parse すると壊れやすい）。**元の .tex は上書きしない。**
+    **呼び出し側 \\ts{HH:MM:SS} は一切変更しない。** プリアンブルの \\ts の
+    定義だけをリンク版に差し替え、時刻→秒の対応表を添える。
+
+    なぜ呼び出し側を変えないか（過去にここで一度壊した）:
+        この .tex は PDF 化のほかに**下流のツールからも解析される**。
+        団員ダッシュボードの build_leok.py は \\ts{...} を特別扱いして
+        <span class="leok-ts" data-sec="..."> を出し、それがページ内の
+        YouTube 再生フックになっている。呼び出し側を \\tsy{時刻}{秒} に
+        書き換えると未知コマンド扱いになり、data-sec が消えて再生が死に、
+        秒数が本文へ漏れる。**記法は界面である。定義だけを差し替える。**
+
+    時刻→秒の変換は Python で確定させ、\\csname の対応表として書き出す
+    （LaTeX 側で文字列を parse すると catcode 依存で壊れやすい）。
 
 前提:
     **記録と同一タイムラインの動画であること。** 全長版を上げた動画に
@@ -24,6 +34,7 @@ tex-link-timestamps — 記録 .tex のタイムスタンプを YouTube への�
 Usage:
     tex-link-timestamps 記録.tex --video 25MxIZQ8JLU -o 記録_linked.tex
     tex-link-timestamps 記録.tex --video https://youtu.be/25MxIZQ8JLU --in-place
+    tex-link-timestamps 記録.tex --unlink --in-place    # リンクを外して素の \\ts に戻す
 
 依存: Python 標準ライブラリのみ
 """
@@ -34,12 +45,36 @@ import re
 import sys
 from pathlib import Path
 
-TS = re.compile(r"\\ts\{(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\}")
-DEF = r"""
-% --- YouTube へのリンク付きタイムスタンプ（tex-link-timestamps が挿入）---
-% 時刻は記録の一次資料（映像）への経路である。読み手がその場で照合できるようにする。
+# \ts{...} の呼び出し（引数はそのまま対応表の鍵になる）
+TS_CALL = re.compile(r"\\ts\{([^{}]*)\}")
+# 受け付ける時刻の書式
+TS_OK = re.compile(r"^(\d{1,2}):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?$")
+# 旧版が残した呼び出し側の書き換え（--unlink で巻き戻す対象）
+TSY_CALL = re.compile(r"\\tsy\{([^{}]*)\}\{[^{}]*\}")
+# プリアンブルの \ts 定義（素のものも、リンク版も拾う）
+TS_DEF = re.compile(r"^[ \t]*\\newcommand\{\\ts\}\[1\]\{.*\}[ \t]*\n", re.M)
+# 本ツールが挿入したブロック（先頭マーカー〜末尾マーカー）
+BLOCK = re.compile(r"% >>> tex-link-timestamps >>>\n.*?% <<< tex-link-timestamps <<<\n",
+                   re.S)
+# 旧版（呼び出し側を書き換えていた頃）が挿入した無標のブロック
+LEGACY = re.compile(
+    r"\n?% --- YouTube へのリンク付きタイムスタンプ.*?"
+    r"\\newcommand\{\\tsy\}\[2\]\{[^\n]*\n", re.S)
+
+PLAIN_DEF = "\\newcommand{\\ts}[1]{\\texttt{\\small [#1]}}\n"
+
+HEAD = r"""% >>> tex-link-timestamps >>>
+% タイムスタンプを一次資料（映像）への経路にする。
+% **呼び出し側は \ts{HH:MM:SS} のまま。定義だけがリンクを担う。**
+% この .tex は下流ツール（団員ダッシュボードの build_leok.py 等）にも解析される。
+% 呼び出し側の記法を変えるとそちらの抽出が壊れるため、界面は動かさない。
 \newcommand{\videoid}{__VID__}
-\newcommand{\tsy}[2]{\href{https://youtu.be/\videoid?t=#2}{\texttt{\small [#1]}}}
+% 時刻→秒は生成時に確定させた対応表（LaTeX で文字列を parse しない）
+"""
+
+TAIL = r"""\newcommand{\ts}[1]{%
+  \href{https://youtu.be/\videoid?t=\csname ts@s@#1\endcsname}{\texttt{\small [#1]}}}
+% <<< tex-link-timestamps <<<
 """
 
 
@@ -53,13 +88,54 @@ def vid_of(s: str) -> str:
     return m.group(1) if m else s.strip()
 
 
+def to_sec(key: str) -> int | None:
+    m = TS_OK.match(key)
+    if not m:
+        return None
+    h, mi, se, _ms = m.groups()
+    return int(h) * 3600 + int(mi) * 60 + int(se)
+
+
+def write_out(src: Path, body: str, args) -> Path:
+    out = src if args.in_place else Path(args.output or
+                                         src.with_name(src.stem + "_linked.tex"))
+    if out.exists() and not args.in_place and not args.force:
+        die(f"出力先が既にあります: {out}（--force で上書き）")
+    out.write_text(body, encoding="utf-8")
+    return out
+
+
+def do_unlink(src: Path, s: str, args) -> int:
+    """呼び出し側の \\tsy{a}{b} を \\ts{a} に戻し、挿入ブロックを取り除く。"""
+    body, n_call = TSY_CALL.subn(r"\\ts{\1}", s)
+    body, n_block = BLOCK.subn("", body)
+    body, n_legacy = LEGACY.subn("", body)
+    n_block += n_legacy
+    if not TS_DEF.search(body):
+        # 定義ごと消えていた場合は素の定義を復元する
+        anchor = re.search(r"^\\usepackage.*\n", body, re.M)
+        if not anchor:
+            die("\\ts の定義を戻す位置が見つかりません")
+        body = body[:anchor.end()] + PLAIN_DEF + body[anchor.end():]
+    else:
+        body = TS_DEF.sub(lambda _m: PLAIN_DEF, body, count=1)
+    if not (n_call or n_block):
+        die("巻き戻す対象がありません（\\tsy も挿入ブロックも無い）")
+    out = write_out(src, body, args)
+    print(f"tex-link-timestamps: 呼び出し {n_call} 箇所を \\ts に戻し、"
+          f"挿入ブロック {n_block} 個を除去 -> {out}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="tex-link-timestamps", add_help=True)
     ap.add_argument("tex", help="記録の .tex")
-    ap.add_argument("--video", required=True, help="YouTube の動画ID または URL")
+    ap.add_argument("--video", help="YouTube の動画ID または URL")
+    ap.add_argument("--unlink", action="store_true",
+                    help="リンクを外して素の \\ts{...} に戻す（旧版の \\tsy も巻き戻す）")
     ap.add_argument("-o", "--output", help="出力（既定: <input>_linked.tex）")
     ap.add_argument("--in-place", action="store_true", help="元のファイルを書き換える")
-    ap.add_argument("--offset", type=float, default=0,
+    ap.add_argument("--offset", type=int, default=0,
                     help="記録の時刻に足す秒数（動画側が記録より前から始まる場合）")
     ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
     args = ap.parse_args()
@@ -67,41 +143,50 @@ def main() -> int:
     src = Path(args.tex)
     if not src.is_file():
         die(f"not found: {src}")
-    vid = vid_of(args.video)
     s = src.read_text(encoding="utf-8")
 
-    if "\\tsy" in s:
-        die("既にリンク化されています（\\tsy が定義済み）")
-    if "\\usepackage{hyperref}" not in s:
+    if args.unlink:
+        return do_unlink(src, s, args)
+    if not args.video:
+        die("--video が必要です（--unlink のときは不要）")
+
+    vid = vid_of(args.video)
+    if BLOCK.search(s):
+        die("既にリンク化されています（--unlink で戻してから掛け直す）")
+    if TSY_CALL.search(s):
+        die("旧版が呼び出し側を \\tsy に書き換えています。"
+            "先に --unlink で巻き戻してください")
+    if "hyperref" not in s:
         die("hyperref が読み込まれていません。リンクを張れません")
+    if not TS_DEF.search(s):
+        die("プリアンブルに \\newcommand{\\ts}[1]{...} が見つかりません")
 
-    n = 0
+    # 本文の \ts{...} を集める（\begin{document} 以降のみ。プリアンブルの定義は除く）
+    mdoc = re.search(r"\\begin\{document\}(.*)", s, re.S)
+    keys = sorted(set(TS_CALL.findall(mdoc.group(1) if mdoc else s)))
+    if not keys:
+        die("\\ts{...} の呼び出しが見つかりません")
 
-    def repl(m: re.Match) -> str:
-        nonlocal n
-        h, mi, se, _ms = m.groups()
-        sec = int(h) * 3600 + int(mi) * 60 + int(se) + args.offset
-        n += 1
-        return f"\\tsy{{{h}:{mi}:{se}}}{{{int(max(0, sec))}}}"
+    bad = [k for k in keys if to_sec(k) is None]
+    if bad:
+        die("時刻として解釈できない \\ts{} があります: "
+            + ", ".join(bad[:5]) + (" ..." if len(bad) > 5 else ""))
 
-    body = TS.sub(repl, s)
-    if not n:
-        die("\\ts{...} が見つかりません")
+    table = "".join(
+        "\\expandafter\\def\\csname ts@s@%s\\endcsname{%d}\n"
+        % (k, max(0, to_sec(k) + args.offset))
+        for k in keys
+    )
+    block = HEAD.replace("__VID__", vid) + table + TAIL
 
-    # プリアンブルの \ts 定義の直後に \tsy を足す
-    anchor = re.search(r"\\newcommand\{\\ts\}\[1\]\{[^\n]*\n", body)
-    if not anchor:
-        die("プリアンブルに \\ts の定義が見つかりません")
-    body = body[:anchor.end()] + DEF.replace("__VID__", vid) + body[anchor.end():]
+    body = TS_DEF.sub(lambda _m: block, s, count=1)
+    out = write_out(src, body, args)
 
-    out = src if args.in_place else Path(args.output or
-                                         src.with_name(src.stem + "_linked.tex"))
-    if out.exists() and not args.in_place and not args.force:
-        die(f"出力先が既にあります: {out}（--force で上書き）")
-    out.write_text(body, encoding="utf-8")
-    print(f"tex-link-timestamps: {n} 箇所をリンク化 -> {out}")
+    n_call = len(TS_CALL.findall(mdoc.group(1) if mdoc else s))
+    print(f"tex-link-timestamps: \\ts の定義をリンク版に差し替え -> {out}")
+    print(f"  呼び出し {n_call} 箇所（異なり {len(keys)} 時刻）は**書き換えていない**")
     print(f"  https://youtu.be/{vid}?t=... の形式"
-          + (f"（オフセット {args.offset:+g} 秒）" if args.offset else ""))
+          + (f"（オフセット {args.offset:+d} 秒）" if args.offset else ""))
     return 0
 
 
