@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""
+events-merge — 複数回の events.json を束ね、練習日を超えた累積記録を作る。
+
+1回ごとの記録は「その日に何があったか」しか答えない。本番に向けて本当に見たいのは
+**この曲のこの箇所は、これまで何回返され、何を言われてきたか**である。
+`practice_points` の鍵（曲 × 小節 × 対象）は、そのために設計されている。
+
+やること:
+    - 各回の events.json を読み、練習箇所の鍵で束ねる
+    - 各イベントに、その回の動画IDと開始秒から **YouTube リンク**を付ける
+    - 曲ごと・箇所ごとに、回を跨いだ履歴を作る
+
+やらないこと:
+    - 要約や解釈。**元の記録の文言をそのまま運ぶ**（出典は必ず辿れる）
+    - 記録の書き換え。入力の events.json は読むだけ
+
+動画IDの与え方:
+    events.json の rehearsal.media_url にあればそれを使う。無い回は --url で補う。
+        --url 2026-07-05=iK1CFGn9C6o
+    **その回の記録と同一タイムラインの動画**であることを確認してから渡すこと。
+
+Usage:
+    events-merge a/20260705_events.json b/20260726_events.json c/20260809_events.json \\
+        --url 2026-07-05=iK1CFGn9C6o --url 2026-07-26=fFu5Lkff3og \\
+        -o cumulative.json
+
+依存: Python 標準ライブラリのみ
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"events-merge: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def vid_of(url: str) -> str:
+    """URL でも ID でも受ける。"""
+    if not url:
+        return ""
+    m = re.search(r"(?:youtu\.be/|[?&]v=|/embed/)([\w-]{6,})", url)
+    return m.group(1) if m else url.strip()
+
+
+def to_sec(ts: str) -> float:
+    p = [float(x) for x in str(ts).split(":")]
+    s = 0.0
+    for x in p:
+        s = s * 60 + x
+    return s
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="events-merge", add_help=True)
+    ap.add_argument("inputs", nargs="+", help="events.json（回ごと）")
+    ap.add_argument("--url", action="append", default=[], metavar="DATE=IDorURL",
+                    help="media_url が無い回の動画を補う")
+    ap.add_argument("-o", "--out", default="cumulative.json")
+    ap.add_argument("--force", action="store_true", help="出力先があっても上書き")
+    args = ap.parse_args()
+
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        die(f"出力先が既にあります: {out}（--force で上書き）")
+
+    extra = {}
+    for u in args.url:
+        if "=" not in u:
+            die(f"--url の書式は DATE=ID です: {u}")
+        d, v = u.split("=", 1)
+        extra[d.strip()] = vid_of(v)
+
+    sessions, all_events, missing = [], [], []
+    for p in args.inputs:
+        path = Path(p)
+        if not path.is_file():
+            die(f"not found: {path}")
+        d = json.loads(path.read_text(encoding="utf-8"))
+        r = d.get("rehearsal", {})
+        date = r.get("date", "")
+        vid = vid_of(r.get("media_url", "")) or extra.get(date, "")
+        if not vid:
+            missing.append(date or str(path))
+        sessions.append({
+            "date": date, "orchestra": r.get("orchestra", ""),
+            "conductor": r.get("conductor", ""), "concert_date": r.get("concert_date", ""),
+            "video_id": vid, "duration_sec": r.get("duration_sec"),
+            "play_sec": r.get("play_sec_rehearsal"),
+            "counts": r.get("counts", {}), "source": str(path),
+            "n_events": len(d.get("events", [])),
+        })
+        for e in d.get("events", []):
+            sec = e.get("instruction_start_sec")
+            if sec is None:
+                sec = to_sec(e.get("instruction_start", "0"))
+            psec = e.get("performance_start_sec")
+            all_events.append({**e, "date": date, "video_id": vid,
+                               "url": f"https://youtu.be/{vid}?t={int(sec)}" if vid else "",
+                               "url_play": (f"https://youtu.be/{vid}?t={int(psec)}"
+                                            if vid and psec is not None else "")})
+
+    sessions.sort(key=lambda s: s["date"])
+    by_id = {(e["date"], e["id"]): e for e in all_events}
+
+    # 練習箇所を鍵で束ねる
+    points = {}
+    for p in args.inputs:
+        d = json.loads(Path(p).read_text(encoding="utf-8"))
+        date = d.get("rehearsal", {}).get("date", "")
+        for pt in d.get("practice_points", []):
+            k = pt.get("key")
+            if not k:
+                continue
+            rec = points.setdefault(k, {
+                "key": k, "piece_lib": pt.get("piece_lib", ""),
+                "measures": pt.get("measures", {}), "target": pt.get("target", ""),
+                "occurrences": [],
+            })
+            for eid in pt.get("events", []):
+                e = by_id.get((date, eid))
+                rec["occurrences"].append({
+                    "date": date, "event_id": eid,
+                    "title": (e or {}).get("title", ""),
+                    "chapter": (e or {}).get("chapter", ""),
+                    "url": (e or {}).get("url", ""),
+                    "aim": (e or {}).get("aim", ""),
+                })
+    for rec in points.values():
+        rec["occurrences"].sort(key=lambda o: (o["date"], o["event_id"]))
+        rec["times"] = len(rec["occurrences"])
+        rec["dates"] = sorted({o["date"] for o in rec["occurrences"]})
+
+    # 曲ごとの集計
+    pieces = {}
+    for e in all_events:
+        pc = e.get("piece") or {}
+        title = pc.get("title") or e.get("chapter") or "（不明）"
+        lib = pc.get("lib") or ""
+        # 回ごとにチャプター名が違う（「Beethoven's 9th」「年末といえば第九」）ので、
+        # **ライブラリ番号を鍵にする**。番号が無いものだけ曲名で束ねる。
+        key = lib or f"?{title}"
+        rec = pieces.setdefault(key, {"lib": lib, "title": title, "titles": set(),
+                                      "dates": set(),
+                                      "n_rehearsal": 0, "play_sec": 0, "events": []})
+        rec["titles"].add(title)
+        rec["dates"].add(e["date"])
+        if e.get("kind") == "rehearsal":
+            rec["n_rehearsal"] += 1
+            rec["play_sec"] += e.get("duration_sec") or 0
+        rec["events"].append({"date": e["date"], "id": e["id"], "title": e.get("title", ""),
+                              "kind": e.get("kind"), "url": e.get("url", ""),
+                              "measures": (e.get("measures") or {}).get("raw", "")})
+    for r in pieces.values():
+        # 最も長い曲名を代表にする（短い略称より情報量が多い）
+        r["titles"] = sorted(r["titles"], key=len, reverse=True)
+        r["title"] = r["titles"][0]
+        r["dates"] = sorted(r["dates"])
+        r["events"].sort(key=lambda x: (x["date"], x["id"]))
+
+    data = {
+        "schema": "leok-rehearsal-cumulative/1",
+        "sessions": sessions,
+        "events": sorted(all_events, key=lambda e: (e["date"], e["id"])),
+        "practice_points": sorted(points.values(),
+                                  key=lambda x: (-x["times"], x["key"])),
+        "pieces": sorted(pieces.values(), key=lambda x: (x["lib"], x["title"])),
+    }
+    out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"events-merge: {len(sessions)} 回 / イベント {len(all_events)} 件 -> {out}")
+    for s in sessions:
+        print(f"  {s['date']}  {s['n_events']:3d}件  video={s['video_id'] or '(なし)'}")
+    rep = [p for p in data["practice_points"] if p["times"] > 1]
+    print(f"  練習箇所 {len(points)} 件（うち複数回 {len(rep)} 件）")
+    for p in rep[:10]:
+        print(f"    {p['times']}回 {p['key']}  {'/'.join(p['dates'])}")
+    if missing:
+        print(f"  警告: 動画IDが無い回があります（リンクを張れません）: {', '.join(missing)}",
+              file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
