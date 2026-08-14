@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""
+chapters-diff — 確認用チャプターの「人が直した結果」を機械的に取り込む。
+
+segments-review --chapters-out が出した確認用チャプターを Chaptr で開き、
+動画を見ながら直したものと元とを突き合わせて、何が変わったかを一覧にする。
+
+人が目で見て報告し、それを別の人（や次の工程）が手で反映すると必ず取りこぼす。
+**差分は機械が取り、判断だけ人がやる**という分担にするための道具。
+
+対応づけの鍵はタイトル先頭の番号（`02` `?05` など）。番号は消さない規約。
+
+読み取る操作:
+    記号(? ※ ♪)が消えた      -> 確認済み・問題なし
+    先頭に -- が付いた        -> 演奏ではない（除外）
+    説明が変わった            -> 内容の訂正
+    時刻が動いた              -> 境界の訂正
+    番号ごと消えた            -> 削除（除外と同じ扱い）
+    番号の無い行が増えた      -> 検出漏れの追加
+
+Usage:
+    chapters-diff 20260809_確認用.txt 20260809_確認用_edited.txt
+    chapters-diff orig.txt edited.txt --json out.json
+
+依存: Python 標準ライブラリのみ
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+LINE = re.compile(r"^\s*(\d+):(\d\d):(\d\d)[.,](\d{1,3})\s+(.*\S)\s*$")
+# 先頭の記号 + 2桁番号。記号は任意、番号が対応づけの鍵
+NUM = re.compile(r"^(?P<excl>--\s*)?(?P<mark>[※♪?]*)\s*(?P<num>\d{2})\b\s*(?P<rest>.*)$")
+MARKS = "※♪?"
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"chapters-diff: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def hms(ms: int) -> str:
+    return f"{ms//3600000}:{ms//60000%60:02d}:{ms//1000%60:02d}.{ms%1000:03d}"
+
+
+def load(path: Path) -> tuple:
+    """番号つき { num: {...} } と、番号なしの行のリストを返す。"""
+    numbered, extra = {}, []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = LINE.match(line)
+        if not m:
+            continue
+        g = m.groups()
+        ms = int(g[0])*3600000 + int(g[1])*60000 + int(g[2])*1000 + int(g[3].ljust(3, "0"))
+        title = g[4]
+        n = NUM.match(title)
+        if n:
+            numbered[n.group("num")] = {
+                "ms": ms, "title": title,
+                "excluded": bool(n.group("excl")),
+                "marks": n.group("mark") or "",
+                "rest": n.group("rest").strip(),
+            }
+        else:
+            extra.append({"ms": ms, "title": title})
+    return numbered, extra
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="chapters-diff", add_help=True)
+    ap.add_argument("original", help="segments-review が出した確認用チャプター")
+    ap.add_argument("edited", help="人が直したもの")
+    ap.add_argument("--json", metavar="FILE", help="機械可読な差分も書く")
+    ap.add_argument("--move-tol", type=float, default=1.0,
+                    help="この秒数以内の時刻差は動かしていないとみなす")
+    args = ap.parse_args()
+
+    for p in (args.original, args.edited):
+        if not Path(p).is_file():
+            die(f"not found: {p}")
+    o_num, _ = load(Path(args.original))
+    e_num, e_extra = load(Path(args.edited))
+
+    confirmed, excluded, retitled, moved, dropped = [], [], [], [], []
+    for num, o in sorted(o_num.items()):
+        e = e_num.get(num)
+        if e is None:
+            dropped.append({"num": num, "was": o["title"], "at": hms(o["ms"])})
+            continue
+        if e["excluded"]:
+            excluded.append({"num": num, "at": hms(e["ms"]), "title": e["rest"]})
+            continue
+        if abs(e["ms"] - o["ms"]) > args.move_tol * 1000:
+            moved.append({"num": num, "from": hms(o["ms"]), "to": hms(e["ms"]),
+                          "delta_sec": round((e["ms"] - o["ms"]) / 1000, 2)})
+        if e["rest"] != o["rest"]:
+            retitled.append({"num": num, "at": hms(e["ms"]),
+                             "from": o["rest"], "to": e["rest"]})
+        if o["marks"] and not e["marks"]:
+            confirmed.append({"num": num, "at": hms(e["ms"]), "marks": o["marks"]})
+
+    pending = [{"num": n, "marks": e["marks"], "at": hms(e["ms"])}
+               for n, e in sorted(e_num.items())
+               if e["marks"] and not e["excluded"]]
+    added = [{"at": hms(x["ms"]), "title": x["title"]} for x in e_extra]
+
+    def show(title, rows, fmt):
+        print(f"\n■ {title}: {len(rows)} 件")
+        for r in rows[:40]:
+            print("   " + fmt(r))
+        if len(rows) > 40:
+            print(f"   ... 他 {len(rows)-40} 件")
+
+    print(f"chapters-diff: {args.original} -> {args.edited}")
+    print(f"  番号つき {len(o_num)} -> {len(e_num)} 件")
+    show("確認済み（記号が外れた）", confirmed, lambda r: f"{r['num']} {r['at']} ({r['marks']})")
+    show("演奏ではない（除外）", excluded, lambda r: f"{r['num']} {r['at']} {r['title']}")
+    show("削除された", dropped, lambda r: f"{r['num']} {r['at']} {r['was']}")
+    show("内容の訂正", retitled, lambda r: f"{r['num']} {r['at']}\n       旧: {r['from']}\n       新: {r['to']}")
+    show("境界の訂正", moved, lambda r: f"{r['num']} {r['from']} -> {r['to']} ({r['delta_sec']:+.2f}s)")
+    show("検出漏れの追加", added, lambda r: f"{r['at']} {r['title']}")
+    show("未確認のまま（記号が残っている）", pending, lambda r: f"{r['num']} {r['at']} ({r['marks']})")
+
+    if args.json:
+        Path(args.json).write_text(json.dumps({
+            "original": args.original, "edited": args.edited,
+            "confirmed": confirmed, "excluded": excluded, "dropped": dropped,
+            "retitled": retitled, "moved": moved, "added": added, "pending": pending,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n-> {args.json}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
