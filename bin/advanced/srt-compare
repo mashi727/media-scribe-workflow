@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+srt-compare — 同一素材に対する複数の転写を突き合わせ、どれがどれだけ拾ったかを測る。
+
+エンジンの優劣は一般論では決まらない。**その素材・その会場・その話者**で測る。
+スキルやベンダーの主張ではなく、手元の実測で選ぶための道具。
+
+測るもの:
+    1. 量        cue 数 / 文字数 / 被覆時間
+    2. 守備範囲  どの系統だけが拾った時間があるか（相互に排他な秒数）
+    3. 語彙      指定した語（固有名詞・曲名）の出現数
+    4. 数字      小節番号らしき表記の数（算用数字・漢数字）
+
+**cue の終端が引き伸ばされている転写は被覆が過大に出る。**
+srt-cap-spans をかけてから比較すること（かけていないと不当に有利に見える）。
+
+Usage:
+    srt-compare a_clipto.srt b_wp.srt c_dg.srt --duration 12340
+    srt-compare *.srt --duration 12340 --terms 野見山,麻衣子,第九,威風堂々
+
+依存: Python 標準ライブラリのみ
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+CUE = re.compile(
+    r"(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*\n(.*?)(?=\n\s*\n|\Z)",
+    re.S)
+KANJI_NUM = re.compile(r"[一二三四五六七八九十百]{1,4}小節")
+ARABIC_NUM = re.compile(r"[0-9]{1,3}小節")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"srt-compare: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def load(path: Path) -> list:
+    out = []
+    for m in CUE.finditer(path.read_text(encoding="utf-8")):
+        g = m.groups()
+        s = int(g[0])*3600 + int(g[1])*60 + int(g[2]) + int(g[3].ljust(3, "0"))/1000
+        e = int(g[4])*3600 + int(g[5])*60 + int(g[6]) + int(g[7].ljust(3, "0"))/1000
+        t = re.sub(r"\[spk\d+\]\s*", "", g[8].strip().replace("\n", ""))
+        if t:
+            out.append((s, e, t))
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="srt-compare", add_help=True)
+    ap.add_argument("srt", nargs="+", help="比較する SRT（2本以上）")
+    ap.add_argument("--duration", type=float, required=True, help="素材の尺 秒")
+    ap.add_argument("--terms", default="",
+                    help="出現数を数える語をカンマ区切りで（固有名詞・曲名）")
+    args = ap.parse_args()
+    if len(args.srt) < 2:
+        die("2本以上を指定してください")
+
+    N = int(args.duration) + 1
+    data = {}
+    for p in args.srt:
+        path = Path(p)
+        if not path.is_file():
+            die(f"not found: {path}")
+        data[path.stem] = load(path)
+
+    def mask(cues):
+        m = bytearray(N)
+        for s, e, _ in cues:
+            for i in range(max(0, int(s)), min(N, int(e) + 1)):
+                m[i] = 1
+        return m
+
+    masks = {k: mask(v) for k, v in data.items()}
+    names = list(data)
+    w = max(len(n) for n in names) + 1
+
+    print(f"素材の尺 {args.duration/3600:.2f}h（{int(args.duration)}秒）\n")
+    print(f"{'系統'.ljust(w)} {'cue':>6} {'文字':>7} {'被覆':>8} {'割合':>6} {'字/被覆秒':>9}")
+    for n in names:
+        cues = data[n]
+        chars = sum(len(t) for _, _, t in cues)
+        cov = sum(masks[n])
+        print(f"{n.ljust(w)} {len(cues):6d} {chars:7d} {cov/60:7.1f}分 "
+              f"{cov/args.duration*100:5.1f}% {chars/max(cov,1):9.2f}")
+
+    print("\n■ 守備範囲（その系統だけが発話と判定した時間）")
+    for n in names:
+        only = sum(1 for i in range(N)
+                   if masks[n][i] and all(not masks[o][i] for o in names if o != n))
+        print(f"  {n.ljust(w)} {only/60:6.1f}分")
+    allm = sum(1 for i in range(N) if all(masks[n][i] for n in names))
+    anym = sum(1 for i in range(N) if any(masks[n][i] for n in names))
+    print(f"  {'全系統が一致'.ljust(w)} {allm/60:6.1f}分")
+    print(f"  {'いずれかが検出'.ljust(w)} {anym/60:6.1f}分")
+
+    if args.terms:
+        terms = [t.strip() for t in args.terms.split(",") if t.strip()]
+        print("\n■ 語の出現数")
+        print("  " + "語".ljust(14) + "".join(n[:12].rjust(14) for n in names))
+        for t in terms:
+            row = "".join(str(sum(x.count(t) for _, _, x in data[n])).rjust(14) for n in names)
+            print("  " + t.ljust(14) + row)
+
+    print("\n■ 小節番号の表記")
+    print("  " + "".ljust(14) + "".join(n[:12].rjust(14) for n in names))
+    for label, pat in (("算用数字", ARABIC_NUM), ("漢数字", KANJI_NUM)):
+        row = "".join(str(sum(len(pat.findall(x)) for _, _, x in data[n])).rjust(14)
+                      for n in names)
+        print("  " + label.ljust(14) + row)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
