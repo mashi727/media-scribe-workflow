@@ -277,7 +277,7 @@ def main() -> int:
     if not src.is_file():
         die(f"input not found: {src}")
     base = Path(args.output) if args.output else src.with_suffix("")
-    srt_path = base.with_suffix(".srt")
+    srt_path = Path(str(base) + ".srt")   # with_suffix はドット入り basename（例 2026.6.17_x）を壊す
     words_path = Path(str(base) + ".words.json")
     meta_path = Path(str(base) + ".meta.json")
 

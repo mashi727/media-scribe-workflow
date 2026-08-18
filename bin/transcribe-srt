@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""
+transcribe-srt — 動画/音声 1 本から、現在使えるベストエフォートの ASR エンジンを
+束ねて **複数の SRT** を1コマンドで作る配管ツール。
+
+思想:
+    「陶器」＝各単機能ツール（whisper-remote / audio-transcribe / audio-transcribe-dg /
+    srt-cap-spans / srt-normalize-numbers / srt-compare）はそのまま。本コマンドは
+    それらを1本のパイプに束ねる「配管」に徹する。ここには ASR ロジックを持たない。
+
+エンジン（既定 wp,kotoba,dg。--engines で個別指定）:
+    wp      Whisper large-v3 を **Zeus（リモートGPU）** で実行。~/.config/zsh/functions/
+            whisper-remote.zsh の関数を呼ぶ。プリセット --orchestra（VAD 緩め・
+            no-condition・ハルシネーション/ループ抑制）。**出力は SRT のみ**
+            （words.json/meta.json は出ない）。--terms 非対応。接続先(zeus/zeus-soto)は
+            whisper-remote が自動判定。SSH/rsync が要る。
+    kotoba  kotoba-whisper v2.0 faster を **ローカル** で実行（bin/advanced/audio-transcribe）。
+            長尺のループ暴走を避けるため --vad --no-condition。3層（srt/words/meta）を出す。
+    dg      Deepgram Nova-3（bin/advanced/audio-transcribe-dg）。DEEPGRAM_API_KEY か
+            --dg-key-file が要る（無ければ自動スキップ）。**音声を外部送信・従量課金**。3層。
+
+後処理（各エンジンの生 SRT を仕上げる。--no-postprocess で無効化）:
+    srt-cap-spans         長尺 Whisper の引き伸ばされた cue 終端を発話速度で抑える（wp/kotoba のみ）
+    srt-normalize-numbers 漢数字→算用数字（小節番号の機械可読化。全エンジン）
+    → 仕上げ版を <base>_<eng>.num.srt として出力。
+
+最後に srt-compare（量/守備範囲/語彙）で **手元の実測サマリ** を出す（--no-compare で無効化）。
+エンジンの優劣は一般論では決まらない。その素材・その会場・その話者で測って選ぶための土台。
+
+出力（例: base=take_L, engines=wp,kotoba,dg, 既定の出力先 <入力の隣>/take_L_srt/）:
+    take_L_wp.srt      take_L_wp.num.srt
+    take_L_kotoba.srt  take_L_kotoba.num.srt   (+ .words.json / .meta.json)
+    take_L_dg.srt      take_L_dg.num.srt        (+ .words.json / .meta.json)
+    take_L_compare.txt
+
+注意:
+    - 一次資料（words.json/meta.json）が要るなら kotoba/dg を使う（wp は SRT のみ）。
+    - wp は Zeus への到達性、dg は API キーと外部送信が前提。まず --dry-run で配線を確認できる。
+
+使い方:
+    transcribe-srt video.mp4
+    transcribe-srt take_L.wav --engines wp,kotoba --terms examples/terms-orchestral.txt
+    transcribe-srt video.mp4 --dry-run          # 実行せず全コマンドを提示
+    transcribe-srt video.mp4 --engines kotoba   # ローカルだけで試す
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent          # リポジトリ直下
+ADV = ROOT / "bin" / "advanced"
+AUDIO_TRANSCRIBE = ADV / "audio-transcribe"
+AUDIO_TRANSCRIBE_DG = ADV / "audio-transcribe-dg"
+SRT_CAP = ADV / "srt-cap-spans"
+SRT_NUM = ADV / "srt-normalize-numbers"
+SRT_COMPARE = ADV / "srt-compare"
+WHISPER_REMOTE_FN = Path.home() / ".config" / "zsh" / "functions" / "whisper-remote.zsh"
+
+KOTOBA_MODEL = "kotoba-tech/kotoba-whisper-v2.0-faster"
+DEFAULT_ENGINES = "wp,kotoba,dg"
+KNOWN_ENGINES = ("wp", "kotoba", "dg")
+
+# 端末色（最小限）
+_C = {"g": "\033[0;32m", "y": "\033[1;33m", "r": "\033[0;31m", "b": "\033[0;34m", "0": "\033[0m"}
+
+
+def c(tag: str, s: str) -> str:
+    return f"{_C[tag]}{s}{_C['0']}" if sys.stderr.isatty() else s
+
+
+def info(s: str) -> None:
+    print(c("b", "• ") + s, file=sys.stderr)
+
+
+def warn(s: str) -> None:
+    print(c("y", "! ") + s, file=sys.stderr)
+
+
+def err(s: str) -> None:
+    print(c("r", "✘ ") + s, file=sys.stderr)
+
+
+def show(cmd: list[str]) -> None:
+    print("  $ " + " ".join(shlex.quote(x) for x in cmd), file=sys.stderr)
+
+
+def run(cmd: list[str], dry: bool, cwd: str | None = None) -> int:
+    """コマンドを表示して実行。dry なら表示のみ。返り値は rc。"""
+    show(cmd)
+    if dry:
+        return 0
+    return subprocess.run(cmd, cwd=cwd).returncode
+
+
+def read_terms_flat(files: list[str]) -> list[str]:
+    """語彙ファイル（1行1語・# コメント可）を読み、語のリストにする。
+    srt-compare の --terms はカンマ区切りのインライン列を取るため、ここで平坦化する
+    （audio-transcribe / dg はファイルを直接取るのでそちらはファイルのまま渡す）。"""
+    terms: list[str] = []
+    for f in files:
+        try:
+            for ln in Path(f).read_text(encoding="utf-8").splitlines():
+                s = ln.strip()
+                if s and not s.startswith("#"):
+                    terms.append(s)
+        except Exception:
+            pass
+    # 重複排除・順序保持
+    return list(dict.fromkeys(terms))
+
+
+def ffprobe_duration(path: Path) -> float | None:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, check=False)
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# エンジン実行（各々、生成した「生 SRT」の Path を返す。失敗/スキップは None）
+# ---------------------------------------------------------------------------
+def run_wp(media: Path, outdir: Path, stem: str, preset: str, force: bool, dry: bool) -> Path | None:
+    """Whisper large-v3 を Zeus で実行（whisper-remote zsh 関数）。SRT のみ。"""
+    if not WHISPER_REMOTE_FN.exists():
+        err(f"wp: whisper-remote が見つかりません: {WHISPER_REMOTE_FN}")
+        return None
+    # whisper-remote は入力と同じディレクトリに <入力stem>_wp.srt を書く。
+    src_srt = media.resolve().parent / f"{media.stem}_wp.srt"
+    dst_srt = outdir / f"{stem}_wp.srt"
+    preset_flag = f"--{preset} " if preset != "none" else ""
+    # $1 に媒体パスを渡すことで、空白・アポストロフィを含む名前でも安全に扱う。
+    zscript = (
+        f"emulate -L zsh; "
+        f"source {shlex.quote(str(WHISPER_REMOTE_FN))} || {{ echo 'cannot source whisper-remote' >&2; exit 3; }}; "
+        f"whisper-remote {preset_flag}--suffix _wp \"$1\""
+    )
+    rc = run(["zsh", "-c", zscript, "zsh", str(media)], dry)
+    if dry:
+        info(f"wp: → {dst_srt}（Zeus 実行後に回収）")
+        return dst_srt
+    if rc != 0:
+        err("wp: whisper-remote が失敗（Zeus への到達性・SSH 設定を確認）")
+        return None
+    if not src_srt.exists():
+        err(f"wp: 期待した SRT が見つかりません: {src_srt}")
+        return None
+    if src_srt != dst_srt:
+        dst_srt.write_bytes(src_srt.read_bytes())
+        src_srt.unlink()
+    info(f"wp: {dst_srt}")
+    return dst_srt
+
+
+def run_kotoba(media: Path, outdir: Path, stem: str, terms: list[str], force: bool, dry: bool) -> Path | None:
+    """kotoba-whisper をローカルで実行（3層出力）。長尺対策に --vad --no-condition。"""
+    base = outdir / f"{stem}_kotoba"
+    cmd = [str(AUDIO_TRANSCRIBE), str(media),
+           "--model", KOTOBA_MODEL, "--vad", "--no-condition",
+           "--no-word-timestamps", "-o", str(base)]
+    for t in terms:
+        cmd += ["--terms", t]
+    if force:
+        cmd += ["--force"]
+    rc = run(cmd, dry)
+    srt = Path(str(base) + ".srt")   # with_suffix はドット入り basename を壊す（audio-transcribe と統一）
+    if dry:
+        return srt
+    if rc != 0 or not srt.exists():
+        err("kotoba: audio-transcribe が失敗")
+        return None
+    info(f"kotoba: {srt}")
+    return srt
+
+
+def run_dg(media: Path, outdir: Path, stem: str, terms: list[str], key_file: str | None,
+           force: bool, dry: bool) -> Path | None:
+    """Deepgram Nova-3（3層出力）。音声を外部送信する。"""
+    base = outdir / f"{stem}_dg"
+    cmd = [str(AUDIO_TRANSCRIBE_DG), str(media), "-o", str(base)]
+    for t in terms:
+        cmd += ["--terms", t]
+    if key_file:
+        cmd += ["--key-file", key_file]
+    if force:
+        cmd += ["--force"]
+    warn("dg: 音声を Deepgram へ送信します（外部送信・従量課金）")
+    rc = run(cmd, dry)
+    srt = Path(str(base) + ".srt")   # with_suffix はドット入り basename を壊す（audio-transcribe と統一）
+    if dry:
+        return srt
+    if rc != 0 or not srt.exists():
+        err("dg: audio-transcribe-dg が失敗")
+        return None
+    info(f"dg: {srt}")
+    return srt
+
+
+# ---------------------------------------------------------------------------
+# 後処理：cap-spans（wp/kotoba のみ）→ normalize-numbers → <base>.num.srt
+# ---------------------------------------------------------------------------
+def postprocess(raw: Path, whisper_family: bool, force: bool, dry: bool) -> Path | None:
+    src = raw
+    if whisper_family:
+        capped = raw.with_suffix(".capped.srt")
+        cmd = [str(SRT_CAP), str(raw), "-o", str(capped)]
+        if force:
+            cmd += ["--force"]
+        if run(cmd, dry) != 0 and not dry:
+            warn(f"後処理: cap-spans に失敗（{raw.name}）— 生 SRT を使う")
+        elif dry or capped.exists():
+            src = capped
+    out = raw.with_suffix(".num.srt")
+    cmd = [str(SRT_NUM), str(src), "-o", str(out)]
+    if force:
+        cmd += ["--force"]
+    if run(cmd, dry) != 0 and not dry:
+        warn(f"後処理: normalize-numbers に失敗（{src.name}）")
+        return None
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="transcribe-srt", add_help=True,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 description="動画/音声 → 複数エンジンで複数 SRT を1コマンド生成。")
+    ap.add_argument("media", help="動画または音声ファイル（ffmpeg が読めるもの）")
+    ap.add_argument("-o", "--outdir", help="出力先ディレクトリ（既定: <入力の隣>/<stem>_srt/）")
+    ap.add_argument("--engines", default=DEFAULT_ENGINES,
+                    help=f"使うエンジン（カンマ区切り。既定: {DEFAULT_ENGINES}。候補: {','.join(KNOWN_ENGINES)}）")
+    ap.add_argument("--terms", metavar="FILE", action="append", default=[],
+                    help="語彙注入ファイル（kotoba/dg に渡す。wp=whisper-remote は非対応）")
+    ap.add_argument("--whisper-preset", default="orchestra",
+                    choices=["orchestra", "meeting", "none"],
+                    help="wp（whisper-remote）のプリセット（既定: orchestra）")
+    ap.add_argument("--dg-key-file", metavar="FILE", help="Deepgram API キーのファイル")
+    ap.add_argument("--no-postprocess", action="store_true",
+                    help="cap-spans / normalize-numbers を適用しない（生 SRT のみ）")
+    ap.add_argument("--no-compare", action="store_true", help="srt-compare を実行しない")
+    ap.add_argument("--force", action="store_true", help="既存出力を上書き")
+    ap.add_argument("--dry-run", action="store_true", help="実行せず計画（全コマンド）を表示")
+    args = ap.parse_args()
+
+    media = Path(args.media)
+    if not media.exists():
+        err(f"入力が見つかりません: {media}")
+        return 1
+    stem = media.stem
+    outdir = Path(args.outdir) if args.outdir else media.resolve().parent / f"{stem}_srt"
+
+    engines = [e.strip() for e in args.engines.split(",") if e.strip()]
+    unknown = [e for e in engines if e not in KNOWN_ENGINES]
+    if unknown:
+        err(f"未知のエンジン: {','.join(unknown)}（候補: {','.join(KNOWN_ENGINES)}）")
+        return 1
+
+    # dg はキーが無ければ静かに外す（best-effort）。
+    if "dg" in engines:
+        if not (args.dg_key_file or os.environ.get("DEEPGRAM_API_KEY")):
+            warn("dg: DEEPGRAM_API_KEY / --dg-key-file が無いためスキップ")
+            engines = [e for e in engines if e != "dg"]
+    if not engines:
+        err("実行できるエンジンがありません")
+        return 1
+
+    dry = args.dry_run
+    info(f"入力: {media}")
+    info(f"出力先: {outdir}")
+    info(f"エンジン: {', '.join(engines)}  後処理: {'なし' if args.no_postprocess else 'cap-spans→num'}")
+    if not dry:
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    # ---- 各エンジン ----
+    raw: dict[str, Path] = {}
+    for eng in engines:
+        print(file=sys.stderr)
+        info(c("g", f"[{eng}] 転写"))
+        if eng == "wp":
+            r = run_wp(media, outdir, stem, args.whisper_preset, args.force, dry)
+        elif eng == "kotoba":
+            r = run_kotoba(media, outdir, stem, args.terms, args.force, dry)
+        elif eng == "dg":
+            r = run_dg(media, outdir, stem, args.terms, args.dg_key_file, args.force, dry)
+        else:
+            r = None
+        if r:
+            raw[eng] = r
+
+    if not raw:
+        err("SRT を1本も生成できませんでした")
+        return 1
+
+    # ---- 後処理 ----
+    clean: dict[str, Path] = {}
+    if not args.no_postprocess:
+        print(file=sys.stderr)
+        info(c("g", "[後処理] cap-spans（wp/kotoba）→ normalize-numbers"))
+        for eng, r in raw.items():
+            out = postprocess(r, eng in ("wp", "kotoba"), args.force, dry)
+            if out:
+                clean[eng] = out
+
+    # ---- 実測比較 ----
+    compare_targets = list((clean or raw).values())
+    if not args.no_compare and len(compare_targets) >= 2:
+        print(file=sys.stderr)
+        info(c("g", "[比較] srt-compare"))
+        dur = ffprobe_duration(media)
+        if dur is None and not dry:
+            warn("尺を ffprobe で取得できず、比較をスキップ")
+        else:
+            cmp_out = outdir / f"{stem}_compare.txt"
+            cmd = [str(SRT_COMPARE)] + [str(p) for p in compare_targets] + \
+                  ["--duration", str(dur if dur is not None else 0)]
+            flat = read_terms_flat(args.terms)
+            if flat:
+                cmd += ["--terms", ",".join(flat)]
+            show(cmd)
+            if not dry:
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                sys.stderr.write(res.stdout)
+                cmp_out.write_text(res.stdout, encoding="utf-8")
+                info(f"比較サマリ: {cmp_out}")
+
+    # ---- まとめ ----
+    print(file=sys.stderr)
+    info(c("g", "=== 生成物 ==="))
+    if dry:
+        info("（--dry-run のため未生成。上記コマンドが実行されます）")
+    else:
+        for p in sorted(outdir.glob(f"{stem}_*")):
+            print(f"    {p}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
