@@ -149,6 +149,7 @@ media-scribe-workflow/
 - [x] bin/advanced/audio-transcribe-dg の作成（Deepgram Nova-3。同一契約で出力）
 - [x] examples/terms-orchestral.txt の作成（両エンジン共通の語彙注入ファイル）
 - [x] rehearsal-sync --init（テイクフォルダ走査 → take.yaml 生成。尺から drift を自動判定）
+- [x] bin/transcribe-srt の作成（動画/音声→複数エンジン[wp=Zeus/kotoba/dg]で複数SRTをワンコマンド生成。cap-spans→normalize-numbers→compare まで）
 
 ## 未実装タスク
 
@@ -208,6 +209,13 @@ bin/rehearsal-sync take.yaml --dry-run  # 計画のみ
 bin/rehearsal-sync take.yaml --keep-work -v  # 中間生成物を残す/詳細ログ
 # スキーマ: examples/take.yaml
 
+# 文字起こし: 動画/音声→複数エンジンで複数SRTをワンコマンド（wp=Zeus/kotoba/dg を束ねる）
+bin/transcribe-srt video.mp4                       # 既定 wp,kotoba,dg（dg はキーがあれば自動追加）
+bin/transcribe-srt take_L.wav --engines kotoba --terms examples/terms-orchestral.txt
+bin/transcribe-srt video.mp4 --dry-run             # 実行せず計画（全コマンド）を提示
+#   各SRTに cap-spans→normalize-numbers を掛け、srt-compare で実測サマリまで出す
+#   wp は whisper-remote(Zeus)経由で SRT のみ。3層(words/meta)が要るなら下の個別ツールを使う
+
 # 文字起こし（2エンジン並走。出力契約は共通: .srt / .words.json / .meta.json）
 #   入力は原盤の WAV/FLAC を使う（非可逆・低ビットレートは警告が出る）
 #   語彙ファイルは両エンジンで共用（1行1語・# コメント可）
@@ -233,6 +241,7 @@ java -jar $PADTOOLS_HOME/PadTools.jar docs/pad/workflow-basic.spd
 
 ## 参考
 
+- 収録→ダッシュボードの通し手順（入出力・設計意図の系譜つき）: docs/workflow-rehearsal-to-dashboard.md
 - Mermaid形式のワークフロー図: docs/workflow-diagrams.md
 - PAD図（ソース）: docs/pad/*.spd
 - PAD図（PNG）: docs/pad/*.png

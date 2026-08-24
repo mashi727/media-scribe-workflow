@@ -26,7 +26,8 @@
 ├── bin/vce-encode          VCE → チャプター付き単一動画
 └── bin/vce-split           VCE → チャプター分割動画
 
-[文字起こし (bin/advanced)]
+[文字起こし]
+├── bin/transcribe-srt                動画/音声 → 複数エンジンで複数SRTをワンコマンド
 ├── bin/advanced/audio-transcribe     Whisper 系 (faster-whisper, 既定 large-v3)
 └── bin/advanced/audio-transcribe-dg  Deepgram Nova-3 (REST)
 
@@ -73,6 +74,7 @@ CLI 配管ツール + レポートパイプライン      ⇆      動画チャ�
 
 | コマンド | 説明 |
 |---------|------|
+| `transcribe-srt` | **動画/音声1本 → 複数エンジンで複数SRT**（wp=Zeus・kotoba・Deepgram を束ね、cap-spans→normalize-numbers→compare まで）。`--engines` で構成可変。wp は whisper-remote 経由で SRT のみ |
 | `advanced/audio-transcribe` | Whisper 系（faster-whisper + stable-ts）。既定 `large-v3`。`--terms` で hotwords 注入 |
 | `advanced/audio-transcribe-dg` | Deepgram Nova-3（REST・標準ライブラリのみ）。`--terms` で Keyterm Prompting、`--diarize` で話者分離 |
 

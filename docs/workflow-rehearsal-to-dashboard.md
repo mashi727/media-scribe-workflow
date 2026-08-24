@@ -33,6 +33,26 @@
 **[2] より前は何度でもやり直せる。[3] 以降は章立てに依存するので、切り直すと下流が全部作り直しになる。**
 Chaptr での確認を明示的な凍結点として扱うこと。
 
+### アーティファクトの系譜（入力 → 出力 → 設計意図）
+
+**元になるメディアファイル群**（[0] のフォルダ）を起点に、各フェーズが何を受け取り何を生むか、
+なぜその形なのかを一望する。詳細な手順・実測値・落とし穴は各節を参照。
+
+| # | フェーズ / ツール | 入力 | 出力 | 設計意図（なぜこの形か） |
+|---|---|---|---|---|
+| [0] | 収録（現場） | — | `movies/*.mp4` ＋ `L/*.wav` ＋ `R/*.wav`（32-bit float） | 32f＝クリップしない。L/R は独立レコーダー＝冗長性。転写は片ch |
+| [1] | `rehearsal-sync` | [0] のフォルダ ＋ `take.yaml` | **全長マスター**.mp4（映像＋差し替え済み音声・全長） | 各chを個別に映像へ同期し、L↔R ずれとクロックドリフトを同時に吸収 |
+| [2] | Chaptr（人） | 全長マスター | `chapters.txt`（章立て） | **凍結点**。記録の境界は出来事の側で定義する（appraisal） |
+| [3] | `video-cut-chapters` | 全長マスター ＋ `chapters.txt` | **原本**.mp4 ＋ `原本.txt` ＋ `原本_youtube.txt` | 無劣化カット。転写を編集の後ろに置く＝**SRT の再タイミングが不要** |
+| [4] | ffmpeg ＋ YouTube | 原本.mp4 ＋ `原本_youtube.txt` | 配信用 mp4 ＋ **videoID** | 手元に動画を残さない運用が成立。ダッシュボード導線の起点 |
+| [5] | `transcribe-srt` ／ `audio-transcribe(-dg)` | **原本**の片ch音声（WAV） | 複数の `.srt`（＋ `.words.json` / `.meta.json`） | 一次資料＝media＋words＋meta、**SRT は派生**。Whisper は Zeus・複数エンジンで実測比較 |
+| [6] | `/rehearsal` skill | 原本 ＋ SRT ＋ `chapters.txt` | **統合記録**.tex/.pdf（＋ `events.json`） | ダッシュボードが読むのは統合記録の **.tex** だけ。章立て＝チャプター |
+| [7] | `tex-link-timestamps` | 統合記録.tex ＋ videoID | リンク版 .tex（`\ts{}`→YouTube） | 界面（`\ts{}`）は不変・定義だけ差し替え。`build_leok` と共存させる |
+| [8] | `build_leok_all.py` → push | 統合記録.tex ＋ `leok_videos.json` ＋ `leok_program.json` | **`/leok/` ダッシュボード**（デプロイ） | `.tex` を唯一の真実に。**push＝デプロイ** |
+
+各行の「出力」は次の行の「入力」になる。**[3] 以降はすべて `chapters.txt`（[2] の凍結点）から導出**
+される点が、このパイプラインの背骨。
+
 ---
 
 ## [0] 収録
@@ -248,8 +268,17 @@ YouTube にアップロードし、`原本_youtube.txt` を説明欄へ貼る。
 
 **入力は片チャンネルの WAV。**（[0] の理由による。ステレオを渡さない）
 
+> **ワンコマンド版**: `bin/transcribe-srt take_L.wav --terms examples/terms-orchestral.txt`
+> が wp（whisper-remote＝Zeus）・kotoba（ローカル）・Deepgram（キーがあれば）を束ねて
+> **複数の SRT** を作り、各SRTに `srt-cap-spans`→`srt-normalize-numbers` を掛けて
+> `srt-compare` の実測サマリまで出す（`--engines` で構成可変）。ただし **wp（Zeus）は
+> whisper-remote 経由で SRT のみ**を返し、`words.json`/`meta.json` は出ない。**一次資料の
+> 3層が要る曲別記録では、下の kotoba/Deepgram（＝ `audio-transcribe(-dg)`）の3層出力**を
+> 大本に使い、`transcribe-srt` は複数SRTの下読み・実測比較に併用する。
+
 ```bash
-# Whisper large-v3（Zeus GPU 664秒 / 3.7h）
+# Whisper large-v3（ローカル faster-whisper。3層を出す。Zeus GPU で回すなら
+#   whisper-remote / transcribe-srt を使う＝664秒 / 3.7h）
 bin/advanced/audio-transcribe take_L.wav -o take_L_wp \
     --terms examples/terms-orchestral.txt --no-condition --chunk 10
 
