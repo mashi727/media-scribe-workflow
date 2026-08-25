@@ -31,7 +31,12 @@
 ├── bin/advanced/audio-transcribe     Whisper 系 (faster-whisper, 既定 large-v3)
 └── bin/advanced/audio-transcribe-dg  Deepgram Nova-3 (REST)
 
-[統合ワークフロー]
+[収録の仕上げ・同期 (別録り L/R 音声 + 映像)]
+├── bin/rehearsal-sync             映像 + 別録り L/R → YAML 1枚で「同期・差し替え済み映像」
+├── bin/rehearsal-finalize-audio   音声のみ: 連結→正規化→(L↔R相互同期)→ステレオ化
+└── bin/performance-finalize-audio 本番録音: ピーク正規化のみ (ダイナミクス保持)
+
+[記録ワークフロー]
 ├── bin/rehearsal-download  YouTube DL + Whisper 起動
 └── bin/rehearsal-finalize  PDF 生成 + チャプター抽出
 
@@ -65,6 +70,18 @@ CLI 配管ツール + レポートパイプライン      ⇆      動画チャ�
 | `video-chapters` | 複数動画をチャプター付きで結合 |
 | `ytdl` | YouTube 動画ダウンロード |
 | `jsonl2md` | JSONL → Markdown 変換 |
+
+### 収録の仕上げ・同期（別録り音声 + 映像）
+
+別録りした L/R 音声（例: RODE Wireless Pro の TX1/TX2 内部録音）とカメラ映像（例: Insta360 Ace Pro 2）を、**YAML 設定 1 枚で「同期・差し替え済み映像」まで全自動生成**する。L(TX1)/R(TX2) は独立レコーダーで開始時刻もクロックも別なので、先にステレオ結合すると左右が数十秒ズレ得る。そこで**各 ch を共通基準の「映像」へ個別同期してから結合**する。
+
+| コマンド | 説明 |
+|---------|------|
+| `rehearsal-sync` | **映像 + 別録り L/R → 同期・差し替え済み映像をワンコマンド**。`--init` でテイクフォルダを走査して `take.yaml` を生成 → その YAML を渡すと、映像連結 → L/R 連結+正規化（loudnorm/peak・任意でドリフト補正）→ 各 ch を映像へ個別同期 → mux（映像は `-c:v copy` 無劣化）まで実行。`--dry-run` / `--keep-work` / `-v` |
+| `rehearsal-finalize-audio` | **音声のみ**の仕上げ。WAV 連結 → loudnorm 正規化。`--stereo` で L↔R を相互相関同期 → ステレオ 1 本化（映像が無い素材向け）、`--drift` でクロックドリフト補正、`--archive` でピーク正規化版も追加生成 |
+| `performance-finalize-audio` | 本番録音用。ピーク正規化のみ（ダイナミクス完全保持） |
+
+設定スキーマは [`examples/take.yaml`](examples/take.yaml) を参照。
 
 ### 文字起こし（2エンジン並走）
 
@@ -131,6 +148,22 @@ export PATH="$(pwd)/bin:$PATH"
 ```
 
 ## Usage
+
+### 収録 → 同期済み映像（ワンコマンド）
+
+別録り L/R 音声 + カメラ映像を、YAML 1 枚で同期・差し替え済みの映像に仕上げる:
+
+```bash
+# 1. テイクフォルダを走査して take.yaml を生成（必ず目を通す）
+rehearsal-sync <take_dir> --init
+
+# 2. YAML を渡すと最終映像まで一気通貫（映像連結→L/R正規化→映像へ個別同期→mux）
+rehearsal-sync take.yaml --dry-run   # まず計画だけ確認
+rehearsal-sync take.yaml             # 実行
+
+# 映像が無い素材（音声のみ）は L↔R を直接同期してステレオ化
+rehearsal-finalize-audio --stereo --drift
+```
 
 ### 基本ワークフロー
 
