@@ -195,6 +195,7 @@ msw-pipeline rehearsal.vce.json --srt rehearsal.srt -o report.pdf
 - [`docs/workflow-diagrams.md`](docs/workflow-diagrams.md) — Mermaid ワークフロー図
 - [`docs/pad/`](docs/pad/) — PAD 図（ソース `.spd` + PNG）
 - [`docs/DESIGN_PRINCIPLES.md`](docs/DESIGN_PRINCIPLES.md) — 設計原則
+- [`docs/design/knowledge-layer-schema.md`](docs/design/knowledge-layer-schema.md) — **L3 知識層スキーマ** — 一次資料（決定論的 SoT）と解釈層を分離し、olog（型=object・射=morphism）＋豊穣＋層で知識構造を定義
 
 ## License
 
