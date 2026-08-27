@@ -631,6 +631,17 @@ def main() -> int:
                             "-o", str(dst), "--window", drift_win,
                             "--bit-depth", str(norm.get("bit_depth", "24"))])
             l_src, r_src = work / "L_fix.wav", work / "R_fix.wav"
+            # 各chを映像へ個別に補正しても、補正残差が食い違うため L↔R には相対
+            # ドリフトが残る（結合するとエコー／音像の偏りになる。映像基準は許容内でも
+            # L↔R は数十msズレうる）。L を基準に R をもう一段補正して左右を密着させる。
+            # ドリフトが min-ppm 未満（TC 収録など）なら audio-drift-correct はコピー
+            # 出力＝実質 no-op。channel_drift_correct: false で無効化できる。
+            if bool(sync.get("channel_drift_correct", True)):
+                log("    R を L 基準で相対ドリフト補正（L↔R を密着させる）")
+                runner.run([ADV / "audio-drift-correct", str(l_src), str(r_src),
+                            "-o", str(work / "R_fix2.wav"), "--window", drift_win,
+                            "--bit-depth", str(norm.get("bit_depth", "24"))])
+                r_src = work / "R_fix2.wav"
 
         log("[3/4] 各チャンネルを映像へ個別同期 → [4/4] 結合して mux")
         if args.dry_run:
@@ -673,7 +684,8 @@ def main() -> int:
     # --- 後始末 ---
     if not args.dry_run and not args.keep_work:
         for f in ("video.mp4", "L_concat.wav", "R_concat.wav", "L.wav", "R.wav",
-                  "L_fix.wav", "R_fix.wav", "stereo_concat.wav", "stereo.wav", "stereo_fix.wav"):
+                  "L_fix.wav", "R_fix.wav", "R_fix2.wav", "stereo_concat.wav",
+                  "stereo.wav", "stereo_fix.wav"):
             (work / f).unlink(missing_ok=True)
         try:
             work.rmdir()
