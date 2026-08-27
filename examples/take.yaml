@@ -8,6 +8,8 @@
 #   rehearsal-sync take.yaml
 #   rehearsal-sync take.yaml --dry-run     # 実行される配管コマンドを列挙するだけ
 #   rehearsal-sync take.yaml --keep-work   # 中間生成物を残す（既定は完了時に削除）
+#   rehearsal-sync take.yaml --reuse-work  # .work の既存中間物が入力より新しければ再利用し
+#                                          #   その工程を省く（結果は不変。再実行の待ち時間削減）
 #   rehearsal-sync take.yaml -v            # 実行コマンドを逐次表示
 #   rehearsal-sync take.yaml --force       # 検証に失敗しても中断せず続行
 #

@@ -56,10 +56,29 @@ def log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def up_to_date(output: Path, inputs: list[Path]) -> bool:
+    """output が存在し、全 inputs 以降に更新されていれば再利用可（True）。
+    どれか 1 つでも output より新しい/欠けていれば False（作り直し）。"""
+    if not output.is_file():
+        return False
+    try:
+        omt = output.stat().st_mtime
+    except OSError:
+        return False
+    for i in inputs:
+        try:
+            if not i.is_file() or i.stat().st_mtime > omt:
+                return False
+        except OSError:
+            return False
+    return True
+
+
 class Runner:
-    def __init__(self, dry_run: bool, verbose: bool):
+    def __init__(self, dry_run: bool, verbose: bool, reuse: bool = False):
         self.dry_run = dry_run
         self.verbose = verbose
+        self.reuse = reuse
 
     def run(self, cmd: list[str]) -> None:
         printable = " ".join(str(c) for c in cmd)
@@ -71,6 +90,16 @@ class Runner:
         res = subprocess.run([str(c) for c in cmd], check=False)
         if res.returncode != 0:
             die(f"command failed ({res.returncode}): {printable}")
+
+    def step(self, cmd: list[str], output: Path, inputs: list[Path]) -> bool:
+        """output を生成する cmd を実行。--reuse-work 時、output が全 inputs より
+        新しく既存なら再実行せず再利用する（結果は不変・待ち時間だけ削減）。
+        戻り値: 実行したら True、再利用でスキップなら False。"""
+        if self.reuse and not self.dry_run and up_to_date(output, inputs):
+            log(f"    [reuse] {output.name}（入力より新しいので再利用）")
+            return False
+        self.run(cmd)
+        return True
 
 
 def as_list(v) -> list:
@@ -305,8 +334,8 @@ def concat_media(runner: Runner, tool: str, inputs: list[Path], output: Path,
     """配管の *-concat を呼んでロスレス連結。1 本ならそのまま返す（連結不要）。"""
     if len(inputs) == 1:
         return inputs[0]
-    runner.run([str(ADV / tool), *[str(p) for p in inputs],
-                "-o", str(output), *(extra or [])])
+    runner.step([str(ADV / tool), *[str(p) for p in inputs],
+                 "-o", str(output), *(extra or [])], output, inputs)
     return output
 
 
@@ -316,18 +345,18 @@ def normalize_channel(runner: Runner, method: str, norm: dict,
     if method == "none":
         return src
     if method == "loudnorm":
-        runner.run([
+        runner.step([
             ADV / "audio-normalize-loudnorm", str(src), "-o", str(dst),
             "-i", str(norm.get("I", -14)),
             "-tp", str(norm.get("TP", -1.5)),
             "-lra", str(norm.get("LRA", 11)),
             "--bit-depth", str(norm.get("bit_depth", "24")),
-        ])
+        ], dst, [src])
     elif method == "peak":
-        runner.run([
+        runner.step([
             ADV / "audio-normalize-peak", str(src), "-o", str(dst),
             "--bit-depth", str(norm.get("bit_depth", "24")),
-        ])
+        ], dst, [src])
     else:
         die(f"unknown normalize.method: {method}")
     return dst
@@ -489,6 +518,9 @@ def main() -> int:
                          "既存の take.yaml は上書きしない（--force で上書き）")
     ap.add_argument("--dry-run", action="store_true", help="実行せず計画を表示")
     ap.add_argument("--keep-work", action="store_true", help="中間生成物を消さない")
+    ap.add_argument("--reuse-work", action="store_true",
+                    help="既存の中間生成物(.work)が入力より新しければ再利用し、その工程を"
+                         "省く（結果は不変・待ち時間だけ削減）。中間物は次回のため保持する")
     ap.add_argument("--force", action="store_true",
                     help="同期の信頼度が低くても中断せず続行する"
                          "（--init 時は take.yaml の上書きを許可）")
@@ -505,7 +537,7 @@ def main() -> int:
     with open(cfg_path, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh) or {}
 
-    runner = Runner(args.dry_run, args.verbose)
+    runner = Runner(args.dry_run, args.verbose, args.reuse_work)
 
     def rel(p: str) -> Path:
         pp = Path(p)
@@ -591,9 +623,10 @@ def main() -> int:
         st_concat = concat_media(runner, "audio-concat", stereo_in, work / "stereo_concat.wav", ["--any-format"])
         stereo = normalize_channel(runner, method, norm, st_concat, work / "stereo.wav")
         if drift_on:
-            runner.run([ADV / "audio-drift-correct", str(video_single), str(stereo),
-                        "-o", str(work / "stereo_fix.wav"), "--window", drift_win,
-                        "--bit-depth", str(norm.get("bit_depth", "24"))])
+            runner.step([ADV / "audio-drift-correct", str(video_single), str(stereo),
+                         "-o", str(work / "stereo_fix.wav"), "--window", drift_win,
+                         "--bit-depth", str(norm.get("bit_depth", "24"))],
+                        work / "stereo_fix.wav", [video_single, stereo])
             stereo = work / "stereo_fix.wav"
 
         log("[3/4] 映像へ同期 → [4/4] mux")
@@ -627,9 +660,10 @@ def main() -> int:
         r_src = normalize_channel(runner, method, norm, r_concat, work / "R.wav")
         if drift_on:
             for src, dst in ((l_src, work / "L_fix.wav"), (r_src, work / "R_fix.wav")):
-                runner.run([ADV / "audio-drift-correct", str(video_single), str(src),
-                            "-o", str(dst), "--window", drift_win,
-                            "--bit-depth", str(norm.get("bit_depth", "24"))])
+                runner.step([ADV / "audio-drift-correct", str(video_single), str(src),
+                             "-o", str(dst), "--window", drift_win,
+                             "--bit-depth", str(norm.get("bit_depth", "24"))],
+                            dst, [video_single, src])
             l_src, r_src = work / "L_fix.wav", work / "R_fix.wav"
             # 各chを映像へ個別に補正しても、補正残差が食い違うため L↔R には相対
             # ドリフトが残る（結合するとエコー／音像の偏りになる。映像基準は許容内でも
@@ -638,9 +672,10 @@ def main() -> int:
             # 出力＝実質 no-op。channel_drift_correct: false で無効化できる。
             if bool(sync.get("channel_drift_correct", True)):
                 log("    R を L 基準で相対ドリフト補正（L↔R を密着させる）")
-                runner.run([ADV / "audio-drift-correct", str(l_src), str(r_src),
-                            "-o", str(work / "R_fix2.wav"), "--window", drift_win,
-                            "--bit-depth", str(norm.get("bit_depth", "24"))])
+                runner.step([ADV / "audio-drift-correct", str(l_src), str(r_src),
+                             "-o", str(work / "R_fix2.wav"), "--window", drift_win,
+                             "--bit-depth", str(norm.get("bit_depth", "24"))],
+                            work / "R_fix2.wav", [l_src, r_src])
                 r_src = work / "R_fix2.wav"
 
         log("[3/4] 各チャンネルを映像へ個別同期 → [4/4] 結合して mux")
@@ -681,8 +716,8 @@ def main() -> int:
                 "-shortest", str(output),
             ])
 
-    # --- 後始末 ---
-    if not args.dry_run and not args.keep_work:
+    # --- 後始末 ---（--reuse-work 時は次回再利用のため中間物を残す）
+    if not args.dry_run and not args.keep_work and not args.reuse_work:
         for f in ("video.mp4", "L_concat.wav", "R_concat.wav", "L.wav", "R.wav",
                   "L_fix.wav", "R_fix.wav", "R_fix2.wav", "stereo_concat.wav",
                   "stereo.wav", "stereo_fix.wav"):
