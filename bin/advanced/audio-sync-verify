@@ -7,10 +7,15 @@ audio-sync-offset は全体相関で単一のオフセットを返すが、そ�
 連結した映像では、先頭クリップだけが一致し全体スコアは高いまま、2 本目以降には
 まったく別の音声が乗る。
 
-本ツールは動画を N 地点に分けて局所相関を取り、各地点で
-    - 相関スコアが閾値以上
-    - 残差（想定オフセットからのズレ）が許容内
-であることを確認する。1 地点でも外れれば異常として非ゼロ終了する。
+本ツールは動画を N 地点に分けて局所相関を取り、各地点を次に分類する:
+    ok         … 強い相関・残差が許容内（＝整合を確認できた）
+    misaligned … 強い相関だが残差が許容超（＝別の音声が乗る。真の不整合）
+    weak       … 相関が弱い（静音・拍手など。判定不能）
+    uncovered  … 音声側が範囲外（その映像位置に外部音声が無いだけ）
+**真の不整合(misaligned)が無く、整合(ok)を min-good 地点以上で確認できれば合格**。
+頭の前置き（カメラだけ先に回した等）や末尾の弱相関で毎回失敗しないよう、
+uncovered / weak は失敗に数えない。オフセットが全くの誤りなら ok 地点が
+確保できず（全域 uncovered/weak）不合格になる。
 
 長尺でも軽い: 全長を展開せず、各プローブ位置だけを -ss で切り出して相関する。
 
@@ -101,6 +106,8 @@ def main() -> int:
                     help="各地点で要求する相関スコア (default: 10)")
     ap.add_argument("--tolerance", type=float, default=0.5,
                     help="許容する残差秒 (default: 0.5)")
+    ap.add_argument("--min-good", type=int, default=3,
+                    help="合格に必要な『整合を確認できた地点』数 (default: 3)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -115,46 +122,73 @@ def main() -> int:
     n = max(2, args.probes)
     positions = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
 
-    results, failures = [], []
+    # 各プローブを分類する（分類基準は本ファイル冒頭の docstring 参照）。
+    # a_ss = t - offset は t に単調増加なので、uncovered は必ず頭か末尾に寄る
+    # （中間に音声の穴は生じない）。
+    results = []
     for t in positions:
         a_ss = t - args.offset          # 映像時刻 t に対応する音声時刻
         if a_ss < 0 or a_ss + wn > adur:
-            results.append({"t": round(t, 1), "status": "out_of_range"})
-            failures.append((t, "音声側が範囲外"))
+            results.append({"t": round(t, 1), "status": "uncovered"})
             continue
         v = probe(args.video, t, wn, args.rate)
         a = probe(args.audio, a_ss, wn, args.rate)
         if v is None or a is None:
-            results.append({"t": round(t, 1), "status": "extract_failed"})
-            failures.append((t, "抽出失敗"))
+            results.append({"t": round(t, 1), "status": "extract"})
             continue
         d, sc = local_offset(v, a, args.rate)
-        ok = sc >= args.min_score and abs(d) <= args.tolerance
+        if sc < args.min_score:
+            status = "weak"             # 相関が弱い＝判定不能（失敗にしない）
+        elif abs(d) > args.tolerance:
+            status = "misaligned"       # 強い相関が別ラグに立つ＝真の不整合
+        else:
+            status = "ok"               # 整合を確認
         results.append({"t": round(t, 1), "residual": round(d, 4),
-                        "score": round(sc, 1), "ok": ok})
-        if not ok:
-            reason = "相関なし" if sc < args.min_score else f"残差 {d:+.3f}s 超過"
-            failures.append((t, f"{reason} (score={sc:.1f})"))
+                        "score": round(sc, 1), "status": status})
+
+    good = sum(r["status"] == "ok" for r in results)
+    misaligned = [r for r in results if r["status"] == "misaligned"]
+    weak = sum(r["status"] == "weak" for r in results)
+    uncovered = sum(r["status"] == "uncovered" for r in results)
+    passed = not misaligned and good >= args.min_good
 
     if args.json:
         print(json.dumps({"offset": args.offset, "probes": results,
-                          "passed": not failures}, ensure_ascii=False))
+                          "good": good, "misaligned": len(misaligned),
+                          "weak": weak, "uncovered": uncovered,
+                          "min_good": args.min_good, "passed": passed},
+                         ensure_ascii=False))
     else:
+        _MARK = {"ok": "OK  ", "misaligned": "NG  ", "weak": "weak",
+                 "uncovered": "--  ", "extract": "??  "}
         print(f"audio-sync-verify: offset={args.offset:+.4f}s を {n} 地点で検証",
               file=sys.stderr)
         for r in results:
+            mark = _MARK.get(r["status"], "??  ")
             if "residual" in r:
-                mark = "OK " if r["ok"] else "NG "
                 print(f"  {mark} t={r['t']:>8.1f}s  residual={r['residual']:+.4f}s  "
                       f"score={r['score']:.1f}", file=sys.stderr)
             else:
-                print(f"  NG  t={r['t']:>8.1f}s  {r['status']}", file=sys.stderr)
+                print(f"  {mark} t={r['t']:>8.1f}s  {r['status']}", file=sys.stderr)
+        print(f"  （整合 {good}／不整合 {len(misaligned)}／弱相関 {weak}／"
+              f"範囲外 {uncovered}）", file=sys.stderr)
 
-    if failures:
-        print(f"audio-sync-verify: FAILED — {len(failures)}/{n} 地点で不整合", file=sys.stderr)
-        return 1
-    print(f"audio-sync-verify: PASSED — 全 {n} 地点で整合", file=sys.stderr)
-    return 0
+    if passed:
+        print(f"audio-sync-verify: PASSED — 整合 {good} 地点で確認"
+              f"（不整合なし・範囲外/弱相関は許容）", file=sys.stderr)
+        return 0
+    if misaligned:
+        where = "、".join(f"t={r['t']:.0f}s(残差{r['residual']:+.3f}s)"
+                          for r in misaligned)
+        print(f"audio-sync-verify: FAILED — 真の不整合 {len(misaligned)} 地点: {where}",
+              file=sys.stderr)
+        print("  その位置で映像と別の音声が乗っています"
+              "（クリップの不連続・別素材の混入など）。", file=sys.stderr)
+    else:
+        print(f"audio-sync-verify: FAILED — 整合を確認できた地点が不足"
+              f"（{good} < {args.min_good}）。オフセットが妥当か、"
+              f"素材に共通音があるかを確認してください。", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
