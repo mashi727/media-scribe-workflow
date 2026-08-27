@@ -248,12 +248,25 @@ python3 bin/advanced/video-cut-chapters <master.mp4> -c <chapters.txt> -o 原本
 
 ## [4] 配信用エンコードと公開
 
+**YouTube はどのみち再エンコードする**ので、既定は **VideoToolbox（ハードウェア HEVC）**。
+効率の劣りはビットレートを潤沢に取って相殺する（中間物なので後で消す）。
+
+```bash
+# 速度優先（ハードウェア）。3.7h が libx265 の約100分 → 数分〜十数分に。
+ffmpeg -i 原本.mp4 -c:v hevc_videotoolbox -b:v 12M -tag:v hvc1 \
+    -c:a aac -b:a 192k 原本_YouTube.mp4
+# 12M は 1080p 想定。解像度・動きに応じて 8〜16M で調整。ffmpeg が対応していれば
+# 定品質 -q:v 65（-b:v の代わり）でもよい。事前確認: ffmpeg -encoders | grep videotoolbox
+```
+
+最小サイズで**手元にアーカイブ**したいときだけ libx265（ソフト・約100分）:
+
 ```bash
 ffmpeg -i 原本.mp4 -c:v libx265 -crf 24 -tag:v hvc1 -c:a aac -b:a 192k 原本_YouTube.mp4
 ```
 
-実測 4.8GB / 3.10Mbps・SSIM 0.986。VideoToolbox（ハードウェア）は速いが効率が劣り、
-同じ SSIM に 6.4Mbps を要した。**急がないなら libx265。**
+libx265 は実測 4.8GB / 3.10Mbps・SSIM 0.986。VideoToolbox は同 SSIM に約2倍のビットレートを
+要すが、**再圧縮される配信用途では「潤沢ビットレート＋ハード encode」が時間対効果で勝る**。
 
 YouTube にアップロードし、`原本_youtube.txt` を説明欄へ貼る。**videoID を控える**
 （`https://youtu.be/25MxIZQ8JLU` の `25MxIZQ8JLU`）。以降 2 箇所で使う。
