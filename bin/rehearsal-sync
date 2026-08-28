@@ -688,7 +688,16 @@ def main() -> int:
         else:
             sr = audio_sample_rate(l_src)
             offL, scL = measure_offset(video_single, l_src, rate)
-            offR, scR = measure_offset(video_single, r_src, rate)
+            if drift_on and bool(sync.get("channel_drift_correct", True)):
+                # R は「映像」ではなく「L」への直接オフセットで置く。各chを個別に映像へ
+                # 相関させると、映像スクラッチ音（別マイク・別特性・ノイズ多）との相関
+                # ピークが甘く ±10ms 級の誤差が出て、それが L↔R に ±20ms として漏れる
+                # （ドリフトを消しても定常オフセットが残る）。L↔R は同一内容で相関が鋭い
+                # ので、R を L への直接オフセットに乗せれば L↔R が sub-ms で密着する。
+                lr_off, scR = measure_offset(l_src, r_src, rate)
+                offR = offL + lr_off
+            else:
+                offR, scR = measure_offset(video_single, r_src, rate)
             log(f"    offset L = {offL:+.4f}s (score {scL:.1f})   "
                 f"offset R = {offR:+.4f}s (score {scR:.1f})   (@ {sr}Hz)")
 
