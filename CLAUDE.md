@@ -203,7 +203,11 @@ bin/advanced/audio-drift-correct video.mp4 external.wav -o ext_fixed.wav  # 補�
 #   フォルダ例: take/{VID_*.mp4, L/*.wav, R/*.wav} + take.yaml
 #   L/R は独立レコーダーのため、各chを映像へ個別同期してから結合する
 bin/rehearsal-sync <take_dir> --init    # フォルダを走査して take.yaml を生成（要確認）
-bin/rehearsal-sync <take_dir> --init --force  # 既存 take.yaml を上書き
+#   映像1セッションなら take.yaml を1枚。複数セッション（Insta360 Camera01 の
+#   VID_日付_時刻_NNN が複数時刻を持つ等）なら take_<日付_時刻>.yaml を各々吐く。
+#   L/R は _TX1_L / _TX2_R のサフィックスで判定、音声は録音時刻(mtime)の空白
+#   （無ければ尺構造）でセッション分割し、頭のテスト録りを除いて映像と時系列対応。
+bin/rehearsal-sync <take_dir> --init --force  # 既存 take.yaml/take_*.yaml を上書き
 bin/rehearsal-sync take.yaml            # 連結→loudnorm→各ch個別同期→結合mux
 bin/rehearsal-sync take.yaml --dry-run  # 計画のみ
 bin/rehearsal-sync take.yaml --keep-work -v  # 中間生成物を残す/詳細ログ

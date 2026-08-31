@@ -5,6 +5,8 @@
 # 映像を 1 コマンドで生成するための宣言的設定。
 #
 #   rehearsal-sync <take_dir> --init       # フォルダを走査して take.yaml の初版を書く
+#                                          #   複数セッション（VID_日付_時刻_NNN が複数時刻）は
+#                                          #   take_<日付_時刻>.yaml を各々。L/R は _TX1_L/_TX2_R で判定
 #   rehearsal-sync take.yaml
 #   rehearsal-sync take.yaml --dry-run     # 実行される配管コマンドを列挙するだけ
 #   rehearsal-sync take.yaml --keep-work   # 中間生成物を残す（既定は完了時に削除）
@@ -102,16 +104,26 @@ sync:
 output:
   # (1) name … ファイル名だけ指定（拡張子なし）。拡張子は codec から自動、take 直下に置く
   name: 20260802_practice   # → <take>/20260802_practice.mp4（codec: aac のとき）
+                            #   ※ 数字_数字（例 20260802_1327）は "..." で引用符必須。
+                            #     裸だと YAML が桁区切りの整数と解釈して _ が消える。
   # (2) path … フルパス指定（拡張子まで明示。name より優先）。別ディスクへ出すとき等
   # path: /Volumes/4TB/out/final.mp4
   # (3) output 節を丸ごと省略 … take フォルダ名から自動命名（<take>/<フォルダ名>.<ext>）
 
-  codec: aac                # aac | pcm | alac | copy   ※映像は常に -c:v copy 無劣化
+  codec: aac                # 音声。aac | pcm | alac | copy
                             #   aac  -> mp4（配布・視聴向き。音声のみ再エンコード）
                             #   pcm  -> mov（24bit 無劣化・アーカイブ向き、ファイル大）
                             #   alac -> mov（可逆圧縮）
                             #   copy -> 入力音声コーデックをそのままコピー（拡張子は mkv）
   bitrate: 320k             # codec: aac のときのみ有効
+
+  # video（任意）— 映像の扱い。書かなければ -c:v copy（無劣化・瞬時）。
+  #   書くと GPU(VideoToolbox) で scale + 再エンコード。巨大な原盤を作らず、この 1 パスで
+  #   直接プロキシを吐ける（chaptr でのカット位置・チャプター打ち用の軽い 480p 等）。
+  # video:
+  #   height: 480             # scale=-2:height（16:9 → 854x480）
+  #   codec: hevc             # hevc/h265(GPU・小) | h264/avc(GPU・Windows既定でも再生可)
+  #   bitrate: 1.2M           # 目安: 480p hevc=1.2M / h264=2M
 
 # ------------------------------------------------------------
 # work_dir（任意）— 中間生成物の置き場。既定 .work

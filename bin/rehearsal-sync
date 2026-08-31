@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -147,6 +148,8 @@ STEREO_DIRS = ("stereo", "audio", "mix")
 VIDEO_EXTS = (".mp4", ".mov", ".mts", ".m4v", ".mkv")
 DRIFT_MIN_SEC = 3600.0      # これを超える尺はドリフト補正を既定で有効化
 LONG_TAKE_SEC = 7200.0      # これを超える尺は測定窓と検証地点を増やす
+BLIP_SEC = 60.0             # これ未満の音声は頭のテスト録りとみなしセッションから除外
+GAP_THRESH = 120.0          # 隣接音声ファイル間にこれ以上の無録音空白があれば境界
 
 
 def probe_duration(path: Path) -> float:
@@ -183,77 +186,197 @@ def _media_in(d: Path, exts: tuple) -> list[Path]:
                   and not p.name.startswith("."))
 
 
-def _pattern_for(files: list[Path], parent_rel: str) -> str:
-    """ファイル群を代表する glob を作る。共通接頭辞があればそれを使う。"""
-    ext = files[0].suffix.lower()
-    stems = [f.stem for f in files]
-    prefix = ""
-    if len(stems) > 1:
-        for i, ch in enumerate(stems[0]):
-            if all(len(s) > i and s[i] == ch for s in stems[1:]):
-                prefix += ch
-            else:
-                break
-    # 連番の途中まで食い込んだ接頭辞は、桁が増えた瞬間に取りこぼす
-    # （049..057 から "_0" を拾うと _100 に当たらない）。末尾の数字は捨てる。
-    prefix = prefix.rstrip("0123456789")
-    prefix = prefix if len(prefix) >= 3 else ""
-    head = f"{parent_rel}/" if parent_rel else ""
-    return f"{head}{prefix}*{ext}"
+def _rel(base: Path, p: Path) -> str:
+    return str(p.relative_to(base))
 
 
-def scan_take(base: Path) -> dict:
-    """テイクフォルダを走査して、take.yaml を書くのに必要な材料を集める。"""
-    found: dict = {"warnings": []}
+def find_video(base: Path) -> tuple[Path | None, list[Path]]:
+    """映像フォルダと映像ファイルを返す。既知名 → cameraNN(Insta360) →
+    映像を含む直下サブフォルダ → base 直下、の順で探す。"""
+    d = _find_dir(base, VIDEO_DIRS)
+    if d and _media_in(d, VIDEO_EXTS):
+        return d, _media_in(d, VIDEO_EXTS)
+    for child in sorted(base.iterdir()):
+        if (child.is_dir() and re.match(r"^camera\d+$", child.name.lower())
+                and _media_in(child, VIDEO_EXTS)):
+            return child, _media_in(child, VIDEO_EXTS)
+    for child in sorted(base.iterdir()):
+        if child.is_dir() and _media_in(child, VIDEO_EXTS):
+            return child, _media_in(child, VIDEO_EXTS)
+    vf = _media_in(base, VIDEO_EXTS)
+    return (None, vf) if vf else (None, [])
 
-    vdir = _find_dir(base, VIDEO_DIRS)
-    vfiles = _media_in(vdir, VIDEO_EXTS) if vdir else _media_in(base, VIDEO_EXTS)
+
+def video_session_key(p: Path) -> str:
+    """末尾の連番を落としてセッション鍵を得る
+    （VID_20260829_132715_001 → VID_20260829_132715）。連番が無ければ stem 全体。"""
+    m = re.match(r"^(.*)_(\d+)$", p.stem)
+    return m.group(1) if m else p.stem
+
+
+def session_tag(key: str) -> str:
+    """セッション鍵から日付_時刻を取り出す（出力名・work_dir 用）。無ければ鍵を流用。"""
+    m = re.search(r"\d{8}_\d{6}", key)
+    if m:
+        return m.group(0)
+    return re.sub(r"[^0-9A-Za-z_]+", "_", key).strip("_") or "take"
+
+
+def _classify_wav(p: Path) -> str | None:
+    """ファイル名サフィックスから L/R を判定（_L/_TX1 → left, _R/_TX2 → right）。"""
+    n = p.stem.lower()
+    if n.endswith("_l") or "_tx1" in n:
+        return "left"
+    if n.endswith("_r") or "_tx2" in n:
+        return "right"
+    return None
+
+
+def find_audio(base: Path) -> dict:
+    """base 配下（サブフォルダ含む）の wav を L/R に分類。ファイル名サフィックス
+    (_L/_TX1, _R/_TX2) を最優先。無ければ L/R フォルダ → stereo フォルダ →
+    base 直下、の順に従来検出。隠しフォルダ（.work 等）は除外。"""
+    wavs = sorted(
+        p for p in base.rglob("*")
+        if p.is_file() and p.suffix.lower() == ".wav"
+        and not any(part.startswith(".") for part in p.relative_to(base).parts))
+    left = [p for p in wavs if _classify_wav(p) == "left"]
+    right = [p for p in wavs if _classify_wav(p) == "right"]
+    if left and right:
+        return {"left": left, "right": right}
+    ldir, rdir = _find_dir(base, LEFT_DIRS), _find_dir(base, RIGHT_DIRS)
+    if ldir and rdir and _media_in(ldir, (".wav",)) and _media_in(rdir, (".wav",)):
+        return {"left": _media_in(ldir, (".wav",)),
+                "right": _media_in(rdir, (".wav",))}
+    sdir = _find_dir(base, STEREO_DIRS)
+    sfiles = _media_in(sdir, (".wav",)) if sdir else _media_in(base, (".wav",))
+    if not sfiles:
+        sfiles = wavs
+    return {"stereo": sfiles}
+
+
+def cluster_audio(files: list[Path]) -> tuple[list[list[Path]], str]:
+    """連番 wav を録音セッションに割る。録音時刻(mtime)に情報があれば無録音の空白で、
+    無ければ尺構造（自動分割チャンク→端数で閉じる）で分割し、各セッション先頭の
+    短尺テスト録りを除く。戻り値: (セッションのリスト, 使った方式の説明)。"""
+    if not files:
+        return [], ""
+    info = [(p, probe_duration(p), p.stat().st_mtime) for p in files]
+    mtimes = [m for _, _, m in info]
+    use_mtime = (max(mtimes) - min(mtimes)) > 600
+    chunk = 0.0
+    if use_mtime:
+        method = "録音時刻(mtime)の空白"
+    else:
+        method = "尺構造（自動分割チャンク＋端数）"
+        nonblip = [round(d) for _, d, _ in info if d >= BLIP_SEC]
+        chunk = float(max(set(nonblip), key=nonblip.count)) if nonblip else \
+            float(max((round(d) for _, d, _ in info), default=0))
+    segments: list[list[tuple]] = []
+    cur = [info[0]]
+    for prev, item in zip(info, info[1:]):
+        _, d0, m0 = prev
+        _, d1, m1 = item
+        if use_mtime:
+            boundary = (m1 - m0) - d1 > GAP_THRESH   # 連続なら~0、境界で正に開く
+        else:
+            boundary = d0 < chunk * 0.98             # 端数の次で新セッション
+        if boundary:
+            segments.append(cur)
+            cur = [item]
+        else:
+            cur.append(item)
+    segments.append(cur)
+    sessions = []
+    for seg in segments:
+        keep = [p for p, d, _ in seg if d >= BLIP_SEC]
+        if keep:
+            sessions.append(keep)
+    return sessions, method
+
+
+def scan_sessions(base: Path) -> list[dict]:
+    """テイクフォルダを走査し、セッションごとの材料（映像/音声/実測値/警告）を返す。
+    映像1セッションなら 1 要素、複数なら時系列順に複数要素。"""
+    vdir, vfiles = find_video(base)
     if not vfiles:
         die(f"映像が見つかりません: {base}\n"
-            f"（探した場所: {base.name}/ 直下, {'|'.join(VIDEO_DIRS)}/）")
-    found["video_files"] = vfiles
-    found["video_pattern"] = _pattern_for(vfiles, vdir.name if vdir else "")
+            f"（探した場所: {base.name}/ 直下, {'|'.join(VIDEO_DIRS)}/, "
+            f"camera*/, 映像を含む直下サブフォルダ）")
 
-    ldir, rdir = _find_dir(base, LEFT_DIRS), _find_dir(base, RIGHT_DIRS)
-    if ldir and rdir:
-        lf, rf = _media_in(ldir, (".wav",)), _media_in(rdir, (".wav",))
-        if not lf or not rf:
-            die(f"L/R フォルダはありますが wav がありません: {ldir.name}/ {rdir.name}/")
-        found["left_files"], found["right_files"] = lf, rf
-        found["left_pattern"] = _pattern_for(lf, ldir.name)
-        found["right_pattern"] = _pattern_for(rf, rdir.name)
-        if len(lf) != len(rf):
-            found["warnings"].append(
-                f"L({len(lf)}本) と R({len(rf)}本) でファイル数が違います")
+    # 映像をセッション鍵でグループ化（鍵の昇順＝時系列）
+    vgroups: dict[str, list[Path]] = {}
+    for p in vfiles:
+        vgroups.setdefault(video_session_key(p), []).append(p)
+    vkeys = sorted(vgroups)
+
+    audio = find_audio(base)
+    warn_global: list[str] = []
+
+    if "left" in audio:
+        lsess, amethod = cluster_audio(audio["left"])
+        rsess, _ = cluster_audio(audio["right"])
+        amode, acount = "lr", len(lsess)
+        if len(lsess) != len(rsess):
+            warn_global.append(
+                f"L と R のセッション数が違う（L{len(lsess)}/R{len(rsess)}）。"
+                "分割の推定が外れている可能性。各 audio: を目視で直すこと")
+    elif audio.get("stereo"):
+        ssess, amethod = cluster_audio(audio["stereo"])
+        amode, acount = "stereo", len(ssess)
+        warn_global.append(
+            "L/R 別ソースが見つからず stereo として扱った。別録り 2ch なら "
+            "audio.left / audio.right に直すこと")
     else:
-        sdir = _find_dir(base, STEREO_DIRS)
-        sf = _media_in(sdir, (".wav",)) if sdir else _media_in(base, (".wav",))
-        if not sf:
-            die(f"音声が見つかりません: {base}\n"
-                f"（探した場所: L/ と R/, {'|'.join(STEREO_DIRS)}/, {base.name}/ 直下）")
-        found["stereo_files"] = sf
-        found["stereo_pattern"] = _pattern_for(sf, sdir.name if sdir else "")
-        found["warnings"].append(
-            "L/R 別ソースが見つからず stereo として書きました。"
-            "別録り 2ch なら audio.left / audio.right に直してください")
+        die(f"音声が見つかりません: {base}")
 
-    # 連結の可否は「全セグメント同一パラメータ」。違えば先に気付けるようにする。
-    params = {probe_video_params(v) for v in vfiles}
-    if len(params) > 1:
-        found["warnings"].append(
-            "映像セグメントのパラメータが揃っていません（無劣化連結に失敗します）: "
-            + " / ".join(sorted(params)))
-    found["video_params"] = sorted(params)[0] if params else ""
-    return found
+    if acount == 0:
+        die("音声セッションを判別できません（全ファイルが短尺 or 走査失敗）")
+    if len(vkeys) != acount:
+        warn_global.append(
+            f"映像セッション数({len(vkeys)}) と 音声セッション数({acount}) が不一致。"
+            "時系列で先頭から対応づけたが、対応がずれている可能性。要確認")
+
+    sessions: list[dict] = []
+    for i in range(min(len(vkeys), acount)):
+        key = vkeys[i]
+        vf = vgroups[key]
+        ext = vf[0].suffix.lower()
+        vdir_rel = f"{_rel(base, vdir)}/" if vdir else ""
+        params = {probe_video_params(v) for v in vf}
+        warns = list(warn_global)
+        if len(params) > 1:
+            warns.append("映像セグメントのパラメータが揃っていません"
+                         "（無劣化連結に失敗）: " + " / ".join(sorted(params)))
+        s: dict = {
+            "tag": session_tag(key),
+            "video_files": vf,
+            "video_pattern": f"{vdir_rel}{key}_*{ext}",
+            "video_params": sorted(params)[0] if params else "",
+            "audio_method": amethod,
+            "warnings": warns,
+        }
+        if amode == "lr":
+            s["left_files"] = lsess[i]
+            s["right_files"] = rsess[i] if i < len(rsess) else []
+        else:
+            s["stereo_files"] = ssess[i]
+        sessions.append(s)
+    return sessions
 
 
-def render_take_yaml(base: Path, f: dict) -> str:
+def render_session_yaml(base: Path, f: dict, multi: bool) -> str:
     vdur = sum(probe_duration(p) for p in f["video_files"])
+    tag = f["tag"]
+    yname = f"take_{tag}.yaml" if multi else "take.yaml"
+    hdr = f"# {base.name}"
+    if multi:
+        hdr += f" / セッション {tag}"
     lines = [
-        f"# {base.name} — rehearsal-sync 設定（--init 生成。必ず目を通すこと）",
+        f"{hdr} — rehearsal-sync 設定（--init 生成。必ず目を通すこと）",
         "#",
-        "#   rehearsal-sync take.yaml --dry-run     # 計画だけ確認",
-        "#   rehearsal-sync take.yaml               # 実行",
+        f'#   rehearsal-sync "{yname}" --dry-run     # 計画だけ確認',
+        f'#   rehearsal-sync "{yname}"               # 実行',
         "#",
         "# 走査で分かった実測値:",
         f"#   映像 {len(f['video_files'])}本  {f['video_params']}  計 {vdur:.1f}s"
@@ -263,14 +386,16 @@ def render_take_yaml(base: Path, f: dict) -> str:
         ldur = sum(probe_duration(p) for p in f["left_files"])
         rdur = sum(probe_duration(p) for p in f["right_files"])
         lines += [f"#   L {len(f['left_files'])}本 計 {ldur:.1f}s"
-                  f" / R {len(f['right_files'])}本 計 {rdur:.1f}s"]
+                  f" / R {len(f['right_files'])}本 計 {rdur:.1f}s"
+                  f"  （音声分割: {f['audio_method']}）"]
         gap = max(ldur, rdur) - vdur
         if abs(gap) > 60:
             lines += [f"#   音声が映像より {gap/60:+.1f} 分長い（録り始め/止めの差。"
                       "頭合わせは自動検出）"]
     else:
         sdur = sum(probe_duration(p) for p in f["stereo_files"])
-        lines += [f"#   stereo {len(f['stereo_files'])}本 計 {sdur:.1f}s"]
+        lines += [f"#   stereo {len(f['stereo_files'])}本 計 {sdur:.1f}s"
+                  f"  （音声分割: {f['audio_method']}）"]
     for w in f["warnings"]:
         lines.append(f"# 要確認: {w}")
 
@@ -286,10 +411,13 @@ def render_take_yaml(base: Path, f: dict) -> str:
         "audio:",
     ]
     if "left_files" in f:
-        lines += [f'  left:  [ "{f["left_pattern"]}" ]',
-                  f'  right: [ "{f["right_pattern"]}" ]']
+        lines.append("  left:")
+        lines += [f'    - "{_rel(base, p)}"' for p in f["left_files"]]
+        lines.append("  right:")
+        lines += [f'    - "{_rel(base, p)}"' for p in f["right_files"]]
     else:
-        lines += [f'  stereo: [ "{f["stereo_pattern"]}" ]']
+        lines.append("  stereo:")
+        lines += [f'    - "{_rel(base, p)}"' for p in f["stereo_files"]]
     lines += [
         "",
         "normalize:",
@@ -307,6 +435,22 @@ def render_take_yaml(base: Path, f: dict) -> str:
     lines += ["", "sync:", "  verify: true"]
     if long_take:
         lines.append("  verify_probes: 7          # 2時間超なので既定の5より増やす")
+    if "left_files" in f:
+        lines.append("  channel_drift_correct: true  # 別ソース L/R を密着させる")
+    lines += [
+        "",
+        "output:",
+        f'  name: "{tag}"             # 出力名（拡張子は codec から）。適宜改名可',
+        "                            #   ※ 数字_数字 は引用符必須（YAML が桁区切りの整数と解釈し _ が消える）",
+        "  codec: aac                # 音声コーデック",
+        "  bitrate: 320k",
+        "  video:                    # 「最初のエンコード」を軽い 480p プロキシに（chaptr でチャプター打ち用）",
+        "    height: 480             # 16:9 → 854x480（GPU/VideoToolbox）。原盤画質が要るなら video: を丸ごと削れば -c:v copy",
+        "    codec: hevc             # hevc(GPU) | h264(GPU)",
+        "    bitrate: 1.2M",
+    ]
+    if multi:
+        lines += ["", f"work_dir: .work_{tag}"]
     lines.append("")
     return "\n".join(lines)
 
@@ -315,17 +459,30 @@ def cmd_init(target: Path, force: bool) -> int:
     if not target.is_dir():
         die(f"--init にはテイクフォルダを渡してください: {target}")
     base = target.resolve()
-    out = base / "take.yaml"
-    if out.exists() and not force:
-        die(f"既にあります: {out}\n上書きしてよければ --force を付けてください")
-    f = scan_take(base)
-    text = render_take_yaml(base, f)
-    out.write_text(text, encoding="utf-8")
-    log(f"rehearsal-sync: wrote {out}")
-    for w in f["warnings"]:
-        log(f"  要確認: {w}")
-    log("  中身を確認したら: rehearsal-sync "
-        f"{out.name} --dry-run  （{base} で実行）")
+    sessions = scan_sessions(base)
+    if not sessions:
+        die(f"セッションが見つかりません: {base}")
+    multi = len(sessions) > 1
+    outs: list[tuple[Path, dict]] = []
+    for s in sessions:
+        yname = f"take_{s['tag']}.yaml" if multi else "take.yaml"
+        out = base / yname
+        if out.exists() and not force:
+            die(f"既にあります: {out}\n上書きしてよければ --force を付けてください")
+        outs.append((out, s))
+    for out, s in outs:
+        out.write_text(render_session_yaml(base, s, multi), encoding="utf-8")
+        log(f"rehearsal-sync: wrote {out.name}")
+        for w in s["warnings"]:
+            log(f"  要確認: {w}")
+    if multi:
+        log(f"  {len(outs)} セッションを検出。各 yaml を確認してから実行:")
+        for out, _ in outs:
+            log(f'    rehearsal-sync "{out.name}" --dry-run')
+        log(f"  （{base} で実行）")
+    else:
+        log(f"  中身を確認したら: rehearsal-sync {outs[0][0].name} "
+            f"--dry-run  （{base} で実行）")
     return 0
 
 
@@ -507,6 +664,35 @@ def channel_filter(idx: int, offset: float, sr: int, label: str) -> str:
     return f"[{idx}:a]atrim=start_sample={ns},asetpts=PTS-STARTPTS,apad[{label}]"
 
 
+VT_ENCODERS = {"hevc": "hevc_videotoolbox", "h265": "hevc_videotoolbox",
+               "h264": "h264_videotoolbox", "avc": "h264_videotoolbox"}
+
+
+def video_encode_plan(out_cfg: dict) -> tuple[str | None, str, list[str], bool]:
+    """output.video から映像の (scale フィルタ|None, 映像 map, ffmpeg 引数, hwaccel要否)。
+
+    output.video を書かなければ従来どおり -c:v copy（無劣化・瞬時）。書けば GPU
+    (VideoToolbox) で scale+再エンコード（chaptr でのチャプター打ち用の軽い 480p 等。
+    巨大な原盤を作らず、この 1 パスで直接プロキシを吐く）。
+      video:
+        height: 480        # scale=-2:height（16:9 → 854x480）
+        codec: hevc        # hevc/h265(GPU) | h264/avc(GPU)。既定 hevc
+        bitrate: 1.2M      # 既定 1.2M
+    """
+    vconf = out_cfg.get("video")
+    if not vconf:
+        return None, "0:v:0", ["-c:v", "copy"], False
+    height = int(vconf.get("height", 480))
+    codec = str(vconf.get("codec", "hevc")).lower()
+    enc = VT_ENCODERS.get(codec)
+    if enc is None:
+        die(f"unknown output.video.codec: {codec}（hevc|h264）")
+    bitrate = str(vconf.get("bitrate", "1.2M"))
+    tag = "hvc1" if "hevc" in enc else "avc1"
+    return (f"[0:v]scale=-2:{height}[v]", "[v]",
+            ["-c:v", enc, "-b:v", bitrate, "-tag:v", tag, "-g", "30"], True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="rehearsal-sync",
@@ -552,6 +738,8 @@ def main() -> int:
     codec = str(out_cfg.get("codec", "aac"))
     bitrate = str(out_cfg.get("bitrate", "320k"))
     acodec, ext = acodec_args(codec, bitrate)
+    # 映像は既定 -c:v copy（無劣化）。output.video 指定時のみ GPU で scale+再エンコード。
+    vfilter, vmap, vargs, vhwaccel = video_encode_plan(out_cfg)
     # 出力先の決定（優先順）:
     #   1. output.path … フルパス指定（拡張子まで明示。最優先）
     #   2. output.name … ファイル名（拡張子なし）。拡張子は codec から自動、take 直下に置く
@@ -595,6 +783,8 @@ def main() -> int:
         log(f"  audio R    : {len(rights)} file(s)")
     log(f"  normalize  : {method}")
     log(f"  drift      : {'on' if drift.get('enabled') else 'off'}")
+    log(f"  video enc  : {vargs[1]}"
+        + ("（GPU/VideoToolbox 再エンコード）" if vhwaccel else "（copy 無劣化）"))
     log(f"  output     : {output}")
     log(f"  work_dir   : {work}")
     log("=" * 60)
@@ -632,9 +822,11 @@ def main() -> int:
         log("[3/4] 映像へ同期 → [4/4] mux")
         if args.dry_run:
             log("    $ (audio-sync-offset で測定・検証 → adelay/atrim で mux)")
-            log(f"    $ ffmpeg -i {video_single} -i {stereo} "
-                f"-filter_complex '[1:a]adelay=<D>[a]' -map 0:v:0 -map [a] "
-                f"-c:v copy {' '.join(acodec)} -shortest {output}")
+            log(f"    $ ffmpeg {'-hwaccel videotoolbox ' if vhwaccel else ''}"
+                f"-i {video_single} -i {stereo} "
+                f"-filter_complex '{(vfilter + ';') if vfilter else ''}[1:a]adelay=<D>[a]' "
+                f"-map {vmap} -map [a] "
+                f"{' '.join(vargs)} {' '.join(acodec)} -shortest {output}")
         else:
             sr = audio_sample_rate(stereo)
             off, sc = measure_offset(video_single, stereo, rate)
@@ -642,12 +834,15 @@ def main() -> int:
             assert_sync_ok(video_single, [("stereo", stereo, off, sc)],
                            min_score, verify_on, verify_probes, verify_window,
                            tolerance, rate, args.force)
+            afc = channel_filter(1, off, sr, "a")
+            fc = f"{vfilter};{afc}" if vfilter else afc
             runner.run([
                 "ffmpeg", "-hide_banner", "-y", "-v", "warning", "-stats",
+                *(["-hwaccel", "videotoolbox"] if vhwaccel else []),
                 "-i", str(video_single), "-i", str(stereo),
-                "-filter_complex", channel_filter(1, off, sr, "a"),
-                "-map", "0:v:0", "-map", "[a]",
-                "-c:v", "copy", *acodec,
+                "-filter_complex", fc,
+                "-map", vmap, "-map", "[a]",
+                *vargs, *acodec,
                 "-shortest", str(output),
             ])
     else:
@@ -681,10 +876,12 @@ def main() -> int:
         log("[3/4] 各チャンネルを映像へ個別同期 → [4/4] 結合して mux")
         if args.dry_run:
             log("    $ (各chの audio-sync-offset でオフセット測定 → adelay/atrim + join で mux)")
-            log(f"    $ ffmpeg -i {video_single} -i {l_src} -i {r_src} "
-                f"-filter_complex '[1:a]adelay=<DL>[la];[2:a]adelay=<DR>[ra];"
+            log(f"    $ ffmpeg {'-hwaccel videotoolbox ' if vhwaccel else ''}"
+                f"-i {video_single} -i {l_src} -i {r_src} "
+                f"-filter_complex '{(vfilter + ';') if vfilter else ''}"
+                f"[1:a]adelay=<DL>[la];[2:a]adelay=<DR>[ra];"
                 f"[la][ra]join=inputs=2:channel_layout=stereo[a]' "
-                f"-map 0:v:0 -map [a] -c:v copy {' '.join(acodec)} -shortest {output}")
+                f"-map {vmap} -map [a] {' '.join(vargs)} {' '.join(acodec)} -shortest {output}")
         else:
             sr = audio_sample_rate(l_src)
             offL, scL = measure_offset(video_single, l_src, rate)
@@ -711,17 +908,20 @@ def main() -> int:
                     l_src, r_src, offL, offR, rate, verify_probes, verify_window,
                     min_score, float(sync.get("channel_tolerance", 0.005)),
                     args.force)
-            fc = ";".join([
+            fc_parts = [
                 channel_filter(1, offL, sr, "la"),
                 channel_filter(2, offR, sr, "ra"),
                 "[la][ra]join=inputs=2:channel_layout=stereo[a]",
-            ])
+            ]
+            if vfilter:
+                fc_parts.insert(0, vfilter)
             runner.run([
                 "ffmpeg", "-hide_banner", "-y", "-v", "warning", "-stats",
+                *(["-hwaccel", "videotoolbox"] if vhwaccel else []),
                 "-i", str(video_single), "-i", str(l_src), "-i", str(r_src),
-                "-filter_complex", fc,
-                "-map", "0:v:0", "-map", "[a]",
-                "-c:v", "copy", *acodec,
+                "-filter_complex", ";".join(fc_parts),
+                "-map", vmap, "-map", "[a]",
+                *vargs, *acodec,
                 "-shortest", str(output),
             ])
 
