@@ -365,6 +365,19 @@ def scan_sessions(base: Path) -> list[dict]:
     return sessions
 
 
+def session_has_tc(f: dict) -> bool:
+    """このセッションが TC 同期可能か（映像に creation_time、音声に bext TC がある）。
+    tc-offset を実行し exit 0 なら真（内部で ffprobe と WAV ヘッダ解析。高速）。"""
+    vids = f.get("video_files") or []
+    auds = f.get("left_files") or f.get("stereo_files") or []
+    if not vids or not auds:
+        return False
+    r = subprocess.run(
+        [str(ADV / "tc-offset"), str(vids[0]), str(auds[0]), "--value"],
+        capture_output=True, text=True, check=False)
+    return r.returncode == 0
+
+
 def render_session_yaml(base: Path, f: dict, multi: bool) -> str:
     vdur = sum(probe_duration(p) for p in f["video_files"])
     tag = f["tag"]
@@ -432,10 +445,15 @@ def render_session_yaml(base: Path, f: dict, multi: bool) -> str:
         lines.append(f"  window: {240 if long_take else 120}"
                      + ("               # 長尺なので測定窓を広げる（既定 120）"
                         if long_take else "               # 既定値"))
-    lines += ["", "sync:", "  verify: true"]
+    tc = session_has_tc(f)
+    lines += ["", "sync:"]
+    if tc:
+        lines.append("  method: tc                # TC検出（映像 creation_time + WAV bext）。"
+                     "相関1回でカメラ時計偏差を校正、L↔R は TC 差で確定（channel_drift 不要）")
+    lines.append("  verify: true")
     if long_take:
         lines.append("  verify_probes: 7          # 2時間超なので既定の5より増やす")
-    if "left_files" in f:
+    if "left_files" in f and not tc:
         lines.append("  channel_drift_correct: true  # 別ソース L/R を密着させる")
     lines += [
         "",
@@ -549,6 +567,26 @@ def measure_offset(video: Path, audio: Path, rate: int) -> tuple[float, float]:
         return float(d["offset"]), float(d["score"])
     except (json.JSONDecodeError, KeyError, ValueError) as e:
         die(f"could not parse audio-sync-offset output for {audio}: {e}")
+
+
+def measure_tc_offset(video: Path, audio: Path, utc_offset):
+    """tc-offset を実行し、TC 由来のオフセット情報(dict)を返す。VIDEO の creation_time
+    または AUDIO の bext TC が無ければ None（呼び出し側は相関へフォールバックする）。
+
+    offset の意味は audio-sync-offset と同一（AUDIO に与える遅延量）だが、これは
+    カメラ内蔵時計と TC マスタの固定偏差を含む。最終精度は相関で校正する。"""
+    cmd = [str(ADV / "tc-offset"), str(video), str(audio), "--json"]
+    if utc_offset is not None:
+        cmd += ["--utc-offset", str(utc_offset)]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode == 3:          # TC / creation_time なし = TC 非対応素材
+        return None
+    if r.returncode != 0:
+        die(f"tc-offset failed for {audio}: {r.stderr.strip()}")
+    try:
+        return json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError) as e:
+        die(f"could not parse tc-offset output for {audio}: {e}")
 
 
 def verify_alignment(video: Path, audio: Path, offset: float, rate: int,
@@ -805,6 +843,16 @@ def main() -> int:
     tolerance = float(sync.get("tolerance", 0.5))
     drift_on = bool(drift.get("enabled"))
     drift_win = str(drift.get("window", 120))
+    # 同期方式: correlate（既定・相互相関）/ tc（TC で構造化＋相関で偏差校正）
+    sync_method = str(sync.get("method", "correlate")).lower()
+    tc_utc = sync.get("tc_utc_offset")          # None = 端末ローカル TZ
+    tc_tol = float(sync.get("tc_tolerance", 0.05))
+    tc_mode = sync_method == "tc"
+    if tc_mode:
+        log("  sync方式    : tc（WAV bext TC で構造化＋相関1回でカメラ時計偏差を校正。"
+            "TC が無ければ相関へフォールバック）")
+    else:
+        log("  sync方式    : correlate（相互相関）")
 
     if stereo_in:
         # 既に相互整合したステレオ音源 → 1 本として映像へ同期
@@ -829,7 +877,14 @@ def main() -> int:
                 f"{' '.join(vargs)} {' '.join(acodec)} -shortest {output}")
         else:
             sr = audio_sample_rate(stereo)
+            tc = measure_tc_offset(videos[0], stereo_in[0], tc_utc) if tc_mode else None
             off, sc = measure_offset(video_single, stereo, rate)
+            if tc is not None:
+                skew = off - tc["offset"]
+                log(f"    [tc] TC offset {tc['offset']:+.4f}s / 相関 {off:+.4f}s "
+                    f"/ カメラ時計偏差 {skew:+.3f}s（相関で校正済み）")
+            elif tc_mode:
+                log("    [tc] TC 未検出 → 相互相関のみで同期")
             log(f"    offset = {off:+.4f}s (score {sc:.1f})   (@ {sr}Hz)")
             assert_sync_ok(video_single, [("stereo", stereo, off, sc)],
                            min_score, verify_on, verify_probes, verify_window,
@@ -865,7 +920,7 @@ def main() -> int:
             # L↔R は数十msズレうる）。L を基準に R をもう一段補正して左右を密着させる。
             # ドリフトが min-ppm 未満（TC 収録など）なら audio-drift-correct はコピー
             # 出力＝実質 no-op。channel_drift_correct: false で無効化できる。
-            if bool(sync.get("channel_drift_correct", True)):
+            if bool(sync.get("channel_drift_correct", True)) and not tc_mode:
                 log("    R を L 基準で相対ドリフト補正（L↔R を密着させる）")
                 runner.step([ADV / "audio-drift-correct", str(l_src), str(r_src),
                              "-o", str(work / "R_fix2.wav"), "--window", drift_win,
@@ -884,8 +939,34 @@ def main() -> int:
                 f"-map {vmap} -map [a] {' '.join(vargs)} {' '.join(acodec)} -shortest {output}")
         else:
             sr = audio_sample_rate(l_src)
-            offL, scL = measure_offset(video_single, l_src, rate)
-            if drift_on and bool(sync.get("channel_drift_correct", True)):
+            tc_L = measure_tc_offset(videos[0], lefts[0], tc_utc) if tc_mode else None
+            tc_R = measure_tc_offset(videos[0], rights[0], tc_utc) if tc_mode else None
+            tc_ok = tc_L is not None and tc_R is not None
+            if tc_mode and not tc_ok:
+                log("    [tc] TC 未検出（L/R いずれか）→ 相互相関へフォールバック")
+            offL, scL = measure_offset(video_single, l_src, rate)   # 全経路で必要
+            if tc_ok:
+                # TC で構造化: 相関 1 回でカメラ時計の固定偏差を校正し、R は TC で置く。
+                #   offL = tc_off_L + skew（skew はカメラ内蔵時計と TC マスタの固定差）
+                #   offR = offL + (tc_off_R − tc_off_L)   … L↔R は TC の録音開始差で確定
+                # TC の L↔R は録音開始差（サンプル精度）で、映像スクラッチ相関に依存しない。
+                skew = offL - tc_L["offset"]
+                tc_lr = tc_R["offset"] - tc_L["offset"]
+                offR = offL + tc_lr
+                lr_corr, lr_sc = measure_offset(l_src, r_src, rate)   # L↔R 相互チェック
+                scR = min(scL, lr_sc)
+                log(f"    [tc] カメラ時計偏差 = {skew:+.3f}s（相関1回で校正）")
+                log(f"    [tc] L↔R = {tc_lr:+.4f}s（TC由来）／実音相関 {lr_corr:+.4f}s "
+                    f"（差 {abs(lr_corr - tc_lr) * 1000:.1f}ms, score {lr_sc:.1f}）")
+                if abs(lr_corr - tc_lr) > tc_tol:
+                    msg = (f"TC 由来の L↔R ({tc_lr:+.4f}s) と実音相関 ({lr_corr:+.4f}s) が "
+                           f"許容 {tc_tol*1000:.0f}ms を超えて不一致。\n"
+                           f"  想定原因: L/R の対応（ファイルペア）誤り／TC メタ破損／録音欠落。\n"
+                           f"  対処: audio.left/right の対応確認 / sync.tc_tolerance 調整 / --force")
+                    if not args.force:
+                        die(msg)
+                    log(f"    WARNING: {msg}")
+            elif drift_on and bool(sync.get("channel_drift_correct", True)):
                 # R は「映像」ではなく「L」への直接オフセットで置く。各chを個別に映像へ
                 # 相関させると、映像スクラッチ音（別マイク・別特性・ノイズ多）との相関
                 # ピークが甘く ±10ms 級の誤差が出て、それが L↔R に ±20ms として漏れる

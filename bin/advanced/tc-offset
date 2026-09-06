@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+# ============================================================
+# tc-offset
+# ============================================================
+# タイムコード（TC）から、映像と別録り音源の同期オフセットを「音声処理なし」で
+# 算出する。相互相関（audio-sync-offset）の代わり／シードに使う。
+#
+#   VIDEO       同期の基準となる映像（例: Ace Pro 2）。絶対時刻は mp4 の
+#               `creation_time`（UTC）から取る。
+#   AUDIO       別録り音源の WAV（例: RODE Wireless PRO・TC 有効）。絶対時刻は
+#               BWF の bext チャンク `TimeReference`（=当日 0 時からのサンプル数）
+#               ÷ サンプルレート から取る。
+#
+# Usage:
+#   tc-offset VIDEO AUDIO [options]
+#
+# Options:
+#   --utc-offset H   映像 creation_time(UTC) を壁時計へ直す時差（時）。既定: 端末の
+#                    ローカルタイムゾーン（収録地＝再生地なら正しい）。JST 固定なら 9。
+#   --value          オフセット秒（float）だけを出す（スクリプト連携用）
+#   --json           結果を JSON で出す
+#
+# オフセットの意味（audio-sync-offset と同一）:
+#   offset[秒] = AUDIO を VIDEO のタイムラインに合わせるための遅延量。
+#     offset > 0 : AUDIO を offset 秒 遅らせる（先頭にパディング）と一致
+#     offset < 0 : AUDIO を |offset| 秒 早める（先頭をトリム）と一致
+#   ＝ (AUDIO の TC 開始秒) − (VIDEO の creation_time 壁時計秒)
+#
+# 注意（実測に基づく）:
+#   カメラ内蔵時計は TC マスタ（音源側）と同期していないことがあり、その差は
+#   数分に達する（実測 ~130s・固定）。**TC 単独では同期がその差だけずれる。**
+#   そのため rehearsal-sync では TC を「粗オフセット＋対応付け＋相互チェック」に使い、
+#   最終の追い込みは相互相関で行う（camera clock の固定偏差を相関で校正する）。
+#
+# 前提: 収録が地方時の 0 時をまたがない（TimeReference は当日 0 時基準）。
+# ============================================================
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import struct
+import subprocess
+import sys
+
+
+def read_bext_timeref(path: str) -> tuple[int, int]:
+    """WAV(BWF) から (TimeReference[サンプル], サンプルレート) を返す。
+    RIFF チャンクを直接走査する（exiftool 等に依存しない）。TC が無ければ例外。"""
+    with open(path, "rb") as f:
+        riff = f.read(12)
+        if len(riff) < 12 or riff[:4] != b"RIFF" or riff[8:12] != b"WAVE":
+            raise ValueError(f"not a RIFF/WAVE file: {path}")
+        sample_rate = None
+        time_ref = None
+        while True:
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                break
+            cid, size = hdr[:4], struct.unpack("<I", hdr[4:8])[0]
+            data = f.read(size)
+            if len(data) < size:
+                break
+            if cid == b"fmt ":
+                # wFormatTag(2) nChannels(2) nSamplesPerSec(4) ...
+                sample_rate = struct.unpack("<I", data[4:8])[0]
+            elif cid == b"bext":
+                # Description[256] Originator[32] OriginatorReference[32]
+                # OriginationDate[10] OriginationTime[8]
+                # TimeReferenceLow(uint32) TimeReferenceHigh(uint32) ...
+                off = 256 + 32 + 32 + 10 + 8
+                if len(data) >= off + 8:
+                    lo, hi = struct.unpack("<II", data[off:off + 8])
+                    time_ref = lo | (hi << 32)
+            if size % 2 == 1:            # RIFF はチャンクを偶数境界に詰める
+                f.read(1)
+            if sample_rate is not None and time_ref is not None:
+                break
+    if time_ref is None:
+        raise ValueError(f"no bext TimeReference (TC) in {path}")
+    if not sample_rate:
+        raise ValueError(f"no fmt sample rate in {path}")
+    return time_ref, sample_rate
+
+
+def video_creation_epoch(path: str) -> float:
+    """mp4 の creation_time（UTC）を UNIX 秒(float)で返す。無ければ例外。"""
+    for entries in ("format_tags=creation_time", "stream_tags=creation_time"):
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", entries,
+             "-of", "default=nk=1:nw=1", path],
+            capture_output=True, text=True)
+        val = (r.stdout or "").strip().splitlines()
+        val = [v for v in val if v]
+        if val:
+            ts = val[0].replace("Z", "+00:00")
+            return dt.datetime.fromisoformat(ts).timestamp()
+    raise ValueError(f"no creation_time in {path}")
+
+
+def secs_since_local_midnight(epoch: float, utc_offset_h: float | None) -> float:
+    """UNIX 秒 → 壁時計の当日 0 時からの秒。utc_offset_h=None なら端末ローカル。"""
+    if utc_offset_h is None:
+        local = dt.datetime.fromtimestamp(epoch)          # 端末ローカル TZ
+    else:
+        local = dt.datetime.fromtimestamp(
+            epoch, dt.timezone(dt.timedelta(hours=utc_offset_h)))
+    return local.hour * 3600 + local.minute * 60 + local.second + local.microsecond / 1e6
+
+
+def compute(video: str, audio: str, utc_offset_h: float | None) -> dict:
+    tr, sr = read_bext_timeref(audio)
+    audio_start = tr / sr                                  # 当日 0 時からの秒（TC）
+    v_epoch = video_creation_epoch(video)
+    video_start = secs_since_local_midnight(v_epoch, utc_offset_h)
+    offset = audio_start - video_start                     # AUDIO に与える遅延量
+    def hms(s: float) -> str:
+        return f"{int(s // 3600):02d}:{int(s % 3600 // 60):02d}:{s % 60:06.3f}"
+    return {
+        "offset": offset,
+        "audio_tc_start_sec": audio_start,
+        "audio_tc_start": hms(audio_start),
+        "video_start_sec": video_start,
+        "video_start": hms(video_start),
+        "audio_sample_rate": sr,
+        "audio_time_reference": tr,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("video")
+    ap.add_argument("audio")
+    ap.add_argument("--utc-offset", type=float, default=None)
+    ap.add_argument("--value", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    args = ap.parse_args()
+
+    if args.help:
+        with open(__file__, encoding="utf-8") as fh:
+            for line in fh.readlines()[1:44]:
+                if line.startswith("#"):
+                    sys.stdout.write(line[2:] if len(line) > 2 else "\n")
+        return 0
+
+    try:
+        d = compute(args.video, args.audio, args.utc_offset)
+    except ValueError as e:
+        # TC / creation_time が無い → 呼び出し側が相関へフォールバックできるよう 3 で返す
+        print(f"tc-offset: {e}", file=sys.stderr)
+        return 3
+
+    if args.value:
+        print(f"{d['offset']:.6f}")
+    elif args.json:
+        print(json.dumps(d, ensure_ascii=False))
+    else:
+        print(f"offset : {d['offset']:+.6f} sec   (AUDIO をこの秒数だけ遅らせると一致)")
+        print(f"  video creation_time(壁時計) : {d['video_start']}")
+        print(f"  audio TC 開始              : {d['audio_tc_start']}  "
+              f"(TimeReference {d['audio_time_reference']} @ {d['audio_sample_rate']}Hz)")
+        print("  ※ カメラ時計は TC と同期していないことがある。最終の追い込みは相関で校正のこと。")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

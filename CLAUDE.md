@@ -144,6 +144,8 @@ media-scribe-workflow/
 - [x] bin/advanced/audio-drift-correct の作成（2窓測定→atempoでクロックドリフト補正）
 - [x] bin/advanced/video-replace-audio の作成（自動同期して音声差し替え、--driftでドリフト補正）
 - [x] bin/rehearsal-sync の作成（take.yaml 1枚で一次ファイル→同期済み映像を全自動生成）
+- [x] bin/advanced/tc-offset の作成（BWF bext TimeReference + 映像 creation_time → 同期オフセット）
+- [x] rehearsal-sync に sync.method: tc を追加（TCで構造化＋相関1回でカメラ時計偏差を校正。L↔RはTC差で確定。TC無しは相関へフォールバック）
 - [x] examples/take.yaml の作成（per-take 設定スキーマ）
 - [x] bin/advanced/audio-transcribe の作成（Whisper 系。既定 large-v3、SRT + words.json + meta.json）
 - [x] bin/advanced/audio-transcribe-dg の作成（Deepgram Nova-3。同一契約で出力）
@@ -210,6 +212,19 @@ bin/rehearsal-sync <take_dir> --init    # フォルダを走査して take.yaml 
 bin/rehearsal-sync <take_dir> --init --force  # 既存 take.yaml/take_*.yaml を上書き
 bin/rehearsal-sync take.yaml            # 連結→loudnorm→各ch個別同期→結合mux
 bin/rehearsal-sync take.yaml --dry-run  # 計画のみ
+#   同期方式は take.yaml の sync.method で選ぶ:
+#     correlate（既定）= 相互相関のみ
+#     tc = TC同期。WAV の BWF bext(TimeReference) と映像 creation_time で対応付け・
+#          粗オフセットを決め、相関1回でカメラ内蔵時計と TC マスタの固定偏差を校正。
+#          L↔R は両chの TC 差（録音開始差）で確定（L↔R相関・channel_drift 不要）。
+#          TC 無し素材は自動で correlate へフォールバック。RODE Wireless PRO の TC 録音向け。
+#   ※ カメラ内蔵時計は TC と非同期のことがある（実測で固定偏差 ~130s）。TC 単独では
+#     その差だけずれるため、相関1回で校正する（＝tc モードの設計）。
+# TC 由来の同期オフセットだけを見る（音声処理なし。相関のシード/相互チェック用）
+bin/advanced/tc-offset video.mp4 external.wav          # offset[秒]（AUDIOに与える遅延）を算出
+bin/advanced/tc-offset video.mp4 external.wav --value  # 数値だけ（スクリプト連携）
+#   VIDEO=mp4 creation_time(UTC)、AUDIO=BWF bext TimeReference(当日0時からのサンプル数)。
+#   TC/creation_time が無ければ exit 3（呼び出し側は相関へフォールバック）
 bin/rehearsal-sync take.yaml --keep-work -v  # 中間生成物を残す/詳細ログ
 # スキーマ: examples/take.yaml
 

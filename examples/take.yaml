@@ -81,6 +81,19 @@ drift:
 # sync（任意）— 同期検出と検証
 # ------------------------------------------------------------
 sync:
+  method: correlate         # correlate（既定・相互相関）| tc
+                            #   tc = TC同期。WAV の BWF bext（TimeReference＝当日0時からの
+                            #        サンプル数）と映像の creation_time で対応付け・粗オフセットを
+                            #        決め、相関1回でカメラ内蔵時計と TC マスタの固定偏差を校正する。
+                            #        L↔R は両chの TC 差（録音開始差）で確定するため、L↔R 相関・
+                            #        channel_drift_correct は不要（TC モードでは自動でスキップ）。
+                            #        TC が無い素材（creation_time/bext 欠如）は自動で correlate へ
+                            #        フォールバック。RODE Wireless PRO の TC 有効録音向け。
+                            #   ※ カメラ内蔵時計は TC マスタと同期しないため（実測で固定偏差
+                            #     ~130s）、TC 単独では同期がその差だけずれる。相関1回で校正する。
+  tc_utc_offset:            # tc: 映像 creation_time(UTC) を壁時計へ直す時差(時)。空=端末ローカルTZ
+                            #   （収録地=再生地なら空でよい）。JST 固定にするなら 9。
+  tc_tolerance: 0.05        # tc: TC由来の L↔R と実音相関の許容差(秒)。超えたら中断（ペア誤り検出）
   rate: 8000                # 同期検出のサンプルレート（相関用に音声をこの Hz へ落とす）
   min_score: 10             # 全体相関の信頼度（z値）下限。下回れば中断
                             #   （共通の音が無い/対応素材が違う場合を弾く）
