@@ -34,10 +34,18 @@ from typing import List, Optional, Tuple, Dict, Any
 
 # ffmpegパス検出
 def get_ffmpeg_path() -> str:
-    """ffmpegパスを取得"""
+    """ffmpegパスを取得（システム優先）。
+
+    static-ffmpeg（pip）は古い x86_64 static ビルドのことがあり、Apple Silicon では
+    Rosetta 経由になって長尺の hevc_videotoolbox が途中で失敗する。まずシステム(PATH)の
+    ffmpeg（homebrew 等の native ビルド）を使い、無ければ static-ffmpeg にフォールバックする。
+    """
     import shutil
 
-    # static-ffmpegを試行
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+
     try:
         import static_ffmpeg
         static_ffmpeg.add_paths()
@@ -52,8 +60,12 @@ def get_ffmpeg_path() -> str:
 
 
 def get_ffprobe_path() -> str:
-    """ffprobeパスを取得"""
+    """ffprobeパスを取得（システム優先。理由は get_ffmpeg_path を参照）"""
     import shutil
+
+    path = shutil.which("ffprobe")
+    if path:
+        return path
 
     try:
         import static_ffmpeg
