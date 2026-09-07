@@ -169,6 +169,42 @@ def detect_system_font() -> Optional[str]:
     return None
 
 
+_TXT_TIME = re.compile(r"\s*(\d+):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\s+(.*)")
+_TXT_SOURCE = re.compile(r"#\s*source:\s*(.+)", re.IGNORECASE)
+
+
+def load_project_from_txt(txt_path: Path) -> dict:
+    """chaptr の章立て .txt を内部プロジェクト形式へ変換する（vce-encode と同仕様）。
+    先頭 '# source: <動画>' が入力、'H:MM:SS.mmm タイトル' が章（'--' 始まりは除外）。
+    単一ソース・グローバル時刻なので source_index は常に 0。"""
+    source = None
+    chapters = []
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.rstrip("\n")
+            m = _TXT_SOURCE.match(s.strip())
+            if m:
+                source = m.group(1).strip()
+                continue
+            if not s.strip() or s.lstrip().startswith("#"):
+                continue
+            m = _TXT_TIME.match(s)
+            if not m:
+                continue
+            h, mm, ss, frac, title = m.groups()
+            ms = (int(h) * 3600 + int(mm) * 60 + int(ss)) * 1000 \
+                + int((frac or "0").ljust(3, "0"))
+            chapters.append({"local_time_ms": ms, "title": title.strip(),
+                             "source_index": 0})
+    if source is None:
+        raise ValueError(
+            f"'# source:' ヘッダが見つかりません: {txt_path}\n"
+            "  chaptr が書いた章立て .txt を渡してください。")
+    if not chapters:
+        raise ValueError(f"章が 1 つもありません: {txt_path}")
+    return {"sources": [source], "chapters": chapters, "encode_settings": {}}
+
+
 class ProjectSplitter:
     """プロジェクトファイルのチャプター分割"""
 
@@ -187,9 +223,14 @@ class ProjectSplitter:
         self.verbose = verbose
         self.temp_files: List[Path] = []
 
-        # プロジェクト読み込み
+        # プロジェクト読み込み。chaptr の章立て .txt（推奨）と旧 .vce.json の両対応。
         with open(project_path, 'r', encoding='utf-8') as f:
-            self.project = json.load(f)
+            head = f.read(256)
+        if project_path.suffix.lower() == '.txt' or not head.lstrip().startswith('{'):
+            self.project = load_project_from_txt(project_path)
+        else:
+            with open(project_path, 'r', encoding='utf-8') as f:
+                self.project = json.load(f)
 
         self.sources: List[SourceFile] = []
         self.chapters: List[ChapterInfo] = []
@@ -464,7 +505,8 @@ Examples:
     vce-split project.vce.json --overlay-title
         """
     )
-    parser.add_argument('project', type=Path, help='プロジェクトファイル (.vce.json)')
+    parser.add_argument('project', type=Path,
+                        help='chaptr の章立て .txt（推奨・# source: 付き）または旧 .vce.json')
     parser.add_argument('-o', '--output-dir', type=Path, help='出力ディレクトリ')
     parser.add_argument('-e', '--encoder', choices=['libx264', 'h264_videotoolbox', 'hevc_videotoolbox'],
                         help='エンコーダ')

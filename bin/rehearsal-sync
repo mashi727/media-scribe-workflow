@@ -462,10 +462,14 @@ def render_session_yaml(base: Path, f: dict, multi: bool) -> str:
         "                            #   ※ 数字_数字 は引用符必須（YAML が桁区切りの整数と解釈し _ が消える）",
         "  codec: aac                # 音声コーデック",
         "  bitrate: 320k",
-        "  video:                    # 「最初のエンコード」を軽い 480p プロキシに（chaptr でチャプター打ち用）",
-        "    height: 480             # 16:9 → 854x480（GPU/VideoToolbox）。原盤画質が要るなら video: を丸ごと削れば -c:v copy",
-        "    codec: hevc             # hevc(GPU) | h264(GPU)",
-        "    bitrate: 1.2M",
+        "  # video: を書かなければ -c:v copy（無劣化・ほぼ I/O のみ）＝原盤画質の FHD 同期マスター。",
+        "  # この 1 本で chaptr の章立ても、vce-encode の YouTube 書き出しも回せる（プロキシ不要・",
+        "  # 総エンコードは最終の 1 回だけ・--source も不要）。50GB 級でも chaptr は再生/波形OK。",
+        "  # 大きすぎて chaptr が重いときだけ、下を有効化して軽い 480p プロキシにする（要 --source 書き出し）:",
+        "  # video:",
+        "  #   height: 480           # 16:9 → 854x480（GPU/VideoToolbox）",
+        "  #   codec: hevc           # hevc(GPU) | h264(GPU)",
+        "  #   bitrate: 1.2M",
     ]
     if multi:
         lines += ["", f"work_dir: .work_{tag}"]

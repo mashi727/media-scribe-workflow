@@ -175,16 +175,36 @@ media-scribe-workflow/
 ## コマンド
 
 ```bash
-# VCEプロジェクトのエンコード（チャプター付き単一動画）
-bin/vce-encode project.vce.json
-bin/vce-encode project.vce.json --dry-run       # 計画だけ表示
-bin/vce-encode project.vce.json -e libx264 -q 1 # エンコーダと品質指定
+# チャプター付き単一動画へエンコード（chaptr の章立て .txt を入力に）
+#   入力は chaptr が書く章立て .txt が既定（先頭 '# source: <動画>'、'--' 始まりはカット）。
+#   エンコード設定は CLI フラグで与える（章ファイルには持たせない）。旧 .vce.json も可。
+bin/vce-encode 20260906_180109.txt                        # 章立て .txt をエンコード
+bin/vce-encode 20260906_180109.txt --dry-run              # 計画だけ表示（セグメント/章/削減率）
+bin/vce-encode 20260906_180109.txt -e hevc_videotoolbox -q 1   # GPU・高品質
+bin/vce-encode 20260906_180109.txt --overlay-title --cover-image cover.png  # 焼込/カバー
+bin/vce-encode project.vce.json                           # 旧プロジェクト形式（後方互換）
 
-# VCEプロジェクトのチャプター分割
-bin/vce-split project.vce.json
-bin/vce-split project.vce.json --dry-run        # 計画だけ表示
-bin/vce-split project.vce.json --audio-only     # MP3で出力
-bin/vce-split project.vce.json --overlay-title  # タイトル焼き込み
+# 【推奨フロー】プロキシを使わず FHD 同期マスター1本で回す（総エンコードは最終の1回だけ）
+#   1) 同期: --init 既定は output.video なし＝-c:v copy の FHD マスター（原盤画質＋同期音声・大）
+bin/rehearsal-sync take.yaml                # → 20260906_180109.mp4（FHD 同期マスター）
+#   2) 章立て: chaptr でマスターを開いて章を打つ（50GB級でも再生/波形OK）→ 20260906_180109.txt
+#   3) YouTube 用 FHD 書き出し（カット・章埋込・タイトル焼込・GPU）:
+bin/vce-encode 20260906_180109.txt -e hevc_videotoolbox -q 0 --overlay-title --youtube-chapters
+#   → 20260906_180109_encoded.mp4（FHD）＋ 20260906_180109_youtube.txt（説明欄に貼る "H:MM:SS タイトル"）
+#   ※ 埋め込みチャプターは YouTube が読まないので、章の目次は _youtube.txt を説明欄へ貼る
+#
+# 【プロキシを使う場合のみ】マスターが chaptr に重すぎるとき: take.yaml の output.video を有効化し
+#   480p プロキシで章立て → 書き出しは同一時間軸の FHD マスターへ --source で差し替える:
+bin/vce-encode 20260906_180109.txt --source 20260906_180109_FHD.mp4 \
+    -e hevc_videotoolbox -q 0 --fhd --overlay-title --youtube-chapters
+#   その他オプション: --max-height N / -e libx264|h264_videotoolbox|hevc_videotoolbox / -q 0..3
+
+# チャプター分割（章立て .txt を入力に、各章を個別ファイルへ）
+bin/vce-split 20260906_180109.txt
+bin/vce-split 20260906_180109.txt --dry-run        # 計画だけ表示
+bin/vce-split 20260906_180109.txt --audio-only     # MP3で出力
+bin/vce-split 20260906_180109.txt --overlay-title  # タイトル焼き込み
+bin/vce-split project.vce.json                     # 旧プロジェクト形式（後方互換）
 
 # mono L/R（チャンネル別 loudnorm 済み）を 1 本のステレオに結合
 bin/advanced/audio-merge-stereo L.wav R.wav -o stereo.wav

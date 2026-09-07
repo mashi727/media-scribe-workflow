@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-vce-encode - Video Chapter Editor プロジェクトファイルをエンコード
+vce-encode - 章立てファイルからチャプター付き動画をエンコード
 
 Usage:
-    vce-encode <project.vce.json> [options]
+    vce-encode <project.txt> [options]      # chaptr の章立て .txt（推奨）
+    vce-encode <project.vce.json> [options]  # 旧プロジェクト形式（後方互換）
+
+入力は chaptr が書く章立て .txt が既定。先頭の '# source: <動画>' が入力、
+'H:MM:SS.mmm タイトル' が章（'--' 始まりは書き出し時にカット）。エンコード設定は
+CLI フラグで与える（章ファイルには持たせない）。旧 .vce.json も引き続き読める。
 
 Options:
     -o, --output PATH     出力ファイルパス（デフォルト: プロジェクト設定に従う）
@@ -19,6 +24,7 @@ Options:
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -505,6 +511,50 @@ def get_encoder_args(encoder_id: str, bitrate_kbps: int, crf: int) -> List[str]:
         return ['-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium']
 
 
+_TXT_TIME = re.compile(r"\s*(\d+):(\d{2}):(\d{2})(?:\.(\d{1,3}))?\s+(.*)")
+_TXT_SOURCE = re.compile(r"#\s*source:\s*(.+)", re.IGNORECASE)
+
+
+def load_project_from_txt(txt_path: Path) -> Dict[str, Any]:
+    """chaptr の章立て .txt を vce-encode の内部プロジェクト形式へ変換する。
+
+    形式（chaptr 出力）:
+        # source: <入力動画>            … 入力（.txt と同じフォルダ基準）
+        # created: ...                  … 任意コメント
+        0:00:00.000 --開始前            … "--" 始まりは除外（カット）
+        0:03:49.362 開始
+        0:15:08.841 054_...
+
+    単一ソース・グローバル時刻なので source_index は常に 0。エンコード設定
+    （encoder/quality/cover/overlay）は .txt には持たせず CLI フラグで与える。"""
+    source: Optional[str] = None
+    chapters: List[Dict[str, Any]] = []
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.rstrip("\n")
+            m = _TXT_SOURCE.match(s.strip())
+            if m:
+                source = m.group(1).strip()
+                continue
+            if not s.strip() or s.lstrip().startswith("#"):
+                continue
+            m = _TXT_TIME.match(s)
+            if not m:
+                continue
+            h, mm, ss, frac, title = m.groups()
+            ms = (int(h) * 3600 + int(mm) * 60 + int(ss)) * 1000 \
+                + int((frac or "0").ljust(3, "0"))
+            chapters.append({"local_time_ms": ms, "title": title.strip(),
+                             "source_index": 0})
+    if source is None:
+        raise ValueError(
+            f"'# source:' ヘッダが見つかりません: {txt_path}\n"
+            "  chaptr が書いた章立て .txt（先頭に '# source: <動画>'）を渡してください。")
+    if not chapters:
+        raise ValueError(f"章が 1 つもありません: {txt_path}")
+    return {"sources": [source], "chapters": chapters, "encode_settings": {}}
+
+
 class ProjectEncoder:
     """プロジェクトファイルのエンコーダ"""
 
@@ -521,9 +571,15 @@ class ProjectEncoder:
         self.verbose = verbose
         self.temp_files: List[Path] = []
 
-        # プロジェクト読み込み
+        # プロジェクト読み込み。chaptr の章立て .txt（推奨）と旧 .vce.json の両対応。
+        #   拡張子 .txt、または中身が JSON でない（'{' で始まらない）→ .txt として解釈。
         with open(project_path, 'r', encoding='utf-8') as f:
-            self.project = json.load(f)
+            head = f.read(256)
+        if project_path.suffix.lower() == '.txt' or not head.lstrip().startswith('{'):
+            self.project = load_project_from_txt(project_path)
+        else:
+            with open(project_path, 'r', encoding='utf-8') as f:
+                self.project = json.load(f)
 
         self.sources: List[SourceFile] = []
         self.chapters: List[ChapterInfo] = []
@@ -954,9 +1010,21 @@ class ProjectEncoder:
                cut_excluded: bool = True,
                cover_image: Optional[Path] = None,
                overlay_title: bool = False,
+               source_override: Optional[Path] = None,
+               max_height: Optional[int] = None,
+               youtube_chapters: bool = False,
                dry_run: bool = False) -> bool:
         """エンコード実行"""
         try:
+            # ソースの差し替え（章立て .txt は軽いプロキシ基準で書かれることが多い。
+            # 同一時間軸の高品質マスター＝FHD等を --source で渡して、そこから書き出す）。
+            if source_override is not None:
+                if not source_override.exists():
+                    self.log(f"ERROR: --source not found: {source_override}")
+                    return False
+                self.project['sources'] = [str(source_override)]
+                self.log(f"Source override: {source_override}")
+
             # ソースとチャプター読み込み
             self.load_sources()
             self.load_chapters()
@@ -1007,6 +1075,19 @@ class ProjectEncoder:
             # ターゲットパラメータを計算（最小解像度・最小fps・プログレッシブ）
             target_params = calculate_target_params(self.sources)
 
+            # --max-height: これを超える高さは縮小（YouTube FHD=1080 等）。
+            #   アスペクト比を保ち幅は偶数へ。既に以下なら何もしない。
+            if max_height and target_params and target_params.height > max_height:
+                new_w = int(round(target_params.width * max_height
+                                  / target_params.height / 2)) * 2
+                self.log(f"Scale down: {target_params.width}x{target_params.height} "
+                         f"→ {new_w}x{max_height} (max-height {max_height})")
+                target_params = VideoParams(
+                    width=new_w, height=max_height,
+                    fps_num=target_params.fps_num, fps_den=target_params.fps_den,
+                    sar_num=1, sar_den=1, is_interlaced=False,
+                    field_order="progressive")
+
             # サマリー表示
             total_source = sum(s.duration_ms for s in self.sources)
             reduction = 100 - (total_duration / total_source * 100) if total_source > 0 else 0
@@ -1035,7 +1116,20 @@ class ProjectEncoder:
                 self.log("=== Adjusted Chapters ===")
                 for ch in adjusted_chapters:
                     self.log(f"  {format_time_short(ch.local_time_ms)} {ch.title}")
+                if youtube_chapters:
+                    self.log("=== YouTube 説明欄用（--youtube-chapters）===")
+                    for ch in adjusted_chapters:
+                        self.log(f"  {format_time_short(ch.local_time_ms)} {ch.title}")
                 return True
+
+            # YouTube 説明欄用の章リストを書き出す。埋め込みチャプターは YouTube が
+            # 読まないため、説明欄に貼る "H:MM:SS タイトル" のテキストが別途要る。
+            if youtube_chapters:
+                yt_path = output_path.with_name(output_path.stem + "_youtube.txt")
+                with open(yt_path, "w", encoding="utf-8") as yf:
+                    for ch in adjusted_chapters:
+                        yf.write(f"{format_time_short(ch.local_time_ms)} {ch.title}\n")
+                self.log(f"YouTube chapters → {yt_path}")
 
             temp_dir = Path(tempfile.gettempdir())
 
@@ -1261,7 +1355,8 @@ Examples:
     vce-encode project.vce.json -e libx264 -q 1
         """
     )
-    parser.add_argument('project', type=Path, help='プロジェクトファイル (.vce.json)')
+    parser.add_argument('project', type=Path,
+                        help='chaptr の章立て .txt（推奨・# source: 付き）または旧 .vce.json')
     parser.add_argument('-o', '--output', type=Path, help='出力ファイルパス')
     parser.add_argument('-e', '--encoder', choices=['libx264', 'h264_videotoolbox', 'hevc_videotoolbox'],
                         help='エンコーダ')
@@ -1273,6 +1368,15 @@ Examples:
     parser.add_argument('--no-cut', action='store_true', help='除外チャプターをカットしない')
     parser.add_argument('--cover-image', type=Path, help='カバー画像（音声のみのソース用）')
     parser.add_argument('--overlay-title', action='store_true', help='チャプター名を映像に焼き込む')
+    parser.add_argument('--source', type=Path,
+                        help='入力動画を差し替える（章立て .txt と同一時間軸の高品質マスター等）。'
+                             '章立てを軽いプロキシで作り、書き出しは FHD マスターから、という運用向け')
+    parser.add_argument('--max-height', type=int,
+                        help='出力高さの上限（超える分は縮小。YouTube FHD なら 1080）')
+    parser.add_argument('--fhd', action='store_true',
+                        help='--max-height 1080 の別名（FHD 出力）')
+    parser.add_argument('--youtube-chapters', action='store_true',
+                        help='YouTube 説明欄用の章リスト <出力>_youtube.txt を書き出す')
     parser.add_argument('--dry-run', action='store_true', help='実行せずに計画を表示')
     parser.add_argument('-v', '--verbose', action='store_true', help='詳細ログを表示')
 
@@ -1293,6 +1397,9 @@ Examples:
         cut_excluded=not args.no_cut,
         cover_image=args.cover_image,
         overlay_title=args.overlay_title,
+        source_override=args.source,
+        max_height=(1080 if args.fhd else args.max_height),
+        youtube_chapters=args.youtube_chapters,
         dry_run=args.dry_run
     )
 

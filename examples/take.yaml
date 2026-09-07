@@ -130,9 +130,12 @@ output:
                             #   copy -> 入力音声コーデックをそのままコピー（拡張子は mkv）
   bitrate: 320k             # codec: aac のときのみ有効
 
-  # video（任意）— 映像の扱い。書かなければ -c:v copy（無劣化・瞬時）。
-  #   書くと GPU(VideoToolbox) で scale + 再エンコード。巨大な原盤を作らず、この 1 パスで
-  #   直接プロキシを吐ける（chaptr でのカット位置・チャプター打ち用の軽い 480p 等）。
+  # video（任意）— 映像の扱い。**書かないのが既定・推奨**＝ -c:v copy（無劣化・ほぼ I/O のみ）で
+  #   原盤画質の FHD 同期マスターを 1 本作る。chaptr の章立ても vce-encode の YouTube 書き出しも
+  #   この 1 本で回せる（プロキシ不要・総エンコードは最終 1 回・vce-encode の --source も不要）。
+  #   50GB 級でも chaptr は再生/波形 OK。
+  #   ↓ を書くと GPU(VideoToolbox) で scale+再エンコードした軽い 480p プロキシになる。
+  #   マスターが chaptr に重すぎるときだけ使う（その場合の書き出しは vce-encode --source で FHD へ）。
   # video:
   #   height: 480             # scale=-2:height（16:9 → 854x480）
   #   codec: hevc             # hevc/h265(GPU・小) | h264/avc(GPU・Windows既定でも再生可)
