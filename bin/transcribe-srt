@@ -14,10 +14,21 @@ transcribe-srt — 動画/音声 1 本から、現在使えるベストエフォ
             no-condition・ハルシネーション/ループ抑制）。**出力は SRT のみ**
             （words.json/meta.json は出ない）。--terms 非対応。接続先(zeus/zeus-soto)は
             whisper-remote が自動判定。SSH/rsync が要る。
-    kotoba  kotoba-whisper v2.0 faster を **ローカル** で実行（bin/advanced/audio-transcribe）。
-            長尺のループ暴走を避けるため --vad --no-condition。3層（srt/words/meta）を出す。
+    wl      full Whisper（既定 large-v3）を **ローカル** で実行（bin/advanced/audio-transcribe）。
+            多言語＋語彙注入(--terms)対応、word 単位も出す 3層。wp が使えない/外に出せない
+            素材の高品質ローカル系。--local-model でモデルを差し替え可。
+    wz      wl と同じ audio-transcribe を **Zeus の GPU** で実行（--device cuda）。full whisper の
+            3層＋語彙注入を **GPU 速度** で得る（wl のローカルCPUの遅さを回避、wp の SRTのみ制約も回避）。
+            本体を無改変で scp し、16k mono に変換して転送。--zeus-host で接続先を指定。
+    kotoba  kotoba-whisper v2.0 faster を **ローカル** で実行（同 audio-transcribe）。日本語特化の
+            distil で速いが **語彙注入は効かず英日混在にも不向き**（言語 ja 固定）。3層。
     dg      Deepgram Nova-3（bin/advanced/audio-transcribe-dg）。DEEPGRAM_API_KEY か
             --dg-key-file が要る（無ければ自動スキップ）。**音声を外部送信・従量課金**。3層。
+            英日混在は Deepgram の language=multi（コードスイッチング）で拾う。
+
+言語（--language、既定 ja）:
+    ja/en/... 言語コードを全エンジンに反映。**英日混在は --language mixed**
+    （whisper 系＝言語自動判定、dg＝language:multi）。混在では kotoba を外し wl/wp+dg を推奨。
 
 後処理（各エンジンの生 SRT を仕上げる。--no-postprocess で無効化）:
     srt-cap-spans         長尺 Whisper の引き伸ばされた cue 終端を発話速度で抑える（wp/kotoba のみ）
@@ -42,6 +53,10 @@ transcribe-srt — 動画/音声 1 本から、現在使えるベストエフォ
     transcribe-srt take_L.wav --engines wp,kotoba --terms examples/terms-orchestral.txt
     transcribe-srt video.mp4 --dry-run          # 実行せず全コマンドを提示
     transcribe-srt video.mp4 --engines kotoba   # ローカルだけで試す
+    # 英日混在を高品質に（Zeus GPU full whisper 3層 + Deepgram コードスイッチング）:
+    transcribe-srt talk.m4a --engines wz,dg --language mixed
+    # Zeus を使わずローカルだけで（遅いが外に出さない）:
+    transcribe-srt talk.m4a --engines wl,dg --language mixed
 """
 from __future__ import annotations
 
@@ -62,8 +77,16 @@ SRT_COMPARE = ADV / "srt-compare"
 WHISPER_REMOTE_FN = Path.home() / ".config" / "zsh" / "functions" / "whisper-remote.zsh"
 
 KOTOBA_MODEL = "kotoba-tech/kotoba-whisper-v2.0-faster"
+WL_MODEL = "large-v3"          # wl/wz（full whisper）の既定。多言語かつ語彙注入(terms)が効く
 DEFAULT_ENGINES = "wp,kotoba,dg"
-KNOWN_ENGINES = ("wp", "kotoba", "dg")
+KNOWN_ENGINES = ("wp", "wl", "wz", "kotoba", "dg")
+# 英日混在＝コードスイッチング指定。whisper系は言語自動判定、dg は Deepgram の language=multi へ。
+MIXED_LANGS = {"mixed", "multi", "auto"}
+
+# wz（audio-transcribe を Zeus の GPU で実行）用。whisper-remote と同じ流儀の配線。
+ZEUS_HOST_DEFAULT = "zeus"
+ZEUS_WORK = "~/whisper_work"
+ZEUS_CUDNN = "$HOME/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib"
 
 # 端末色（最小限）
 _C = {"g": "\033[0;32m", "y": "\033[1;33m", "r": "\033[0;31m", "b": "\033[0;34m", "0": "\033[0m"}
@@ -128,7 +151,7 @@ def ffprobe_duration(path: Path) -> float | None:
 # ---------------------------------------------------------------------------
 # エンジン実行（各々、生成した「生 SRT」の Path を返す。失敗/スキップは None）
 # ---------------------------------------------------------------------------
-def run_wp(media: Path, outdir: Path, stem: str, preset: str, force: bool, dry: bool) -> Path | None:
+def run_wp(media: Path, outdir: Path, stem: str, preset: str, lang: str, force: bool, dry: bool) -> Path | None:
     """Whisper large-v3 を Zeus で実行（whisper-remote zsh 関数）。SRT のみ。"""
     if not WHISPER_REMOTE_FN.exists():
         err(f"wp: whisper-remote が見つかりません: {WHISPER_REMOTE_FN}")
@@ -137,11 +160,18 @@ def run_wp(media: Path, outdir: Path, stem: str, preset: str, force: bool, dry: 
     src_srt = media.resolve().parent / f"{media.stem}_wp.srt"
     dst_srt = outdir / f"{stem}_wp.srt"
     preset_flag = f"--{preset} " if preset != "none" else ""
+    # 言語: 混在（英日）は先頭30秒からの自動判定に委ねる。指定があれば -l で固定。既定 ja は無指定。
+    if lang in MIXED_LANGS:
+        lang_flag = "--detect-language "
+    elif lang and lang != "ja":
+        lang_flag = f"-l {shlex.quote(lang)} "
+    else:
+        lang_flag = ""
     # $1 に媒体パスを渡すことで、空白・アポストロフィを含む名前でも安全に扱う。
     zscript = (
         f"emulate -L zsh; "
         f"source {shlex.quote(str(WHISPER_REMOTE_FN))} || {{ echo 'cannot source whisper-remote' >&2; exit 3; }}; "
-        f"whisper-remote {preset_flag}--suffix _wp \"$1\""
+        f"whisper-remote {preset_flag}{lang_flag}--suffix _wp \"$1\""
     )
     rc = run(["zsh", "-c", zscript, "zsh", str(media)], dry)
     if dry:
@@ -160,12 +190,17 @@ def run_wp(media: Path, outdir: Path, stem: str, preset: str, force: bool, dry: 
     return dst_srt
 
 
-def run_kotoba(media: Path, outdir: Path, stem: str, terms: list[str], force: bool, dry: bool) -> Path | None:
-    """kotoba-whisper をローカルで実行（3層出力）。長尺対策に --vad --no-condition。"""
-    base = outdir / f"{stem}_kotoba"
+def run_local(eng: str, model: str, media: Path, outdir: Path, stem: str,
+              terms: list[str], lang: str, word_ts: bool, force: bool, dry: bool) -> Path | None:
+    """ローカルの faster-whisper（audio-transcribe）で実行（3層出力）。
+    eng は出力サフィックス（wl / kotoba）。長尺のループ暴走を避けるため --vad --no-condition。
+    lang は audio-transcribe にそのまま渡す（auto/multi/mixed は向こうで言語自動判定になる）。"""
+    base = outdir / f"{stem}_{eng}"
     cmd = [str(AUDIO_TRANSCRIBE), str(media),
-           "--model", KOTOBA_MODEL, "--vad", "--no-condition",
-           "--no-word-timestamps", "-o", str(base)]
+           "--model", model, "--vad", "--no-condition",
+           "--language", (lang or "ja"), "-o", str(base)]
+    if not word_ts:
+        cmd += ["--no-word-timestamps"]
     for t in terms:
         cmd += ["--terms", t]
     if force:
@@ -175,17 +210,94 @@ def run_kotoba(media: Path, outdir: Path, stem: str, terms: list[str], force: bo
     if dry:
         return srt
     if rc != 0 or not srt.exists():
-        err("kotoba: audio-transcribe が失敗")
+        err(f"{eng}: audio-transcribe が失敗")
         return None
-    info(f"kotoba: {srt}")
+    info(f"{eng}: {srt}")
     return srt
 
 
-def run_dg(media: Path, outdir: Path, stem: str, terms: list[str], key_file: str | None,
-           force: bool, dry: bool) -> Path | None:
-    """Deepgram Nova-3（3層出力）。音声を外部送信する。"""
+def run_kotoba(media: Path, outdir: Path, stem: str, terms: list[str], force: bool, dry: bool) -> Path | None:
+    """kotoba-whisper（日本語特化 distil）をローカルで。語彙注入は効かず英日混在にも不向きなので
+    言語は ja 固定・word 単位なし（速度優先）。"""
+    return run_local("kotoba", KOTOBA_MODEL, media, outdir, stem, terms, "ja", False, force, dry)
+
+
+def run_wl(media: Path, outdir: Path, stem: str, terms: list[str], lang: str,
+           model: str, force: bool, dry: bool) -> Path | None:
+    """full whisper（既定 large-v3）をローカルで。多言語＋語彙注入(terms)対応、word 単位も出す。
+    wp（Zeus）が使えない/外に出せない素材の高品質ローカル系。"""
+    return run_local("wl", model, media, outdir, stem, terms, lang, True, force, dry)
+
+
+def run_wz(media: Path, outdir: Path, stem: str, terms: list[str], lang: str,
+           model: str, host: str, force: bool, dry: bool) -> Path | None:
+    """audio-transcribe を **Zeus の GPU** で実行（full whisper・3層・語彙注入）。
+    wp（SRTのみ）と wl（ローカルCPUで遅い）の間を埋める: GPU 速度で words.json/meta.json まで出す。
+    ASR ロジックは audio-transcribe に一本化し、本体を無改変で scp して走らせる（転送は 16k mono）。"""
+    base = outdir / f"{stem}_wz"
+    audio = outdir / f"{stem}_wz.m4a"           # 転送用（16k mono・小さい）
+    r_audio = f"{ZEUS_WORK}/{stem}_wz.m4a"
+    r_script = f"{ZEUS_WORK}/audio-transcribe"
+
+    # 1. 転送用音声（whisper 内部は 16k mono なので精度不変・転送量を大幅削減）
+    if run(["ffmpeg", "-i", str(media), "-vn", "-ac", "1", "-ar", "16000",
+            "-acodec", "aac", "-ab", "64k", str(audio), "-y", "-loglevel", "error"], dry) != 0 and not dry:
+        err("wz: 転送用音声の作成に失敗")
+        return None
+
+    # 2. 作業ディレクトリ＋本体/語彙/音声を転送
+    run(["ssh", host, f"mkdir -p {ZEUS_WORK}"], dry)
+    run(["scp", "-q", str(AUDIO_TRANSCRIBE), f"{host}:{r_script}"], dry)
+    r_terms: list[str] = []
+    for t in terms:
+        rt = f"{ZEUS_WORK}/{Path(t).name}"
+        run(["scp", "-q", str(t), f"{host}:{rt}"], dry)
+        r_terms.append(rt)
+    run(["rsync", "-az", str(audio), f"{host}:{r_audio}"], dry)
+
+    # 3. Zeus 上で audio-transcribe を GPU 実行（--device cuda）。lang は auto/mixed で自動判定になる。
+    term_flags = "".join(f" --terms {shlex.quote(rt)}" for rt in r_terms)
+    remote = (
+        f"source ~/.venv/bin/activate && "
+        f"export LD_LIBRARY_PATH={ZEUS_CUDNN}:$LD_LIBRARY_PATH && "
+        f"cd {ZEUS_WORK} && "
+        f"python audio-transcribe {shlex.quote(stem + '_wz.m4a')} "
+        f"--model {shlex.quote(model)} --device cuda --compute-type float16 "
+        f"--vad --no-condition --language {shlex.quote(lang or 'ja')} "
+        f"-o {shlex.quote(stem + '_wz')}{term_flags} --force"
+    )
+    if run(["ssh", host, remote], dry) != 0 and not dry:
+        err("wz: Zeus 上の audio-transcribe が失敗（到達性/依存/GPU を確認）")
+        return None
+
+    # 4. 3層を回収
+    for ext in (".srt", ".words.json", ".meta.json"):
+        run(["rsync", "-az", f"{host}:{ZEUS_WORK}/{stem}_wz{ext}", str(base) + ext], dry)
+    # 5. リモート掃除＋ローカル転送用音声を削除
+    run(["ssh", host, f"rm -f {ZEUS_WORK}/{stem}_wz.*"], dry)
+    if not dry:
+        try:
+            audio.unlink()
+        except OSError:
+            pass
+
+    srt = Path(str(base) + ".srt")
+    if dry:
+        return srt
+    if not srt.exists():
+        err("wz: SRT を回収できませんでした")
+        return None
+    info(f"wz: {srt}")
+    return srt
+
+
+def run_dg(media: Path, outdir: Path, stem: str, terms: list[str], lang: str,
+           key_file: str | None, force: bool, dry: bool) -> Path | None:
+    """Deepgram Nova-3（3層出力）。音声を外部送信する。
+    英日混在は Deepgram の language=multi（コードスイッチング）に載せる。"""
     base = outdir / f"{stem}_dg"
-    cmd = [str(AUDIO_TRANSCRIBE_DG), str(media), "-o", str(base)]
+    dg_lang = "multi" if lang in MIXED_LANGS else (lang or "ja")
+    cmd = [str(AUDIO_TRANSCRIBE_DG), str(media), "--language", dg_lang, "-o", str(base)]
     for t in terms:
         cmd += ["--terms", t]
     if key_file:
@@ -240,7 +352,14 @@ def main() -> int:
                     help="語彙注入ファイル（kotoba/dg に渡す。wp=whisper-remote は非対応）")
     ap.add_argument("--whisper-preset", default="orchestra",
                     choices=["orchestra", "meeting", "none"],
-                    help="wp（whisper-remote）のプリセット（既定: orchestra）")
+                    help="wp（whisper-remote）のプリセット（既定: orchestra。会議・講演は meeting）")
+    ap.add_argument("--language", "--lang", dest="language", default="ja",
+                    help="言語（既定 ja）。英日混在は mixed（whisper=自動判定／Deepgram=language:multi）。"
+                         "en 等の言語コード指定も可。wl/kotoba/dg/wp すべてに反映する")
+    ap.add_argument("--local-model", default=WL_MODEL,
+                    help=f"wl/wz（full whisper）のモデル（既定 {WL_MODEL}。多言語＋terms 対応）")
+    ap.add_argument("--zeus-host", default=ZEUS_HOST_DEFAULT,
+                    help=f"wz（Zeus GPU で audio-transcribe 実行）の SSH ホスト（既定 {ZEUS_HOST_DEFAULT}。外出先は zeus-soto 等）")
     ap.add_argument("--dg-key-file", metavar="FILE", help="Deepgram API キーのファイル")
     ap.add_argument("--no-postprocess", action="store_true",
                     help="cap-spans / normalize-numbers を適用しない（生 SRT のみ）")
@@ -271,9 +390,15 @@ def main() -> int:
         err("実行できるエンジンがありません")
         return 1
 
+    lang = args.language.strip()
+    mixed = lang.lower() in MIXED_LANGS
+    if mixed and "kotoba" in engines:
+        warn("kotoba は日本語特化(distil)で英日混在に不向き。wl か wp を推奨（このまま続行）")
+
     dry = args.dry_run
     info(f"入力: {media}")
     info(f"出力先: {outdir}")
+    info(f"言語: {lang}{'（英日混在＝コードスイッチング）' if mixed else ''}")
     info(f"エンジン: {', '.join(engines)}  後処理: {'なし' if args.no_postprocess else 'cap-spans→num'}")
     if not dry:
         outdir.mkdir(parents=True, exist_ok=True)
@@ -284,11 +409,15 @@ def main() -> int:
         print(file=sys.stderr)
         info(c("g", f"[{eng}] 転写"))
         if eng == "wp":
-            r = run_wp(media, outdir, stem, args.whisper_preset, args.force, dry)
+            r = run_wp(media, outdir, stem, args.whisper_preset, lang, args.force, dry)
+        elif eng == "wl":
+            r = run_wl(media, outdir, stem, args.terms, lang, args.local_model, args.force, dry)
+        elif eng == "wz":
+            r = run_wz(media, outdir, stem, args.terms, lang, args.local_model, args.zeus_host, args.force, dry)
         elif eng == "kotoba":
             r = run_kotoba(media, outdir, stem, args.terms, args.force, dry)
         elif eng == "dg":
-            r = run_dg(media, outdir, stem, args.terms, args.dg_key_file, args.force, dry)
+            r = run_dg(media, outdir, stem, args.terms, lang, args.dg_key_file, args.force, dry)
         else:
             r = None
         if r:
@@ -302,9 +431,9 @@ def main() -> int:
     clean: dict[str, Path] = {}
     if not args.no_postprocess:
         print(file=sys.stderr)
-        info(c("g", "[後処理] cap-spans（wp/kotoba）→ normalize-numbers"))
+        info(c("g", "[後処理] cap-spans（wp/wl/wz/kotoba）→ normalize-numbers"))
         for eng, r in raw.items():
-            out = postprocess(r, eng in ("wp", "kotoba"), args.force, dry)
+            out = postprocess(r, eng in ("wp", "wl", "wz", "kotoba"), args.force, dry)
             if out:
                 clean[eng] = out
 

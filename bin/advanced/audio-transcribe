@@ -357,8 +357,11 @@ def main() -> int:
         log(f"  warning    : この stable-ts/faster-whisper は {', '.join(dropped)} を"
             "受け付けません（注入せず続行）")
 
+    # language が auto/multi/mixed/空 のときは None にして faster-whisper の言語自動判定に委ねる
+    # （英日混在などコードスイッチング素材向け）。既定 "ja" はそのまま（挙動不変）。
+    _lang = None if str(args.language).strip().lower() in ("", "auto", "multi", "mixed") else args.language
     tr_kwargs = dict(
-        language=args.language,
+        language=_lang,
         beam_size=args.beam,
         word_timestamps=word_ts,
         vad_filter=args.vad,
