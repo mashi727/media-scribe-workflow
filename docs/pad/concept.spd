@@ -3,9 +3,19 @@
 	:comment 方針：小さな道具をテキストでつなぐ
 	音声を整える
 		:if 別録りの L/R 音声があるか
-			テイクを走査して設定を作る@$ rehearsal-sync <take_dir> --init
-			設定に人が目を通す
-			各チャンネルを映像へ同期する@$ rehearsal-sync take.yaml
+			:if 映像があるか
+				テイクを走査して設定を作る@$ rehearsal-sync <take_dir> --init
+				:comment --init が TC の有無を見て方式を選ぶ
+				設定に人が目を通す
+				:if 音声に TC があるか
+					L/R は TC の差で揃える
+					相関 1 回でカメラ時計の@偏差を校正する
+				:else
+					各チャンネルを映像へ@相互相関で個別に同期する
+				映像の音声を差し替える@$ rehearsal-sync take.yaml
+			:else
+				L↔R を相互相関で揃えて@ステレオにする
+				$ rehearsal-finalize-audio@  --stereo --drift
 		:else
 			収録音声をそのまま使う
 	字幕を作る
