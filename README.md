@@ -8,7 +8,7 @@
 
 ## 考え方
 
-何が問題で、それをどう解いているかを PAD（問題分析図）で示します。各段の詳細は下の各節を参照してください。
+何が課題で、それをどう解いているかを PAD（問題分析図）で示します。各段の詳細は下の各節を参照してください。
 
 <img src="docs/pad/concept.png" alt="考え方の PAD。録画を引き直せる記録にするため、音声を整え、字幕を作り、章立てを人が確定し、記録 PDF を組み立て、話題ごとに束ね直す" width="100%">
 
@@ -74,14 +74,14 @@
 
 ## 関連プロジェクト（GUI）
 
-動画チャプター編集の GUI アプリは **[Chaptr](https://github.com/mashi727/chaptr)** として独立リポジトリに分離されています。PySide6 ベース、macOS/Windows バイナリ配布、GPU ハードウェアエンコード対応。
+動画チャプター編集の GUI アプリは **[Chaptr](https://github.com/mashi727/chaptr)** として独立リポジトリに分離されています。PySide6 ベース、macOS/Windows バイナリ配布。Chaptr は境界を決めて章立てを `<ソース名>.txt` に保存するところまでを受け持ち、書き出しは本リポジトリの `vce-encode` / `vce-split` が受け持ちます。
 
 ```
 [本リポジトリ media-scribe-workflow]               [chaptr リポジトリ]
 CLI 配管ツール + レポートパイプライン      ⇆      動画チャプター編集 GUI
-                                                   .vce.json (チャプター定義)
+                                                   章立て <ソース名>.txt  
             ↓                                              ↓
-       bin/msw-pipeline ← ─────── 連携 ─────── → Chaptr が出力する .vce.json
+  bin/vce-encode / vce-split ← ─── 連携 ─── → Chaptr が保存する章立て .txt
 ```
 
 ## Features
@@ -137,7 +137,7 @@ CLI 配管ツール + レポートパイプライン      ⇆      動画チャ�
 
 ### VCE プロジェクトツール
 
-VCE (`.vce.json`) は Chaptr GUI が出力するチャプター定義フォーマット。これを CLI から処理:
+Chaptr が保存する章立て `.txt`（`# source:` 付き。推奨）と、旧形式の `.vce.json` の両方を読む:
 
 | コマンド | 説明 |
 |---------|------|
@@ -196,8 +196,8 @@ rehearsal-finalize-audio --stereo --drift
 # 1. YouTube から動画 + 字幕取得
 yt-srt "https://youtu.be/xxxxxxxxxxx" --video --output-base rehearsal
 
-# 2. Chaptr GUI で動画を読み込み、チャプター編集 → .vce.json 保存
-#    （または既存の .vce.json を流用）
+# 2. Chaptr GUI で動画を読み込み、チャプター編集 → <ソース名>.txt に保存
+#    （vce-encode / vce-split はこの .txt を読む。msw-pipeline は現状 .vce.json を入力に取る）
 
 # 3. SRT + VCE → PDF レポート生成
 msw-pipeline rehearsal.vce.json --srt rehearsal.srt -o report.pdf
