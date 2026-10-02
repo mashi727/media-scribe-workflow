@@ -1,0 +1,26 @@
+録画を、引き直せる記録にする
+	:comment 問題：録画は長く、あとから探せない
+	:comment 方針：小さな道具をテキストでつなぐ
+	音声を整える
+		:if 別録りの L/R 音声があるか
+			テイクを走査して設定を作る@$ rehearsal-sync <take_dir> --init
+			設定に人が目を通す
+			各チャンネルを映像へ同期する@$ rehearsal-sync take.yaml
+		:else
+			収録音声をそのまま使う
+	字幕を作る
+		:if 公開元に字幕があるか
+			字幕と動画を取得する@$ yt-srt <URL> --video
+		:else
+			複数エンジンで書き起こす@$ transcribe-srt video.mp4
+			エンジン間で突き合わせる@（srt-compare を自動実行）
+		語の時刻と来歴を原本に残す@（.words.json / .meta.json）
+	章立てを人が確定する
+		波形を見て境界を詰める@$ chaptr ./work
+	記録 PDF を組み立てる
+		字幕と章立てから PDF まで@$ msw-pipeline x.vce.json --srt x.srt
+	:while 束ね直したい話題があるか
+		話題ごとに発言を集める
+		動画をまたぐ索引にする
+	:comment 索引づくりはこのリポジトリの外
+	:terminal 引き直せる記録

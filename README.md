@@ -6,6 +6,14 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+## 考え方
+
+何が問題で、それをどう解いているかを PAD（問題分析図）で示します。各段の詳細は下の各節を参照してください。
+
+<img src="docs/pad/concept.png" alt="考え方の PAD。録画を引き直せる記録にするため、音声を整え、字幕を作り、章立てを人が確定し、記録 PDF を組み立て、話題ごとに束ね直す" width="100%">
+
+<sub>図の元は [`docs/pad/concept.spd`](docs/pad/concept.spd)。[padkit](https://github.com/mashi727/padkit) で検査・描画しています。</sub>
+
 ## 記録を、トピックで引き直せる形に
 
 字幕と記録は 1 本ずつ作りますが、使うときは「あの話題について、誰がどこで何と言っていたか」で引きたくなります。
