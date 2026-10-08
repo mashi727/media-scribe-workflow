@@ -127,14 +127,35 @@ def detect_system_font() -> str:
 
 
 def escape_drawtext(text: str) -> str:
-    """drawtextフィルター用のエスケープ処理"""
-    # ffmpegのdrawtextフィルターで特殊文字をエスケープ
-    text = text.replace("\\", "\\\\")
-    text = text.replace("'", "\\'")
-    text = text.replace(":", "\\:")
-    text = text.replace("[", "\\[")
-    text = text.replace("]", "\\]")
-    return text
+    r"""drawtext の text= に渡す値をエスケープする
+
+    呼び出し側は結果を ``text='...'`` と単引用で囲み、``expansion=none`` を付ける。
+    この関数は自分で引用を閉じて ``'<本体>'`` を返すので、最終的には
+    ``text=''<本体>''`` となり、本体は**引用の外**で解釈される。
+
+    ffmpeg は値を2回ほどく（drawtext のオプション → フィルタグラフ）ので、
+    内側から順に2段エスケープする。
+
+    1. オプション段: ``\`` ``'`` ``:``
+    2. フィルタグラフ段: ``\`` ``'`` ``[`` ``]`` ``,`` ``;``
+
+    経緯（2026-10 に実測で特定）:
+
+    - ``'\''`` で引用を閉じて開き直す旧方式は、**エラーを出さずに空文字を描いた**。
+      ``130_Isn't She Lovely`` の章だけ曲名が消えていた。``\'`` に置換するさらに
+      前の方式は ``No such filter: '1315.718'`` で落ちていた。
+    - 引用の内側に残す方式は、``\`` を含む曲名を正しく描けなかった。
+    - ``%`` と ``\`` は drawtext の既定（``expansion=normal``）で展開用の記号として
+      読まれる。呼び出し側の ``expansion=none`` と組で、文字どおりに描かれる。
+
+    正しさは「何か描けたか」ではなく、``textfile``（エスケープ不要）で描いた画像と
+    **画素単位で一致するか**で確かめている（tests/test_vce_encode_drawtext.py）。
+    前後の空白は引用の外では落ちる（チャプター名は読み込み時に strip 済み）。
+    """
+    text = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+    for ch in "\\'[],;":
+        text = text.replace(ch, "\\" + ch)
+    return "'" + text + "'"
 
 
 @dataclass
@@ -454,6 +475,125 @@ def calculate_extraction_plan(
             output_offset += (keep_end - keep_start)
 
     return segments, adjusted_chapters, output_offset
+
+
+# === SRT の時刻をカットへ追従させる ===
+#
+# 文字起こしをカット前に行い、ここで時刻を付け替える。カット後の音声を起こすと、
+# 継ぎ目で ASR が別の場所へ飛ぶ音を聞くことになり、30 秒窓の文脈が壊れて語が
+# 落ちたり無い文が生成されたりする。カット前なら音声が連続しているのでそれが
+# 起きず、付け替えは確定値による算術なので誤差も入らない。
+
+SRT_MIN_CUE_MS = 200   # 境界で切り詰めた残りがこれ未満なら捨てる
+
+
+@dataclass
+class SrtCue:
+    index: int
+    start_ms: int
+    end_ms: int
+    text: str
+
+
+def parse_srt_time(value: str) -> int:
+    """00:01:02,345 / 00:01:02.345 をミリ秒へ"""
+    m = re.match(r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})", value.strip())
+    if not m:
+        raise ValueError(f"SRT の時刻として読めない: {value!r}")
+    h, mi, sec, frac = m.groups()
+    return ((int(h) * 60 + int(mi)) * 60 + int(sec)) * 1000 + int(frac.ljust(3, "0"))
+
+
+def format_srt_time(ms: int) -> str:
+    ms = max(0, ms)
+    h, rem = divmod(ms, 3_600_000)
+    mi, rem = divmod(rem, 60_000)
+    sec, msec = divmod(rem, 1000)
+    return f"{h:02d}:{mi:02d}:{sec:02d},{msec:03d}"
+
+
+def parse_srt(path: Path) -> List[SrtCue]:
+    """SRT を読む。壊れたブロックは飛ばす（ASR の出力は時々崩れる）"""
+    cues: List[SrtCue] = []
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = [ln for ln in block.splitlines() if ln.strip() != ""]
+        if len(lines) < 2:
+            continue
+        time_line = next((ln for ln in lines if "-->" in ln), None)
+        if time_line is None:
+            continue
+        try:
+            left, right = time_line.split("-->")
+            start, end = parse_srt_time(left), parse_srt_time(right)
+        except ValueError:
+            continue
+        body = "\n".join(lines[lines.index(time_line) + 1:])
+        if not body.strip():
+            continue
+        cues.append(SrtCue(len(cues) + 1, start, end, body))
+    return cues
+
+
+def remap_srt_cues(cues: List[SrtCue], segments: List[SegmentInfo],
+                   source_index: int = 0) -> List[SrtCue]:
+    """カット後の時間軸へ cue を写す
+
+    チャプターと同じ写像を使う（calculate_extraction_plan が返す SegmentInfo）。
+    別々に計算すると、片方だけ直したときに静かにずれる。
+
+    - 保持区間に入る部分だけを残す
+    - 境界を跨ぐ cue は保持側へ切り詰める（カットで発話が切れるのだから正しい）
+    - 複数の保持区間に跨るなら、それぞれへ分割する
+    - 切り詰めた残りが SRT_MIN_CUE_MS 未満なら捨てる。**切り詰めていない cue は
+      短くても残す**（kotoba は 0〜0.2 秒の cue を多く出し、本文もある。
+      一律に捨てていたため 2026-10 の素材で kotoba の 5〜7% が消えていた）
+    """
+    out: List[SrtCue] = []
+    for cue in cues:
+        for seg in segments:
+            if seg.source_index != source_index:
+                continue
+            start = max(cue.start_ms, seg.start_ms)
+            end = min(cue.end_ms, seg.end_ms)
+            whole = seg.start_ms <= cue.start_ms < seg.end_ms and cue.end_ms <= seg.end_ms
+            if end < start or (not whole and end - start < SRT_MIN_CUE_MS):
+                continue
+            shift = seg.output_start_ms - seg.start_ms
+            out.append(SrtCue(len(out) + 1, start + shift, end + shift, cue.text))
+    out.sort(key=lambda c: (c.start_ms, c.end_ms))
+    for i, cue in enumerate(out, start=1):
+        cue.index = i
+    return out
+
+
+def write_srt(cues: List[SrtCue], path: Path) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for cue in cues:
+            f.write(f"{cue.index}\n")
+            f.write(f"{format_srt_time(cue.start_ms)} --> {format_srt_time(cue.end_ms)}\n")
+            f.write(f"{cue.text}\n\n")
+
+
+def find_source_srts(source_path: Path) -> List[Path]:
+    """ソースの隣にある SRT を集める
+
+    transcribe-srt は <base>_srt/<base>_<engine>.srt という形で出すので、
+    その下も見る。エンジンごとに複数あるのが普通。
+    """
+    base = source_path.with_suffix("").name
+    found: List[Path] = []
+    for directory in (source_path.parent, source_path.parent / f"{base}_srt"):
+        if directory.is_dir():
+            found.extend(sorted(directory.glob(f"{base}*.srt")))
+    # 同じ実体を二度拾わない
+    seen, unique = set(), []
+    for p in found:
+        key = p.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    return unique
 
 
 def format_time(ms: int) -> str:
@@ -883,6 +1023,7 @@ class ProjectEncoder:
                     drawtext = (
                         f"drawtext=fontfile='{font_path}':"
                         f"text='{escaped_title}':"
+                        f"expansion=none:"
                         f"fontsize=56:"
                         f"fontcolor=white:"
                         f"borderw=2:"
@@ -1013,6 +1154,47 @@ class ProjectEncoder:
             except Exception:
                 pass
 
+    def _remap_srt_files(self, srt_paths, segments, output_path: Path) -> None:
+        """SRT の時刻をカット後の時間軸へ付け替えて書き出す
+
+        入力が明示されなければソースの隣から探す。見つからなければ何もしない
+        （文字起こしをカット後に行う従来の流れを壊さないため）。
+
+        出力名は入力の語幹を引き継ぐ。transcribe-srt は <base>_wp.srt /
+        <base>_kotoba.num.srt のようにエンジン名を語幹へ入れるので、そこを
+        残さないとどれがどれだか分からなくなる。
+        """
+        if not self.sources:
+            return
+
+        source_path = self.sources[0].path
+        paths = [Path(p) for p in (srt_paths or [])] or find_source_srts(source_path)
+        paths = [p for p in paths if p.is_file()]
+        if not paths:
+            return
+
+        base_stem = source_path.with_suffix("").name
+        self.log("")
+        self.log("=== Remapping SRT ===")
+        for src in paths:
+            try:
+                cues = parse_srt(src)
+            except Exception as e:  # noqa: BLE001 - 壊れた SRT で全体を止めない
+                self.log(f"  ! {src.name}: 読めない（{e}）")
+                continue
+            if not cues:
+                self.log(f"  ! {src.name}: cue が無い")
+                continue
+
+            remapped = remap_srt_cues(cues, segments)
+            # <base>_wp.num.srt → _wp.num を取り出して出力名へ引き継ぐ
+            suffix = src.name[len(base_stem):] if src.name.startswith(base_stem) else "_" + src.name
+            dest = output_path.with_name(output_path.stem + suffix)
+            write_srt(remapped, dest)
+            dropped = len(cues) - len(remapped)
+            note = f"（{dropped} 件はカット区間）" if dropped > 0 else ""
+            self.log(f"  {src.name} → {dest.name}  {len(remapped)}/{len(cues)} cue{note}")
+
     def encode(self, output_path: Optional[Path] = None,
                encoder_id: Optional[str] = None,
                quality_index: Optional[int] = None,
@@ -1025,6 +1207,8 @@ class ProjectEncoder:
                source_override: Optional[Path] = None,
                max_height: Optional[int] = None,
                youtube_chapters: bool = False,
+               srt_paths: Optional[List[Path]] = None,
+               remap_srt: bool = True,
                dry_run: bool = False) -> bool:
         """エンコード実行"""
         try:
@@ -1142,6 +1326,11 @@ class ProjectEncoder:
                     for ch in adjusted_chapters:
                         yf.write(f"{format_time_short(ch.local_time_ms)} {ch.title}\n")
                 self.log(f"YouTube chapters → {yt_path}")
+
+            # カット前の時刻で書かれた SRT を、カット後の時間軸へ付け替える。
+            # チャプターと同じ写像（segments）を使うので、両者がずれようがない。
+            if remap_srt:
+                self._remap_srt_files(srt_paths, segments, output_path)
 
             temp_dir = Path(tempfile.gettempdir())
 
@@ -1379,6 +1568,11 @@ Examples:
     parser.add_argument('--no-chapters', action='store_true', help='チャプター埋め込みを無効化')
     parser.add_argument('--no-cut', action='store_true', help='除外チャプターをカットしない')
     parser.add_argument('--cover-image', type=Path, help='カバー画像（音声のみのソース用）')
+    parser.add_argument('--srt', type=Path, nargs='*', default=None,
+                        help='カット前の時刻で書かれた SRT。カット後の時刻へ付け替えて'
+                             '出力の隣へ書く。省略時はソースの隣から自動で探す')
+    parser.add_argument('--no-srt', action='store_true',
+                        help='SRT の自動検出と付け替えを行わない')
     parser.add_argument('--overlay-title', action='store_true', help='チャプター名を映像に焼き込む')
     parser.add_argument('--source', type=Path,
                         help='入力動画を差し替える（章立て .txt と同一時間軸の高品質マスター等）。'
@@ -1412,6 +1606,8 @@ Examples:
         source_override=args.source,
         max_height=(1080 if args.fhd else args.max_height),
         youtube_chapters=args.youtube_chapters,
+        srt_paths=args.srt,
+        remap_srt=not args.no_srt,
         dry_run=args.dry_run
     )
 
