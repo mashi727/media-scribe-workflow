@@ -1,0 +1,16 @@
+# /etc/cloudflared/config.yml
+#   cloudflared tunnel login
+#   cloudflared tunnel create msw
+#   cloudflared tunnel route dns msw api.differance-lab.tokyo
+#   sudo cloudflared service install      # systemd に登録（この設定ファイルを読む）
+tunnel: <TUNNEL-UUID>
+credentials-file: /etc/cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: api.differance-lab.tokyo
+    service: http://127.0.0.1:8787
+    originRequest:
+      # 大きいチャンクの受信に余裕を持たせる
+      connectTimeout: 30s
+      keepAliveTimeout: 90s
+  - service: http_status:404

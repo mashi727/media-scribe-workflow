@@ -152,6 +152,7 @@ media-scribe-workflow/
 - [x] examples/terms-orchestral.txt の作成（両エンジン共通の語彙注入ファイル）
 - [x] rehearsal-sync --init（テイクフォルダ走査 → take.yaml 生成。尺から drift を自動判定）
 - [x] bin/transcribe-srt の作成（動画/音声→複数エンジン[wp=Zeus/kotoba/dg]で複数SRTをワンコマンド生成。cap-spans→normalize-numbers→compare まで）
+- [x] server/ の雛形（Web 陶器: differance-lab.tokyo ＋ Cloudflare Access/Tunnel → WSL。音声→文字起こし→Claude 構造化 JSON→LuaLaTeX PDF。手順は server/README.md）
 
 ## 未実装タスク
 

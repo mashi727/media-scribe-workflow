@@ -1,0 +1,21 @@
+# /etc/systemd/system/msw-worker.service
+[Unit]
+Description=media-scribe-workflow worker (transcribe / analyze / render)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mashi
+WorkingDirectory=/home/mashi/media-scribe-workflow/server
+EnvironmentFile=/etc/msw/msw.env
+Environment=PATH=/home/mashi/media-scribe-workflow/.venv/bin:/usr/local/texlive/2025/bin/x86_64-linux:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/mashi/media-scribe-workflow/.venv/bin/python -m msw_server.worker
+Restart=always
+RestartSec=10
+# 処理中のジョブは最後まで回してから止まる（文字起こしが長いので長めに待つ）
+TimeoutStopSec=3600
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

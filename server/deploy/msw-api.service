@@ -1,0 +1,20 @@
+# /etc/systemd/system/msw-api.service
+# 127.0.0.1 でだけ待つ。外からは cloudflared（Tunnel）経由でしか届かない
+[Unit]
+Description=media-scribe-workflow API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mashi
+WorkingDirectory=/home/mashi/media-scribe-workflow/server
+EnvironmentFile=/etc/msw/msw.env
+ExecStart=/home/mashi/media-scribe-workflow/.venv/bin/uvicorn msw_server.app:app \
+    --host 127.0.0.1 --port 8787 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

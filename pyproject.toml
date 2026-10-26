@@ -39,6 +39,14 @@ dev = [
     "black>=23.0",
     "ruff>=0.1.0",
 ]
+# Web 陶器（server/msw_server）。文字起こしは別途 stable-ts / faster-whisper
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pyjwt[crypto]>=2.8",
+    "anthropic>=1.0",
+    "httpx>=0.27",
+]
 
 [project.urls]
 Homepage = "https://github.com/mashi727/media-scribe-workflow"
