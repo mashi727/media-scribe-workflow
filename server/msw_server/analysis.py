@@ -1,87 +1,51 @@
-"""SRT → 構造化 JSON（Claude）
+"""文字起こし → 記録 JSON
 
-/rehearsal skill（claude/commands/rehearsal.md）の Web 版。対話で前提を尋ねる代わりに
-フォームの値を受け取り、TeX ではなく JSON を返させる（TeX は tex.py が組む）。
+構成段は差し替えられる（MSW_ANALYZER）。既定の "transcript" は AI を使わず、
+区間（章）ごとに時刻付きの発言録を作る。外部へは何も送らず、費用もかからない。
+内容は ASR の生結果そのままなので、要約による取りこぼしや捏造が起きない。
 
-区間ごとに1回呼ぶ。章立て（chaptr の .txt）があれば章＝曲ごと、無ければ固定幅。
-1回の呼び出しが1区間の発話しか見ないので、曲をまたいだ帰属の取り違えが起きにくい
-（ダッシュボード SOP の「\\section 構造から機械生成」と同じ理由）。
+区間割りは章立て（chaptr の .txt）があれば章＝曲ごと、無ければ固定幅。
+'--' 始まりの章は chaptr でカットとした区間（休憩・準備）なので出さない。
 
-出力された時刻は SRT に照らして検証し、区間外・発話の無い時刻は verified=False にする。
+words.json（audio-transcribe の機械忠実層）があれば語ごとの確信度を読み、
+低い語を印付きで出す（PDF 上で「どこが怪しいか」が分かる）。無ければ SRT を使う。
+
+後でローカル LLM（Ollama 等）を足すときは Analyzer を実装して ANALYZERS に登録する。
+REPORT_SCHEMA / SYSTEM_PROMPT / ground() はそのための界面として残してある
+（LLM の出力は ground() で出典時刻を検証してから使う）。
 """
 from __future__ import annotations
 
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from media_scribe_workflow.pipeline.srt_parser import SRTParser, Subtitle
+from media_scribe_workflow.pipeline.srt_parser import SRTParser
 
 # bin/advanced/video-cut-chapters と同じ書式（'H:MM:SS.mmm タイトル'、'#' はコメント）
 CHAPTER_LINE = re.compile(r"^\s*(\d+):(\d\d):(\d\d)[.,](\d{1,3})\s+(.*\S)\s*$")
 TS = re.compile(r"^(\d{1,2}):([0-5]\d):([0-5]\d)$")
 CUT_PREFIX = "--"
-# 出典時刻の許容（その時刻の前後にこの秒数以内で発話の cue があれば実在とみなす）
+# 出典時刻の許容（その時刻の前後にこの秒数以内で発話があれば実在とみなす）
 GROUND_TOLERANCE_S = 20
 
-SYSTEM_PROMPT = """\
-あなたはオーケストラ・吹奏楽のリハーサル記録の書き手です。
-入力は、リハーサル1区間ぶんの文字起こし（各行が [HH:MM:SS] で始まる）です。
-この区間に参加できなかった団員が、何を直されたか・次に何を意識すべきかを
-読んで分かる記録を、指定の JSON スキーマで返してください。
 
-守ること:
-- 文字起こしに書かれていることだけを記録する。推測で補った指示を作らない
-- 各指示の time には、その発話が始まる行の時刻を HH:MM:SS でそのまま写す
-- 指揮者の指示は意味を変えずに簡潔にまとめる。小節番号・練習記号・楽器名は原文どおり
-- 誤認識と思われる語は、文脈から明らかな場合のみ直し、確信がなければ原文を残す
-- 演奏中で発話の無い時間帯は topics に含めない
-- parts には対象パート（例: ホルン、木管、全員）を入れる。不明なら空配列
-- 依頼者の視点（パート）が指定されていれば、そのパートに関わる指示を漏らさない
-"""
+@dataclass
+class Word:
+    text: str
+    probability: float
 
-REPORT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string", "description": "この区間の要点（2〜4文）"},
-        "topics": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "練習箇所（例: 練習番号C〜D）"},
-                    "start": {"type": "string", "description": "HH:MM:SS"},
-                    "instructions": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "time": {"type": "string", "description": "HH:MM:SS"},
-                                "text": {"type": "string"},
-                                "parts": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["time", "text", "parts"],
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": ["title", "start", "instructions"],
-                "additionalProperties": False,
-            },
-        },
-        "part_notes": {
-            "type": "array",
-            "description": "依頼者の視点のパート向けの要点（指定が無ければ空）",
-            "items": {"type": "string"},
-        },
-    },
-    "required": ["summary", "topics", "part_notes"],
-    "additionalProperties": False,
-}
+
+@dataclass
+class Utterance:
+    start_s: float
+    end_s: float
+    text: str
+    words: list[Word] = field(default_factory=list)
 
 
 @dataclass
@@ -104,6 +68,23 @@ def parse_hms(text: str) -> float | None:
     return h * 3600 + mi * 60 + s
 
 
+# --- 入力 ---------------------------------------------------------------
+
+def load_utterances(srt_path: Path, words_path: Path | None = None) -> list[Utterance]:
+    """words.json（stable-ts 形式）を優先し、無ければ SRT から読む"""
+    if words_path and words_path.is_file():
+        data = json.loads(words_path.read_text(encoding="utf-8"))
+        out = []
+        for s in data.get("segments", []):
+            words = [Word(w.get("word", ""), float(w.get("probability", 1.0)))
+                     for w in s.get("words") or []]
+            out.append(Utterance(float(s["start"]), float(s["end"]),
+                                 str(s.get("text", "")).strip(), words))
+        return out
+    return [Utterance(c.start_ms / 1000, c.end_ms / 1000, c.text.replace("\n", " ").strip())
+            for c in SRTParser().parse(srt_path)]
+
+
 def load_chapters(path: Path) -> list[tuple[float, str]]:
     out = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -118,14 +99,13 @@ def load_chapters(path: Path) -> list[tuple[float, str]]:
     return sorted(out)
 
 
-def plan_segments(cues: list[Subtitle], chapters: list[tuple[float, str]],
+def plan_segments(utts: list[Utterance], chapters: list[tuple[float, str]],
                   window_minutes: int) -> list[Segment]:
-    end = max((c.end_ms for c in cues), default=0) / 1000
+    end = max((u.end_s for u in utts), default=0)
     if chapters:
         segs = []
         for i, (t, title) in enumerate(chapters):
             nxt = chapters[i + 1][0] if i + 1 < len(chapters) else end
-            # '--' 始まりは chaptr でカットとした区間（休憩・準備）
             if not title.startswith(CUT_PREFIX) and nxt > t:
                 segs.append(Segment(title, t, nxt))
         return segs
@@ -134,17 +114,160 @@ def plan_segments(cues: list[Subtitle], chapters: list[tuple[float, str]],
     return [Segment(f"区間 {i}", t, min(t + w, end)) for i, t in enumerate(starts, 1)]
 
 
-def cues_in(cues: list[Subtitle], seg: Segment) -> list[Subtitle]:
-    return [c for c in cues if seg.start_s <= c.start_ms / 1000 < seg.end_s]
+def utterances_in(utts: list[Utterance], seg: Segment) -> list[Utterance]:
+    return [u for u in utts if seg.start_s <= u.start_s < seg.end_s]
 
 
-def transcript_text(cues: list[Subtitle]) -> str:
-    return "\n".join(f"[{hms(c.start_ms / 1000)}] {c.text.replace(chr(10), ' ')}" for c in cues)
+# --- 構成段 -------------------------------------------------------------
+
+class Analyzer(Protocol):
+    name: str
+
+    def analyze_segment(self, meta: dict[str, Any], seg: Segment,
+                        utts: list[Utterance]) -> dict[str, Any]: ...
 
 
-def ground(result: dict[str, Any], seg: Segment, cues: list[Subtitle]) -> dict[str, Any]:
-    """モデルが返した時刻が、その区間の実在する発話に対応するか確かめる"""
-    starts = [c.start_ms / 1000 for c in cues]
+class TranscriptAnalyzer:
+    """AI を使わない発言録
+
+    近い発話（間が gap_s 未満）を段落にまとめ、段落が max_s を超えたら切る。
+    段落の頭に時刻を付ける（\\ts{} になり、tex-link-timestamps で動画へ飛べる）。
+    """
+
+    name = "transcript"
+
+    def __init__(self, gap_s: float = 4.0, max_s: float = 60.0, low_conf: float = 0.4):
+        self.gap_s = gap_s
+        self.max_s = max_s
+        self.low_conf = low_conf
+
+    def runs(self, u: Utterance) -> list[dict[str, Any]]:
+        """確信度の低い語を印付きの run に分ける（連続する同種はまとめる）"""
+        if not u.words:
+            return [{"text": u.text, "low": False}]
+        out: list[dict[str, Any]] = []
+        for w in u.words:
+            low = w.probability < self.low_conf
+            if out and out[-1]["low"] == low:
+                out[-1]["text"] += w.text
+            else:
+                out.append({"text": w.text, "low": low})
+        return out
+
+    def analyze_segment(self, meta: dict[str, Any], seg: Segment,
+                        utts: list[Utterance]) -> dict[str, Any]:
+        paragraphs: list[dict[str, Any]] = []
+        para_start = para_end = None
+        for u in utts:
+            if (para_start is None or u.start_s - para_end > self.gap_s
+                    or u.end_s - para_start > self.max_s):
+                paragraphs.append({"time": hms(u.start_s), "runs": []})
+                para_start = u.start_s
+            elif paragraphs[-1]["runs"]:
+                paragraphs[-1]["runs"].append({"text": " ", "low": False})
+            paragraphs[-1]["runs"].extend(self.runs(u))
+            para_end = u.end_s
+        low = sum(1 for p in paragraphs for r in p["runs"] if r["low"])
+        return {"summary": "", "topics": [], "part_notes": [],
+                "transcript": paragraphs, "low_confidence_runs": low}
+
+
+ANALYZERS: dict[str, type] = {"transcript": TranscriptAnalyzer}
+
+
+def make_analyzer(name: str) -> Analyzer:
+    try:
+        return ANALYZERS[name]()
+    except KeyError:
+        raise ValueError(f"未知の構成方式です: {name}（選べるもの: {', '.join(ANALYZERS)}）") from None
+
+
+def analyze(srt_path: Path, chapters_path: Path | None, meta: dict[str, Any],
+            analyzer: Analyzer, window_minutes: int, progress: Any = None,
+            words_path: Path | None = None) -> dict[str, Any]:
+    utts = load_utterances(srt_path, words_path)
+    chapters = load_chapters(chapters_path) if chapters_path and chapters_path.exists() else []
+    segments = plan_segments(utts, chapters, window_minutes)
+    out = []
+    for i, seg in enumerate(segments, 1):
+        if progress:
+            progress(f"構成 {i}/{len(segments)}: {seg.title}")
+        su = utterances_in(utts, seg)
+        if not su:
+            continue
+        result = analyzer.analyze_segment(meta, seg, su)
+        if result.get("topics"):
+            result = ground(result, seg, su)
+        out.append({"title": seg.title, "start": hms(seg.start_s), "end": hms(seg.end_s),
+                    **result})
+    return {
+        "meta": meta,
+        "analyzer": analyzer.name,
+        "chaptered": bool(chapters),
+        "segments": out,
+    }
+
+
+# --- LLM 用の界面（ローカル LLM を足すとき用。今は未使用） ----------------------
+
+SYSTEM_PROMPT = """\
+あなたはオーケストラ・吹奏楽のリハーサル記録の書き手です。
+入力は、リハーサル1区間ぶんの文字起こし（各行が [HH:MM:SS] で始まる）です。
+この区間に参加できなかった団員が、何を直されたか・次に何を意識すべきかを
+読んで分かる記録を、指定の JSON スキーマで返してください。
+
+守ること:
+- 文字起こしに書かれていることだけを記録する。推測で補った指示を作らない
+- 各指示の time には、その発話が始まる行の時刻を HH:MM:SS でそのまま写す
+- 指揮者の指示は意味を変えずに簡潔にまとめる。小節番号・練習記号・楽器名は原文どおり
+- 演奏中で発話の無い時間帯は topics に含めない
+- parts には対象パート（例: ホルン、木管、全員）を入れる。不明なら空配列
+"""
+
+REPORT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "topics": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start": {"type": "string"},
+                    "instructions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "time": {"type": "string"},
+                                "text": {"type": "string"},
+                                "parts": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["time", "text", "parts"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["title", "start", "instructions"],
+                "additionalProperties": False,
+            },
+        },
+        "part_notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "topics", "part_notes"],
+    "additionalProperties": False,
+}
+
+
+def transcript_text(utts: list[Utterance]) -> str:
+    """LLM に渡す形（[HH:MM:SS] 本文）"""
+    return "\n".join(f"[{hms(u.start_s)}] {u.text}" for u in utts)
+
+
+def ground(result: dict[str, Any], seg: Segment, utts: list[Utterance]) -> dict[str, Any]:
+    """LLM が返した時刻が、その区間の実在する発話に対応するか確かめる"""
+    starts = [u.start_s for u in utts]
 
     def ok(ts: str) -> bool:
         t = parse_hms(ts)
@@ -157,75 +280,3 @@ def ground(result: dict[str, Any], seg: Segment, cues: list[Subtitle]) -> dict[s
         for ins in topic.get("instructions", []):
             ins["verified"] = ok(ins.get("time", ""))
     return result
-
-
-def job_context(meta: dict[str, Any]) -> str:
-    rows = [
-        ("日付", meta.get("date")), ("団体", meta.get("ensemble")),
-        ("指揮者", meta.get("conductor")), ("曲目", "、".join(meta.get("pieces") or [])),
-        ("本番", meta.get("concert")), ("記録者", meta.get("author")),
-        ("視点（パート）", meta.get("viewpoint")),
-    ]
-    return "\n".join(f"{k}: {v}" for k, v in rows if v)
-
-
-class Analyzer:
-    def __init__(self, model: str, effort: str, client: Any = None):
-        if client is None:
-            import anthropic
-            client = anthropic.Anthropic()
-        self.client = client
-        self.model = model
-        self.effort = effort
-
-    def analyze_segment(self, meta: dict[str, Any], seg: Segment,
-                        cues: list[Subtitle]) -> dict[str, Any]:
-        user = (
-            f"## 前提情報\n{job_context(meta) or '（指定なし）'}\n\n"
-            f"## 区間\n{seg.title}（{hms(seg.start_s)}〜{hms(seg.end_s)}）\n\n"
-            f"## 文字起こし\n{transcript_text(cues)}"
-        )
-        # 長い入力なのでストリーミングで受ける。system は全区間で同一なのでキャッシュに載せる。
-        # fallbacks="default": 安全分類器が断ったときにサーバ側で別モデルへ回す
-        with self.client.beta.messages.stream(
-            model=self.model,
-            max_tokens=32000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-            system=[{"type": "text", "text": SYSTEM_PROMPT,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user}],
-            output_config={"effort": self.effort,
-                           "format": {"type": "json_schema", "schema": REPORT_SCHEMA}},
-        ) as stream:
-            message = stream.get_final_message()
-        if message.stop_reason == "refusal":
-            raise RuntimeError(f"区間「{seg.title}」の解析が拒否されました")
-        if message.stop_reason == "max_tokens":
-            raise RuntimeError(f"区間「{seg.title}」の出力が上限で切れました（区間を短くしてください）")
-        text = next(b.text for b in message.content if b.type == "text")
-        return json.loads(text)
-
-
-def analyze(srt_path: Path, chapters_path: Path | None, meta: dict[str, Any],
-            analyzer: Analyzer, window_minutes: int,
-            progress: Any = None) -> dict[str, Any]:
-    cues = SRTParser().parse(srt_path)
-    chapters = load_chapters(chapters_path) if chapters_path and chapters_path.exists() else []
-    segments = plan_segments(cues, chapters, window_minutes)
-    out = []
-    for i, seg in enumerate(segments, 1):
-        if progress:
-            progress(f"解析 {i}/{len(segments)}: {seg.title}")
-        sc = cues_in(cues, seg)
-        if not sc:
-            continue
-        result = ground(analyzer.analyze_segment(meta, seg, sc), seg, sc)
-        out.append({"title": seg.title, "start": hms(seg.start_s), "end": hms(seg.end_s),
-                    **result})
-    return {
-        "meta": meta,
-        "model": analyzer.model,
-        "chaptered": bool(chapters),
-        "segments": out,
-    }

@@ -8,7 +8,7 @@
     chapters.txt       章立て（任意）
     audio.flac         片ch・16kHz・可逆
     transcript.srt / transcript.words.json / transcript.meta.json   一次資料（audio-transcribe）
-    report.json        構造化（Claude）
+    report.json        構成（既定は AI なしの発言録。MSW_ANALYZER で差し替え）
     report.tex / report.pdf
 """
 from __future__ import annotations
@@ -61,9 +61,10 @@ def analyze(d: Path, cfg: Settings, meta: dict[str, Any], progress: Progress,
             analyzer: analysis.Analyzer | None = None) -> None:
     if (d / "report.json").exists():
         return
-    analyzer = analyzer or analysis.Analyzer(cfg.model, cfg.effort)
+    analyzer = analyzer or analysis.make_analyzer(cfg.analyzer)
     report = analysis.analyze(d / "transcript.srt", d / "chapters.txt", meta, analyzer,
-                              cfg.window_minutes, progress)
+                              cfg.window_minutes, progress,
+                              words_path=d / "transcript.words.json")
     tmp = d / "report.json.part"
     tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.rename(d / "report.json")

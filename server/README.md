@@ -1,7 +1,8 @@
 # msw_server — 音声 → リハ記録 PDF の Web 陶器
 
 `differance-lab.tokyo` の固定ページから音声を受け取り、自宅 WSL（Ubuntu）で
-文字起こし → 構造化（Claude）→ LuaLaTeX 組版までを行う。配管（`bin/`）はそのまま使う。
+文字起こし → 章ごとの発言録 → LuaLaTeX 組版までを行う。配管（`bin/`）はそのまま使う。
+**外部の AI API は使わない。** 音声も文字起こしも自宅の外へ出ず、従量課金も発生しない。
 
 ```
 [ブラウザ] differance-lab.tokyo/msw/ （WordPress dlab: page-msw.php + msw.js）
@@ -17,7 +18,7 @@
                   msw-worker ◀───────────────────────────┘
                     normalize   ffmpeg → 片ch 16kHz FLAC
                     transcribe  bin/advanced/audio-transcribe（GPU）
-                    analyze     章ごとに Claude → report.json（出典時刻を検証）
+                    analyze     章ごとの発言録 → report.json（AI なし）
                     render      report.json → report.tex → lualatex → report.pdf
 ```
 
@@ -25,8 +26,9 @@
 
 - **API は 127.0.0.1 でだけ待つ。** 外からは Tunnel 経由でしか届かない。さらにアプリ側でも Access の JWT（署名・aud・iss）と許可リストを検証する（多層防御・許可リストが空なら全拒否）。
 - **アップロードは 32MB ずつ**、offset 付き PUT で送る。Cloudflare のリクエスト本体上限（Free/Pro は 100MB）を避けるためで、途中で切れても受信済みの位置から再開できる。
-- **LLM には TeX を書かせない。** スキーマ固定の JSON を返させ、`tex.py` がエスケープしてから組む。`\section{曲名}` と `\ts{HH:MM:SS}` は下流（`tex-link-timestamps`・ダッシュボードの `build_<slug>.py`）との界面なので変えない。
-- **出典時刻は機械で検証する。** 区間外の時刻や、近くに発話の無い時刻は PDF 上で「要確認」と表示する。
+- **構成段は AI を使わない（既定 `MSW_ANALYZER=transcript`）。** 章（曲）ごとに、時刻付きの段落として文字起こしをそのまま並べる。要約しないので、取りこぼしや捏造が起きない。
+- **確信度の低い語は赤字にする。** `transcript.words.json` の語ごとの probability が 0.4 未満の語。読み手は「どこが怪しいか」を見て音声に当たれる。
+- **TeX は `tex.py` だけが組み、文字列は必ずエスケープする。** `\section{曲名}` と `\ts{HH:MM:SS}` は下流（`tex-link-timestamps`・ダッシュボードの `build_<slug>.py`）との界面なので変えない。段落頭の時刻は `\ts{}` なので、`tex-link-timestamps` を掛ければ YouTube の該当時刻へ飛べる。
 - **各段は冪等。** 出力ファイルがあれば飛ばすので、WSL が落ちても次の claim で続きから処理する。
 - 原本音声は処理後に削除する（`MSW_DELETE_INPUT=0` で残せる）。一次資料として残るのは `transcript.{srt,words.json,meta.json}` と成果物。
 
@@ -105,9 +107,20 @@ python -m pytest tests/test_server.py                      # 外部に触れな�
 
 Access を通さずに手元で UI を試す場合は、`MSW_DEV_EMAIL=you@example.com` を設定し、`MSW_CF_AUD` を空にして uvicorn を起動する。この変数は認証を飛ばすが、`MSW_CF_AUD` が設定されている（＝本番の）ときは無視される。
 
+## ローカル LLM を足すとき
+
+`analysis.py` の `Analyzer`（`analyze_segment(meta, seg, utts) -> dict`）を実装して `ANALYZERS` に登録し、`MSW_ANALYZER` で選ぶ。
+界面は用意してある:
+
+- `REPORT_SCHEMA`: 返させる JSON の形（`summary` / `topics[].instructions[]` / `part_notes`）。Ollama なら `/api/chat` の `format` にこのスキーマを渡すと形が固定される。
+- `SYSTEM_PROMPT`、`transcript_text()`: 入力の組み立て。
+- `ground()`: 返ってきた時刻を文字起こしと照合する。`topics` を返す構成段には `analyze()` が自動で掛け、照合できない時刻・指示は PDF に「要確認」と出る。
+
+Whisper と同じ GPU を使うので、ワーカーが1件ずつ順に処理する今の作りのままでよい。
+
 ## 未実装（次の一手）
 
 - 構造化 JSON の編集画面（PDF 前の人手校正。原本 SRT/words.json には書き戻さない）
-- 見積もり表示（尺 × ASR ＋ LLM トークン）と、利用者ごとのクォータ
+- 処理時間の見積もり表示と、利用者ごとのクォータ
 - 完了通知（メール等）
 - 語彙ファイル（`--terms`）を楽団ごとに切り替える

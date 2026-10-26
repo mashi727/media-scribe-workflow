@@ -1,7 +1,7 @@
-"""構造化 JSON → LuaLaTeX
+"""記録 JSON → LuaLaTeX
 
-LLM には TeX を書かせない。文字列はすべてここでエスケープしてから埋め込むので、
-文字起こしやフォーム由来の \\input / \\write18 などは文字として出るだけになる。
+TeX は必ずここで組む（構成段に TeX を書かせない）。文字列はすべてエスケープしてから
+埋め込むので、文字起こしやフォーム由来の \\input / \\write18 などは文字として出るだけになる。
 
 下流との界面（変えないこと）:
     \\section{区間＝曲名}     … ダッシュボードの build_<slug>.py が曲別まとめを機械生成する単位
@@ -41,6 +41,7 @@ PREAMBLE = r"""\documentclass[a4paper,10pt,twocolumn]{ltjsarticle}
 \newcommand{\ts}[1]{\texttt{\small [#1]}}
 \newcommand{\unverified}{\textsuperscript{\textcolor{red!70!black}{\scriptsize 要確認}}}
 \newcommand{\parts}[1]{\textcolor{navy}{\small〔#1〕}}
+\newcommand{\lowconf}[1]{\textcolor{red!65!black}{#1}}
 """
 
 
@@ -62,15 +63,25 @@ def render(report: dict[str, Any], jfont: str = "Noto Serif CJK JP") -> str:
         rows.append(rf"\item[曲目] {esc('、'.join(meta['pieces']))}")
     if rows:  # 空の description は LaTeX のエラーになる
         lines += [r"\begin{description}", *rows, r"\end{description}"]
-    lines.append(
-        r"{\small 本記録は文字起こしから自動生成した下書きです。"
-        r"\unverified\ の付いた時刻・指示は文字起こしと照合できなかったものです。"
-        r"一次資料は音声・映像です。}")
+    if report.get("analyzer", "transcript") == "transcript":
+        lines.append(
+            r"{\small 本記録は音声の自動文字起こしをそのまま章ごとに並べたものです（要約していません）。"
+            r"\lowconf{赤字}は認識の確信度が低い語です。一次資料は音声・映像です。}")
+    else:
+        lines.append(
+            r"{\small 本記録は文字起こしから自動生成した下書きです。"
+            r"\unverified\ の付いた時刻・指示は文字起こしと照合できなかったものです。"
+            r"一次資料は音声・映像です。}")
 
     for seg in report.get("segments", []):
         lines.append(rf"\section{{{esc(seg['title'])} {ts(seg['start'])}〜{ts(seg['end'])}}}")
         if seg.get("summary"):
             lines.append(esc(seg["summary"]))
+        for para in seg.get("transcript", []):
+            body = "".join(
+                rf"\lowconf{{{esc(r['text'])}}}" if r.get("low") else esc(r["text"])
+                for r in para.get("runs", []))
+            lines.append(rf"\noindent{ts(para['time'])} {body.strip()}\par")
         for topic in seg.get("topics", []):
             mark = "" if topic.get("verified") else r"\unverified"
             lines.append(rf"\subsection{{{esc(topic['title'])} {ts(topic['start'])}{mark}}}")

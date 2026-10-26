@@ -50,7 +50,7 @@ get_header();
         <label>記録者 <input name="author" placeholder="ホルン奏者有志"></label>
         <label>視点（パート） <input name="viewpoint" placeholder="ホルン"></label>
       </fieldset>
-      <p class="msw-note">音声は自宅サーバで文字起こしし、文字起こしテキストを構成のため外部の AI（Anthropic）へ送信します。原本音声は処理後に削除します。</p>
+      <p class="msw-note">音声は運営者の自宅サーバ内だけで文字起こしし、外部のサービスへは送信しません。原本音声は処理後に削除します。</p>
       <button type="submit">アップロードして作成</button>
       <progress id="msw-progress" max="1" value="0" hidden></progress>
       <p id="msw-status" role="status"></p>

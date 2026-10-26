@@ -7,8 +7,8 @@
     db.py        SQLite のジョブキュー
     worker.py    ジョブを1件ずつ取り出して段階を回す常駐プロセス
     stages.py    normalize → transcribe → analyze → render
-    analysis.py  SRT を章ごとに Claude で構造化（JSON）し、出典時刻を検証する
-    tex.py       構造化 JSON → .tex（\\section{曲名} と \\ts{HH:MM:SS} を界面として守る）
+    analysis.py  文字起こしを章ごとの記録 JSON にする（既定は AI なしの発言録・差し替え可）
+    tex.py       記録 JSON → .tex（\\section{曲名} と \\ts{HH:MM:SS} を界面として守る）
 """
 
 __version__ = "0.1.0"

@@ -50,9 +50,9 @@ class Settings:
     terms_file: str = field(default_factory=lambda: os.environ.get(
         "MSW_TERMS_FILE", str(REPO_ROOT / "examples" / "terms-orchestral.txt")))
 
-    model: str = field(default_factory=lambda: os.environ.get("MSW_MODEL", "claude-opus-5-5"))
-    effort: str = field(default_factory=lambda: os.environ.get("MSW_EFFORT", "high"))
-    # 章立てが無いときの分割幅（分）。曲をまたいだ取り違えを減らすため長くしすぎない
+    # 構成段: "transcript"（AI なしの発言録）。ローカル LLM を足したらここで選ぶ
+    analyzer: str = field(default_factory=lambda: os.environ.get("MSW_ANALYZER", "transcript"))
+    # 章立てが無いときの分割幅（分）
     window_minutes: int = field(default_factory=lambda: int(
         os.environ.get("MSW_WINDOW_MINUTES", "20")))
 
