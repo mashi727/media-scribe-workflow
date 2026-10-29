@@ -28,7 +28,9 @@ transcribe-srt — 動画/音声 1 本から、現在使えるベストエフォ
 
 言語（--language、既定 ja）:
     ja/en/... 言語コードを全エンジンに反映。**英日混在は --language mixed**
-    （whisper 系＝言語自動判定、dg＝language:multi）。混在では kotoba を外し wl/wp+dg を推奨。
+    （whisper 系＝言語自動判定、dg＝language:multi）。mixed で --engines を省略すると
+    既定を自動で wp,dg（kotoba を除外）に切り替える。whisper の 3 層が GPU 速度で要るなら
+    --engines wz,dg、外に出さずローカルで回すなら --engines wl,dg。
 
 後処理（各エンジンの生 SRT を仕上げる。--no-postprocess で無効化）:
     srt-cap-spans         長尺 Whisper の引き伸ばされた cue 終端を発話速度で抑える（wp/kotoba のみ）
@@ -53,10 +55,10 @@ transcribe-srt — 動画/音声 1 本から、現在使えるベストエフォ
     transcribe-srt take_L.wav --engines wp,kotoba --terms examples/terms-orchestral.txt
     transcribe-srt video.mp4 --dry-run          # 実行せず全コマンドを提示
     transcribe-srt video.mp4 --engines kotoba   # ローカルだけで試す
-    # 英日混在を高品質に（Zeus GPU full whisper 3層 + Deepgram コードスイッチング）:
+    # 英日混在: --engines 省略で自動的に wp,dg（kotoba除外・whisper自動判定＋dg multi）
+    transcribe-srt talk.m4a --language mixed
+    # whisper の 3 層を GPU 速度で: wz,dg / 外に出さずローカル: wl,dg
     transcribe-srt talk.m4a --engines wz,dg --language mixed
-    # Zeus を使わずローカルだけで（遅いが外に出さない）:
-    transcribe-srt talk.m4a --engines wl,dg --language mixed
 """
 from __future__ import annotations
 
@@ -79,6 +81,9 @@ WHISPER_REMOTE_FN = Path.home() / ".config" / "zsh" / "functions" / "whisper-rem
 KOTOBA_MODEL = "kotoba-tech/kotoba-whisper-v2.0-faster"
 WL_MODEL = "large-v3"          # wl/wz（full whisper）の既定。多言語かつ語彙注入(terms)が効く
 DEFAULT_ENGINES = "wp,kotoba,dg"
+# 英日混在（--language mixed）で --engines 未指定のときの既定。kotoba(日本語特化distil)を外し、
+# wp(Zeus full-whisper・言語自動判定) + dg(Deepgram Nova-3 multi・コードスイッチング) にする。
+MIXED_DEFAULT_ENGINES = "wp,dg"
 KNOWN_ENGINES = ("wp", "wl", "wz", "kotoba", "dg")
 # 英日混在＝コードスイッチング指定。whisper系は言語自動判定、dg は Deepgram の language=multi へ。
 MIXED_LANGS = {"mixed", "multi", "auto"}
@@ -256,7 +261,9 @@ def run_wz(media: Path, outdir: Path, stem: str, terms: list[str], lang: str,
     run(["rsync", "-az", str(audio), f"{host}:{r_audio}"], dry)
 
     # 3. Zeus 上で audio-transcribe を GPU 実行（--device cuda）。lang は auto/mixed で自動判定になる。
-    term_flags = "".join(f" --terms {shlex.quote(rt)}" for rt in r_terms)
+    # cd {ZEUS_WORK} 済みなので basename で渡す。絶対パスのままだと shlex.quote が
+    # '~/whisper_work/...' を括ってしまい、リモートシェルの ~ 展開が効かない。
+    term_flags = "".join(f" --terms {shlex.quote(Path(rt).name)}" for rt in r_terms)
     remote = (
         f"source ~/.venv/bin/activate && "
         f"export LD_LIBRARY_PATH={ZEUS_CUDNN}:$LD_LIBRARY_PATH && "
@@ -346,8 +353,10 @@ def main() -> int:
                                  description="動画/音声 → 複数エンジンで複数 SRT を1コマンド生成。")
     ap.add_argument("media", help="動画または音声ファイル（ffmpeg が読めるもの）")
     ap.add_argument("-o", "--outdir", help="出力先ディレクトリ（既定: <入力の隣>/<stem>_srt/）")
-    ap.add_argument("--engines", default=DEFAULT_ENGINES,
-                    help=f"使うエンジン（カンマ区切り。既定: {DEFAULT_ENGINES}。候補: {','.join(KNOWN_ENGINES)}）")
+    ap.add_argument("--engines", default=None,
+                    help=f"使うエンジン（カンマ区切り。候補: {','.join(KNOWN_ENGINES)}）。"
+                         f"未指定なら言語で自動選択: ja は {DEFAULT_ENGINES}、"
+                         f"--language mixed は {MIXED_DEFAULT_ENGINES}（kotoba 除外）")
     ap.add_argument("--terms", metavar="FILE", action="append", default=[],
                     help="語彙注入ファイル（kotoba/dg に渡す。wp=whisper-remote は非対応）")
     ap.add_argument("--whisper-preset", default="orchestra",
@@ -375,11 +384,21 @@ def main() -> int:
     stem = media.stem
     outdir = Path(args.outdir) if args.outdir else media.resolve().parent / f"{stem}_srt"
 
-    engines = [e.strip() for e in args.engines.split(",") if e.strip()]
+    lang = args.language.strip()
+    mixed = lang.lower() in MIXED_LANGS
+
+    # エンジン未指定なら言語で最適既定を選ぶ（英日混在は kotoba を外し wp,dg を自動付加）。
+    engines_auto = args.engines is None
+    engines_str = (MIXED_DEFAULT_ENGINES if mixed else DEFAULT_ENGINES) if engines_auto else args.engines
+    engines = [e.strip() for e in engines_str.split(",") if e.strip()]
     unknown = [e for e in engines if e not in KNOWN_ENGINES]
     if unknown:
         err(f"未知のエンジン: {','.join(unknown)}（候補: {','.join(KNOWN_ENGINES)}）")
         return 1
+    if mixed and engines_auto:
+        info(f"英日混在のため既定エンジンを {MIXED_DEFAULT_ENGINES} に自動選択（kotoba は不向きのため除外）")
+    elif mixed and "kotoba" in engines:
+        warn("kotoba は日本語特化(distil)で英日混在に不向き。wl/wz か wp を推奨（このまま続行）")
 
     # dg はキーが無ければ静かに外す（best-effort）。
     if "dg" in engines:
@@ -389,11 +408,6 @@ def main() -> int:
     if not engines:
         err("実行できるエンジンがありません")
         return 1
-
-    lang = args.language.strip()
-    mixed = lang.lower() in MIXED_LANGS
-    if mixed and "kotoba" in engines:
-        warn("kotoba は日本語特化(distil)で英日混在に不向き。wl か wp を推奨（このまま続行）")
 
     dry = args.dry_run
     info(f"入力: {media}")
