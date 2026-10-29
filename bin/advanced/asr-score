@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""
+asr-score — 人手正解（reference）に対して各転写の **CER（文字誤り率）** と
+**用語再現率**（固有名詞・曲名・用語の拾い率）を測る。
+
+srt-compare が「系統どうしの突き合わせ（参照なし）」なのに対し、こちらは
+**参照に対する正解度**を測る。ゴールデンセット（代表数分の人手正解）に対して
+各エンジン／融合結果の優劣を、クリーン・ベンダ値でなく **自分の素材** で決めるための道具。
+
+なぜ CER か:
+    日本語は分かち書きが定義できず WER は系統間で不整合（Whisper 論文も CJK は CER）。
+    文字単位の編集距離（Levenshtein）/ 参照文字数 を主指標にする。
+    比較の公平のため、既定で **空白と句読点・括弧を除去**して測る（エンジンの句読点流儀
+    の差でペナルティにならないように）。--keep-punct で保持。全角/半角は NFKC で正規化。
+
+測るもの（参照に対して）:
+    1. CER         編集距離 / 参照文字数（低いほど良い）。置換/挿入/削除の内訳も出す
+    2. 用語再現率  参照に現れる用語のうち、仮説にも現れた割合（高いほど良い）＋ 取りこぼし語
+    3. 生の用語出現数（参考。srt-compare と同じ数え方）
+
+入力:
+    REF   参照（人手正解）。.txt（推奨）または .srt
+    HYP   評価する転写。.srt / .num.srt（複数可）または .txt
+    参照が区間の一部（例: 代表10分）なら、各 HYP を --window で同じ区間に切ってから測る。
+
+Usage:
+    asr-score ref_0-10min.txt a_wp.num.srt b_dg.num.srt c_kotoba.num.srt \
+        --terms examples/terms-orchestral.txt
+    asr-score ref.srt a_wp.num.srt --window 0:10:00-0:20:00
+    asr-score ref.txt merged.srt wp.num.srt --terms 野見山,麻衣子,威風堂々 --json
+
+依存: Python 標準ライブラリのみ
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+CUE = re.compile(
+    r"(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d\d):(\d\d):(\d\d)[,.](\d{1,3})\s*\n(.*?)(?=\n\s*\n|\Z)",
+    re.S)
+
+# 既定で除去する句読点・括弧・記号（長音符 ー と 中黒 ・ は語の一部なので残す）。
+_PUNCT = "、。，．！？!?「」『』（）()［］[]【】〔〕：:；;…‥“”\"'`／|　 \t\r\n＝=＋"
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"asr-score: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def to_sec(ts: str) -> float:
+    """H:MM:SS(.mmm) / MM:SS を秒へ。"""
+    parts = ts.replace(",", ".").split(":")
+    parts = [float(p) for p in parts]
+    while len(parts) < 3:
+        parts.insert(0, 0.0)
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def load_cues(path: Path):
+    """SRT を (start, end, text) の列に。SRT でなければ None（＝プレーンテキスト扱い）。"""
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    cues = []
+    for m in CUE.finditer(raw):
+        g = m.groups()
+        s = int(g[0]) * 3600 + int(g[1]) * 60 + int(g[2]) + int(g[3].ljust(3, "0")) / 1000
+        e = int(g[4]) * 3600 + int(g[5]) * 60 + int(g[6]) + int(g[7].ljust(3, "0")) / 1000
+        t = re.sub(r"\[spk\d+\]\s*", "", g[8].strip().replace("\n", ""))
+        if t:
+            cues.append((s, e, t))
+    return cues if cues else None
+
+
+def extract_text(path: Path, window):
+    """ファイルからテキストを取り出す。SRT なら window で切る。txt はそのまま全文。"""
+    cues = load_cues(path)
+    if cues is None:
+        return path.read_text(encoding="utf-8", errors="replace")
+    if window:
+        t0, t1 = window
+        cues = [(s, e, t) for (s, e, t) in cues if t0 <= s < t1 or (s < t0 < e)]
+    return "".join(t for _, _, t in cues)
+
+
+def normalize(text: str, keep_punct: bool) -> str:
+    s = unicodedata.normalize("NFKC", text).casefold()
+    if keep_punct:
+        # 空白だけは常に落とす（CJK CER の慣行）
+        return re.sub(r"\s+", "", s)
+    return "".join(ch for ch in s if ch not in _PUNCT)
+
+
+def edit_distance(ref: str, hyp: str):
+    """文字単位 Levenshtein。2行 DP。返り値 (dist, sub, ins, del) は距離と内訳の近似。
+    内訳はバックトレースで厳密に出す。"""
+    n, m = len(ref), len(hyp)
+    if n == 0:
+        return m, 0, m, 0
+    # DP テーブル（内訳のためフル表。ゴールデンセット規模＝数千字なので許容）
+    if n * m > 60_000_000:
+        die(f"入力が大きすぎます（{n}×{m}）。--window で区間を絞ってください")
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        ri = ref[i - 1]
+        row, prow = dp[i], dp[i - 1]
+        for j in range(1, m + 1):
+            cost = 0 if ri == hyp[j - 1] else 1
+            row[j] = min(prow[j] + 1, row[j - 1] + 1, prow[j - 1] + cost)
+    # バックトレースで sub/ins/del
+    i, j, sub, ins, dele = n, m, 0, 0, 0
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + (0 if ref[i - 1] == hyp[j - 1] else 1):
+            if ref[i - 1] != hyp[j - 1]:
+                sub += 1
+            i, j = i - 1, j - 1
+        elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
+            dele += 1
+            i -= 1
+        else:
+            ins += 1
+            j -= 1
+    return dp[n][m], sub, ins, dele
+
+
+def read_terms(arg: str):
+    """--terms がファイルならそれを（1行1語・# コメント可）、そうでなければ CSV として読む。"""
+    if not arg:
+        return []
+    p = Path(arg)
+    terms = []
+    if p.is_file():
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            t = ln.strip()
+            if t and not t.startswith("#"):
+                terms.append(t)
+    else:
+        terms = [t.strip() for t in arg.split(",") if t.strip()]
+    return list(dict.fromkeys(terms))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="asr-score", add_help=True,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 description="参照に対する CER と用語再現率を測る。")
+    ap.add_argument("reference", help="人手正解（.txt 推奨 / .srt 可）")
+    ap.add_argument("hyp", nargs="+", help="評価する転写（.srt/.num.srt/.txt、複数可）")
+    ap.add_argument("--terms", default="", metavar="FILE|CSV",
+                    help="用語ファイル（1行1語・#可）またはカンマ区切り")
+    ap.add_argument("--window", default="", metavar="START-END",
+                    help="区間 H:MM:SS-H:MM:SS に切ってから測る（SRT 入力に適用）")
+    ap.add_argument("--keep-punct", action="store_true", help="句読点・括弧を除去せず測る")
+    ap.add_argument("--json", action="store_true", help="結果を JSON で出力")
+    args = ap.parse_args()
+
+    ref_path = Path(args.reference)
+    if not ref_path.is_file():
+        die(f"参照が見つかりません: {ref_path}")
+
+    window = None
+    if args.window:
+        mw = re.match(r"\s*(.+?)\s*-\s*(.+?)\s*$", args.window)
+        if not mw:
+            die("--window は START-END（例 0:10:00-0:20:00）")
+        window = (to_sec(mw.group(1)), to_sec(mw.group(2)))
+
+    terms = read_terms(args.terms)
+    ref_raw = extract_text(ref_path, window)
+    ref_norm = normalize(ref_raw, args.keep_punct)
+    if not ref_norm:
+        die("参照テキストが空です（--window の指定や参照ファイルを確認）")
+
+    # 参照に現れる用語（再現率の分母）
+    ref_terms = [t for t in terms if t in ref_raw]
+
+    results = []
+    for hp in args.hyp:
+        path = Path(hp)
+        if not path.is_file():
+            die(f"not found: {path}")
+        hyp_raw = extract_text(path, window)
+        hyp_norm = normalize(hyp_raw, args.keep_punct)
+        dist, sub, ins, dele = edit_distance(ref_norm, hyp_norm)
+        cer = dist / len(ref_norm)
+        hits = [t for t in ref_terms if t in hyp_raw]
+        misses = [t for t in ref_terms if t not in hyp_raw]
+        results.append({
+            "name": path.stem,
+            "ref_chars": len(ref_norm),
+            "hyp_chars": len(hyp_norm),
+            "cer": cer,
+            "dist": dist, "sub": sub, "ins": ins, "del": dele,
+            "term_total": len(ref_terms),
+            "term_hits": len(hits),
+            "term_recall": (len(hits) / len(ref_terms)) if ref_terms else None,
+            "term_missed": misses,
+            "term_counts": {t: hyp_raw.count(t) for t in terms},
+        })
+
+    results.sort(key=lambda r: r["cer"])  # CER 昇順（良い順）
+
+    if args.json:
+        print(json.dumps({
+            "reference": str(ref_path), "window": args.window or None,
+            "ref_chars": len(ref_norm), "ref_terms": ref_terms,
+            "keep_punct": args.keep_punct, "results": results,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    w = max(len(r["name"]) for r in results) + 1
+    print(f"参照 {ref_path.name}（正規化後 {len(ref_norm)} 文字"
+          f"{' / ' + args.window if args.window else ''}"
+          f" / 句読点{'保持' if args.keep_punct else '除去'}）")
+    print(f"用語: {len(terms)} 語中 参照に出現 {len(ref_terms)} 語\n")
+    print(f"{'系統'.ljust(w)} {'CER':>7} {'編集':>6} {'(置換':>6} {'挿入':>5} {'削除)':>6} "
+          f"{'字数':>7} {'用語再現':>9}")
+    for r in results:
+        tr = f"{r['term_hits']}/{r['term_total']}" if r["term_total"] else "—"
+        trpct = f"({r['term_recall']*100:.0f}%)" if r["term_recall"] is not None else ""
+        print(f"{r['name'].ljust(w)} {r['cer']*100:6.2f}% {r['dist']:6d} {r['sub']:6d} "
+              f"{r['ins']:5d} {r['del']:6d} {r['hyp_chars']:7d} {tr:>6}{trpct}")
+
+    # 取りこぼし用語（最良系統基準で目立つので全系統分を出す）
+    if ref_terms:
+        print("\n■ 取りこぼした用語（参照にあるが仮説に無い）")
+        for r in results:
+            miss = "・".join(r["term_missed"]) if r["term_missed"] else "（なし）"
+            print(f"  {r['name'].ljust(w)} {miss}")
+
+    print("\n読み方: CER は低いほど良い（文字誤り率）。用語再現は高いほど良い。"
+          "\n        CER は参照の表記を正とする。句読点流儀の差を避けるため既定で句読点・空白を除去。"
+          "\n        これは1素材・1区間の実測。複数区間・複数素材で傾向を見ること。")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
