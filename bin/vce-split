@@ -11,7 +11,8 @@ Options:
     -q, --quality INDEX    品質インデックス (0=最高, 1=高, 2=中, 3=低)
     --audio-only           音声のみ出力（MP3）
     --overlay-title        チャプタータイトルを映像に焼き込み
-    --dry-run              実行せずに計画を表示
+    --drop-excluded        '--' 始まりの区間（MC・CM 等）を切り落とす
+    --dry-run             実行せずに計画を表示
     -v, --verbose          詳細ログを表示
 """
 
@@ -281,9 +282,12 @@ class ProjectSplitter:
             ))
         self.log(f"Loaded {len(self.chapters)} chapters")
 
-    def get_chapter_segments(self) -> List[Tuple[int, int, int, str, int]]:
+    def get_chapter_segments(self, drop_excluded: bool = False) -> List[Tuple[int, int, int, str, int]]:
         """
         有効なチャプターセグメントのリストを返す
+
+        drop_excluded=False: '--' 区間は直前のチャプターに含める（次の有効チャプターまで続く）
+        drop_excluded=True:  '--' 区間の開始点で切り、その区間を出力から落とす（MC・CM の除外）
         Returns: List of (index, start_ms, end_ms, title, source_index)
         """
         segments = []
@@ -303,7 +307,7 @@ class ProjectSplitter:
                 end_ms = None
                 for j in range(i + 1, len(self.chapters)):
                     next_ch = self.chapters[j]
-                    if next_ch.title.startswith(self.EXCLUDE_PREFIX):
+                    if not drop_excluded and next_ch.title.startswith(self.EXCLUDE_PREFIX):
                         continue
                     if next_ch.source_index == source_idx:
                         end_ms = next_ch.local_time_ms
@@ -320,7 +324,7 @@ class ProjectSplitter:
                 start_ms = chapter.local_time_ms
                 if i + 1 < len(self.chapters):
                     for j in range(i + 1, len(self.chapters)):
-                        if not self.chapters[j].title.startswith(self.EXCLUDE_PREFIX):
+                        if drop_excluded or not self.chapters[j].title.startswith(self.EXCLUDE_PREFIX):
                             end_ms = self.chapters[j].local_time_ms
                             break
                     else:
@@ -377,6 +381,7 @@ class ProjectSplitter:
               quality_index: Optional[int] = None,
               audio_only: bool = False,
               overlay_title: bool = False,
+              drop_excluded: bool = False,
               dry_run: bool = False) -> bool:
         """チャプターごとに分割出力"""
         try:
@@ -403,7 +408,7 @@ class ProjectSplitter:
             output_base = self.project.get('output_base', self.project_path.stem)
 
             # セグメント取得
-            segments = self.get_chapter_segments()
+            segments = self.get_chapter_segments(drop_excluded=drop_excluded)
             if not segments:
                 self.log("Error: No valid chapters to export")
                 return False
@@ -417,6 +422,8 @@ class ProjectSplitter:
                 self.log(f"Encoder: {encoder_id}, Bitrate: {bitrate} kbps")
                 if overlay_title:
                     self.log(f"Title overlay: enabled")
+            if drop_excluded:
+                self.log(f"Excluded ('--') sections: dropped")
             self.log(f"Output dir: {output_dir}")
             self.log("")
 
@@ -516,6 +523,7 @@ Examples:
     vce-split project.vce.json --dry-run
     vce-split project.vce.json --audio-only
     vce-split project.vce.json --overlay-title
+    vce-split chapters.txt --drop-excluded --overlay-title
         """
     )
     parser.add_argument('project', type=Path,
@@ -527,6 +535,8 @@ Examples:
                         help='品質 (0=最高, 1=高, 2=中, 3=低)')
     parser.add_argument('--audio-only', action='store_true', help='音声のみ出力（MP3）')
     parser.add_argument('--overlay-title', action='store_true', help='チャプタータイトルを映像に焼き込み')
+    parser.add_argument('--drop-excluded', action='store_true',
+                        help="'--' 始まりの区間（MC・CM 等）を直前のチャプターに含めず切り落とす")
     parser.add_argument('--dry-run', action='store_true', help='実行せずに計画を表示')
     parser.add_argument('-v', '--verbose', action='store_true', help='詳細ログを表示')
 
@@ -543,6 +553,7 @@ Examples:
         quality_index=args.quality,
         audio_only=args.audio_only,
         overlay_title=args.overlay_title,
+        drop_excluded=args.drop_excluded,
         dry_run=args.dry_run
     )
 

@@ -204,6 +204,7 @@ bin/vce-split 20260906_180109.txt
 bin/vce-split 20260906_180109.txt --dry-run        # 計画だけ表示
 bin/vce-split 20260906_180109.txt --audio-only     # MP3で出力
 bin/vce-split 20260906_180109.txt --overlay-title  # タイトル焼き込み
+bin/vce-split 20260906_180109.txt --drop-excluded  # '--' 区間（MC・CM）を切り落とす（既定は直前の章に含める）
 bin/vce-split project.vce.json                     # 旧プロジェクト形式（後方互換）
 
 # mono L/R（チャンネル別 loudnorm 済み）を 1 本のステレオに結合
