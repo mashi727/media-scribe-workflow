@@ -23,7 +23,7 @@ def vce():
         if not (isinstance(n, ast.FunctionDef) and n.name == "main")
         and not isinstance(n, ast.If)
     ]
-    namespace: dict = {"__name__": "vce"}
+    namespace: dict = {"__name__": "vce", "__file__": str(VCE_SPLIT)}
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(VCE_SPLIT), "exec"), namespace)
     return namespace
 
