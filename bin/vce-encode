@@ -16,6 +16,7 @@ Options:
     -q, --quality INDEX   品質インデックス (0=最高, 1=高, 2=中, 3=低)
     --cover-image PATH    カバー画像（音声のみのソース用）
     --overlay-title       チャプター名を映像に焼き込む
+    --overlay-position P  焼き込む位置（bottom-left/bottom-right/top-left/top-right/center）
     --no-chapters         チャプター埋め込みを無効化
     --no-cut              除外チャプター（--で始まる）をカットしない
     --dry-run             実行せずに計画を表示
@@ -127,36 +128,19 @@ def detect_system_font() -> str:
     return ""
 
 
-def escape_drawtext(text: str) -> str:
-    r"""drawtext の text= に渡す値をエスケープする
-
-    呼び出し側は結果を ``text='...'`` と単引用で囲み、``expansion=none`` を付ける。
-    この関数は自分で引用を閉じて ``'<本体>'`` を返すので、最終的には
-    ``text=''<本体>''`` となり、本体は**引用の外**で解釈される。
-
-    ffmpeg は値を2回ほどく（drawtext のオプション → フィルタグラフ）ので、
-    内側から順に2段エスケープする。
-
-    1. オプション段: ``\`` ``'`` ``:``
-    2. フィルタグラフ段: ``\`` ``'`` ``[`` ``]`` ``,`` ``;``
-
-    経緯（2026-10 に実測で特定）:
-
-    - ``'\''`` で引用を閉じて開き直す旧方式は、**エラーを出さずに空文字を描いた**。
-      ``130_Isn't She Lovely`` の章だけ曲名が消えていた。``\'`` に置換するさらに
-      前の方式は ``No such filter: '1315.718'`` で落ちていた。
-    - 引用の内側に残す方式は、``\`` を含む曲名を正しく描けなかった。
-    - ``%`` と ``\`` は drawtext の既定（``expansion=normal``）で展開用の記号として
-      読まれる。呼び出し側の ``expansion=none`` と組で、文字どおりに描かれる。
-
-    正しさは「何か描けたか」ではなく、``textfile``（エスケープ不要）で描いた画像と
-    **画素単位で一致するか**で確かめている（tests/test_vce_encode_drawtext.py）。
-    前後の空白は引用の外では落ちる（チャプター名は読み込み時に strip 済み）。
-    """
-    text = text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
-    for ch in "\\'[],;":
-        text = text.replace(ch, "\\" + ch)
-    return "'" + text + "'"
+# 幾何補正とタイトル焼き込みは vce-split と共有する（bin/_vce_geometry.py）。
+# 同じ式を 2 本のスクリプトに置くと、片方だけ直したときに「まとめた版と
+# 曲ごとの版で絵が違う」という気づきにくい壊れ方をする。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _vce_geometry import (                                       # noqa: E402
+    DEFAULT_OVERLAY_POSITION,
+    OVERLAY_POSITIONS,
+    Transform,
+    build_title_overlays,
+    escape_drawtext,
+    quad_for_rotation,
+    rect_for_rotation,
+)
 
 
 @dataclass
@@ -167,130 +151,6 @@ class SourceFile:
     video_params: Optional['VideoParams'] = None
     is_audio_only: bool = False
     transform: Optional['Transform'] = None
-
-
-def rect_for_rotation(width: float, height: float, deg: float,
-                      aspect: Optional[float] = None) -> Tuple[float, float]:
-    """枠 width×height の中へ、deg だけ傾けて収まる最大の矩形を返す
-
-    傾き補正では「水平を出すために画を回す」ので、四隅が必ず空く。空いた分を
-    捨てた後に残る最大の矩形がこれ。`aspect` を出力比に合わせておけば、
-    引き伸ばしの無い（縦横比の崩れない）切り出しになる。
-
-    中心をそろえた矩形どうしなら、回した矩形が枠に収まる条件は
-    バウンディングボックスが収まることと同値なので、閉形式で出る。
-        w·|cos| + h·|sin| ≤ W
-        w·|sin| + h·|cos| ≤ H
-    """
-    if aspect is None or aspect <= 0:
-        aspect = width / height
-    t = math.radians(abs(deg))
-    c, s_ = math.cos(t), math.sin(t)
-    w = min(width / (c + s_ / aspect), height / (s_ + c / aspect))
-    return w, w / aspect
-
-
-def quad_for_rotation(width: float, height: float, deg: float,
-                      aspect: Optional[float] = None) -> List[Tuple[float, float]]:
-    """傾き補正の取り込み四角形を返す（TL, TR, BL, BR の順）
-
-    順序は perspective フィルタの引数順（x0y0=左上, x1y1=右上, x2y2=**左下**,
-    x3y3=右下）に合わせてある。時計回りではないので注意。
-
-    符号: `deg` が正のとき、出力では画が**反時計回り**に回る。写真編集ソフトの
-    角度スライダと同じ向き（右下がりの水平線は正の値で直る）。
-    """
-    w, h = rect_for_rotation(width, height, deg, aspect)
-    cx, cy = width / 2.0, height / 2.0
-    t = math.radians(deg)
-    cos_t, sin_t = math.cos(t), math.sin(t)
-    out = []
-    for dx, dy in ((-w / 2, -h / 2), (w / 2, -h / 2), (-w / 2, h / 2), (w / 2, h / 2)):
-        out.append((cx + dx * cos_t - dy * sin_t, cy + dx * sin_t + dy * cos_t))
-    return out
-
-
-@dataclass
-class Transform:
-    """画の幾何補正（傾き補正・台形補正）
-
-    `perspective` フィルタ 1 枚で表す。傾き補正は「回した矩形の四隅」を指定する
-    だけの特殊な場合なので、台形補正と同じ仕組みに乗る。rotate で回してから
-    perspective を足すと再標本化が 2 回になるが、この形なら常に 1 回で済む。
-
-    - `quad` があればそれを使う（台形補正。四隅を自由に置ける）
-    - 無ければ `rotate_deg` から矩形を導く（傾き補正）
-    - `reference` は quad を測ったときの解像度。実素材と違えば比例で読み替える
-
-    perspective は出力サイズを入力と同じに保つので、`calculate_target_params`
-    の判定には影響しない（四隅を切り落とす rotate+crop 方式との違い）。
-    """
-    rotate_deg: float = 0.0
-    quad: Optional[List[Tuple[float, float]]] = None
-    reference: Optional[Tuple[int, int]] = None
-    interpolation: str = "linear"
-
-    INTERPOLATIONS = ("linear", "cubic")
-
-    @property
-    def is_identity(self) -> bool:
-        return self.quad is None and abs(self.rotate_deg) < 1e-9
-
-    @classmethod
-    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional['Transform']:
-        if not data:
-            return None
-        quad = data.get('quad')
-        if quad is not None:
-            if len(quad) != 4 or any(len(pt) != 2 for pt in quad):
-                raise ValueError(
-                    f"transform.quad は [x,y] を 4 点（左上・右上・左下・右下）: {quad!r}")
-            quad = [(float(x), float(y)) for x, y in quad]
-        reference = data.get('reference')
-        if reference is not None:
-            if len(reference) != 2:
-                raise ValueError(f"transform.reference は [幅, 高さ]: {reference!r}")
-            reference = (int(reference[0]), int(reference[1]))
-        interpolation = str(data.get('interpolation', 'linear'))
-        if interpolation not in cls.INTERPOLATIONS:
-            raise ValueError(
-                f"transform.interpolation は {cls.INTERPOLATIONS} のいずれか: {interpolation!r}")
-        return cls(
-            rotate_deg=float(data.get('rotate_deg', 0.0)),
-            quad=quad,
-            reference=reference,
-            interpolation=interpolation,
-        )
-
-    def resolve_quad(self, width: int, height: int) -> List[Tuple[float, float]]:
-        """実素材の解像度に対する四隅を返す"""
-        if self.quad is None:
-            return quad_for_rotation(width, height, self.rotate_deg)
-
-        quad = self.quad
-        if self.reference and tuple(self.reference) != (width, height):
-            ref_w, ref_h = self.reference
-            if ref_w <= 0 or ref_h <= 0:
-                raise ValueError(f"transform.reference が不正: {self.reference!r}")
-            sx, sy = width / ref_w, height / ref_h
-            quad = [(x * sx, y * sy) for x, y in quad]
-        return quad
-
-    def filter_str(self, width: int, height: int) -> str:
-        """perspective のフィルタ文字列
-
-        sense=source は「ここに挙げた**ソース上の**点を、出力の四隅へ送る」。
-        逆（destination）と取り違えると補正が反対にかかる。
-        """
-        quad = self.resolve_quad(width, height)
-        coords = ":".join(
-            f"{name}={value:.3f}"
-            for name, value in zip(
-                ("x0", "y0", "x1", "y1", "x2", "y2", "x3", "y3"),
-                [v for pt in quad for v in pt],
-            )
-        )
-        return f"perspective={coords}:interpolation={self.interpolation}:sense=source"
 
 
 @dataclass
@@ -931,8 +791,15 @@ class ProjectEncoder:
                         output_path: Path, encoder_id: str,
                         bitrate_kbps: int, crf: int,
                         target_params: Optional[VideoParams] = None,
-                        source_params: Optional[VideoParams] = None) -> bool:
-        """セグメントを抽出（異なる解像度・FPS・インターレースはtarget_paramsに正規化）"""
+                        source_params: Optional[VideoParams] = None,
+                        overlay_chapters: Optional[List[ChapterInfo]] = None,
+                        overlay_position: str = DEFAULT_OVERLAY_POSITION,
+                        total_output_ms: int = 0) -> bool:
+        """セグメントを抽出（異なる解像度・FPS・インターレースはtarget_paramsに正規化）
+
+        `overlay_chapters` を渡すと章名を焼き込む。時刻は**出力側の時間軸**で
+        解釈し、このセグメントに重なる範囲だけを載せる。
+        """
         start_sec = segment.start_ms / 1000.0
         end_sec = segment.end_ms / 1000.0
 
@@ -996,6 +863,20 @@ class ProjectEncoder:
         # 4. フレームレート変換
         if needs_fps:
             video_filters.append(f"fps={target_params.fps_num}/{target_params.fps_den}")
+
+        # 5. 章名の焼き込み
+        #    **必ず最後**。perspective より前に置くと字まで台形に歪み、scale より
+        #    前だと字の大きさが出力解像度で変わる。
+        if overlay_chapters:
+            font_path = detect_system_font()
+            if font_path:
+                video_filters.extend(build_title_overlays(
+                    overlay_chapters, font_path, overlay_position,
+                    window_start_ms=segment.output_start_ms,
+                    window_end_ms=segment.output_start_ms + segment.duration_ms,
+                    fallback_end_ms=total_output_ms))
+            else:
+                self.log("  WARNING: No system font found, skipping title overlay")
 
         video_filter_str = ",".join(video_filters)
         filter_complex = (
@@ -1133,7 +1014,8 @@ class ProjectEncoder:
                                   bitrate_kbps: int, crf: int,
                                   chapters: Optional[List[ChapterInfo]] = None,
                                   total_duration_ms: int = 0,
-                                  overlay_title: bool = False) -> bool:
+                                  overlay_title: bool = False,
+                                  overlay_position: str = DEFAULT_OVERLAY_POSITION) -> bool:
         """音声とカバー画像を結合して動画を作成
 
         Args:
@@ -1156,44 +1038,16 @@ class ProjectEncoder:
         # 動画フィルター構築
         vf_parts = []
 
-        # チャプター名焼き込み
+        # チャプター名焼き込み（位置は映像経路と同じ生成器から取る）
         if overlay_title and chapters:
             font_path = detect_system_font()
             if font_path:
-                self.log(f"  Overlay titles: {len(chapters)} chapters")
-
-                # 除外チャプター（--で始まる）を除外
-                valid_chapters = [ch for ch in chapters if not ch.title.startswith("--")]
-
-                for i, ch in enumerate(valid_chapters):
-                    start_sec = ch.local_time_ms / 1000.0
-                    # 次のチャプターの開始時間、または動画終了時間
-                    if i + 1 < len(valid_chapters):
-                        end_sec = valid_chapters[i + 1].local_time_ms / 1000.0
-                    else:
-                        end_sec = (total_duration_ms / 1000.0) if total_duration_ms > 0 else audio_duration_sec
-
-                    # テキストをエスケープ
-                    escaped_title = escape_drawtext(ch.title)
-
-                    # drawtext フィルター
-                    # フォントサイズ56px、半透明ボックス背景、中央配置
-                    drawtext = (
-                        f"drawtext=fontfile='{font_path}':"
-                        f"text='{escaped_title}':"
-                        f"expansion=none:"
-                        f"fontsize=56:"
-                        f"fontcolor=white:"
-                        f"borderw=2:"
-                        f"bordercolor=black:"
-                        f"box=1:"
-                        f"boxcolor=black@0.6:"
-                        f"boxborderw=15:"
-                        f"x=(w-text_w)/2:"
-                        f"y=h*0.325-th/2:"
-                        f"enable='between(t,{start_sec:.3f},{end_sec:.3f})'"
-                    )
-                    vf_parts.append(drawtext)
+                self.log(f"  Overlay titles: {len(chapters)} chapters ({overlay_position})")
+                end_ms = total_duration_ms if total_duration_ms > 0 \
+                    else int(audio_duration_sec * 1000)
+                vf_parts.extend(build_title_overlays(
+                    chapters, font_path, overlay_position,
+                    window_start_ms=0, window_end_ms=end_ms, fallback_end_ms=end_ms))
             else:
                 self.log("  WARNING: No system font found, skipping title overlay")
 
@@ -1362,6 +1216,7 @@ class ProjectEncoder:
                cut_excluded: bool = True,
                cover_image: Optional[Path] = None,
                overlay_title: bool = False,
+               overlay_position: str = DEFAULT_OVERLAY_POSITION,
                source_override: Optional[Path] = None,
                max_height: Optional[int] = None,
                youtube_chapters: bool = False,
@@ -1417,7 +1272,11 @@ class ProjectEncoder:
 
             # 出力パス決定
             if output_path is None:
-                output_dir = Path(self.project.get('output_dir', str(self.project_dir)))
+                # chaptr は出力先未指定を `"output_dir": null` と書く。`.get(key, 既定)`
+                # はキーが在れば既定を返さないので、None がそのまま Path() に渡って
+                # TypeError で落ちていた。値は .vce.json からの相対なので基準も与える。
+                raw_dir = self.project.get('output_dir')
+                output_dir = (self.project_dir / raw_dir) if raw_dir else self.project_dir
                 output_base = self.project.get('output_base', self.project_path.stem)
                 output_path = output_dir / f"{output_base}_encoded.mp4"
 
@@ -1551,7 +1410,8 @@ class ProjectEncoder:
                                                       encoder_id, bitrate, crf,
                                                       chapters=adjusted_chapters,
                                                       total_duration_ms=total_duration,
-                                                      overlay_title=overlay_title):
+                                                      overlay_title=overlay_title,
+                                                      overlay_position=overlay_position):
                     return False
                 self.log(f"  Created video with cover image")
 
@@ -1607,6 +1467,9 @@ class ProjectEncoder:
                     # 補正が黙って効かない。
                     if source.transform:
                         source_needs_processing = True
+                    # 焼き込みも同じ。素通しすると字が乗らない。
+                    if overlay_title:
+                        source_needs_processing = True
 
                     can_skip = (
                         segment.start_ms == 0 and
@@ -1628,7 +1491,10 @@ class ProjectEncoder:
                     if not self.extract_segment(
                         source, segment, temp_file, encoder_id, bitrate, crf,
                         target_params=target_params,
-                        source_params=source.video_params
+                        source_params=source.video_params,
+                        overlay_chapters=adjusted_chapters if overlay_title else None,
+                        overlay_position=overlay_position,
+                        total_output_ms=total_duration
                     ):
                         return False
 
@@ -1737,6 +1603,10 @@ Examples:
     parser.add_argument('--no-srt', action='store_true',
                         help='SRT の自動検出と付け替えを行わない')
     parser.add_argument('--overlay-title', action='store_true', help='チャプター名を映像に焼き込む')
+    parser.add_argument('--overlay-position', choices=sorted(OVERLAY_POSITIONS),
+                        default=DEFAULT_OVERLAY_POSITION,
+                        help='焼き込む位置（既定: ' + DEFAULT_OVERLAY_POSITION
+                             + '）。center は従来の上寄り中央')
     parser.add_argument('--source', type=Path,
                         help='入力動画を差し替える（章立て .txt と同一時間軸の高品質マスター等）。'
                              '章立てを軽いプロキシで作り、書き出しは FHD マスターから、という運用向け')
@@ -1766,6 +1636,7 @@ Examples:
         cut_excluded=not args.no_cut,
         cover_image=args.cover_image,
         overlay_title=args.overlay_title,
+        overlay_position=args.overlay_position,
         source_override=args.source,
         max_height=(1080 if args.fhd else args.max_height),
         youtube_chapters=args.youtube_chapters,

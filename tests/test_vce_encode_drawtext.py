@@ -29,7 +29,7 @@ SIZE = "1200x80"
 @pytest.fixture(scope="module")
 def escape_drawtext():
     src = VCE_ENCODE.read_text(encoding="utf-8")
-    namespace: dict = {}
+    namespace: dict = {"__file__": str(VCE_ENCODE)}
     exec(compile(src.split("def main(")[0], str(VCE_ENCODE), "exec"), namespace)
     return namespace["escape_drawtext"]
 
@@ -78,6 +78,63 @@ HOSTILE = [
 ]
 
 
+@pytest.fixture(scope="module")
+def vce_ns():
+    """bin/vce-encode のモジュール直下の定義を評価する"""
+    import ast
+
+    tree = ast.parse(VCE_ENCODE.read_text(encoding="utf-8"))
+    keep = [
+        n for n in tree.body
+        if not (isinstance(n, ast.ClassDef) and n.name == "ProjectEncoder")
+        and not (isinstance(n, ast.FunctionDef) and n.name == "main")
+        and not isinstance(n, ast.If)
+    ]
+    ns: dict = {"__file__": str(VCE_ENCODE)}
+    exec(compile(ast.Module(body=keep, type_ignores=[]), str(VCE_ENCODE), "exec"), ns)
+    return ns
+
+
+@pytest.fixture(scope="module")
+def builder(vce_ns):
+    """章名 1 つを実際の生成器に通して drawtext 文字列を返す"""
+    def build(title):
+        chapters = [vce_ns["ChapterInfo"](local_time_ms=0, title=title, source_index=0)]
+        out = vce_ns["build_title_overlays"](chapters, "/noexist.ttf", "bottom-left",
+                                            0, 5000, 5000)
+        assert len(out) == 1
+        return out[0]
+    return build
+
+
+class TestGeneratedFilter:
+    """焼き込みの生成器が吐く drawtext を、textfile 版と画素で突き合わせる
+
+    エスケープ関数だけを単体で見ても、**呼び出し側の組み立て**が崩れると
+    無言で空描画になる。生成器を通した実物で見る。
+    """
+
+    @pytest.mark.parametrize("title", HOSTILE)
+    def test_generated_filter_draws_exactly_the_title(self, builder, title, tmp_path):
+        import re
+
+        tf = tmp_path / "title.txt"
+        tf.write_text(title, encoding="utf-8")
+        ref = _frame(_vf_reference(tf, TAIL), tmp_path / "ref.raw")
+        assert ref is not None, "正解側の描画に失敗（テスト環境の問題）"
+        assert any(b > 128 for b in ref), "正解側に文字が描かれていない（フォント環境）"
+
+        # 生成器の出力から、位置・体裁だけを正解側と揃える（比べたいのは文字）
+        generated = builder(title)
+        text_opt = re.search(r"text=(''.*?''|'.*?'):expansion=none", generated)
+        assert text_opt, f"text= を取り出せない: {generated}"
+        vf = (f"drawtext=text={text_opt.group(1)}:expansion=none:fontsize=32:"
+              f"fontcolor=white:x=10:y=20:enable='between(t,0,5)'," + TAIL)
+        got = _frame(vf, tmp_path / "got.raw")
+        assert got is not None, f"フィルタが壊れる: {title!r}"
+        assert got == ref, f"描かれた文字が違う（空・欠け・化け）: {title!r}"
+
+
 class TestEscapeDrawtext:
     @pytest.mark.parametrize("title", HOSTILE)
     def test_draws_exactly_the_title(self, escape_drawtext, title, tmp_path):
@@ -91,11 +148,26 @@ class TestEscapeDrawtext:
         assert any(b > 128 for b in ref), "正解側に文字が描かれていない（フォント環境の問題）"
         assert got == ref, f"描かれた文字が違う（空・欠け・化け）: {title!r}"
 
-    def test_caller_disables_expansion(self):
+    def test_caller_disables_expansion(self, builder):
         """% と \\ を文字どおり描くには、呼び出し側の expansion=none が要る
-        （エスケープ関数の単体テストでは捕まえられないので、呼び出しの形を確かめる）"""
-        src = VCE_ENCODE.read_text(encoding="utf-8")
-        assert "f\"text='{escaped_title}':\"\n                        f\"expansion=none:\"" in src
+
+        以前はソース文字列の完全一致で見ていたが、生成を
+        `build_title_overlays` に寄せた際に形だけ変わって落ちた。意図は
+        「生成されるフィルタに expansion=none が入っていること」なので、
+        **生成結果を見る**ように改めた。
+        """
+        out = builder("100%の達成")
+        assert "expansion=none" in out
+
+    def test_caller_wraps_the_escaped_value_in_quotes(self, builder):
+        """`text=''…''` の二重引用を保つこと
+
+        `escape_drawtext` は自分で `'…'` を付けて返す。呼び出し側が囲むのを
+        やめると、`'` を含む曲名がエラー無しで空描画になる（2026-10 に
+        実際に起きた壊れ方）。
+        """
+        out = builder("Isn't She Lovely")
+        assert "text=''" in out
 
     def test_closes_the_quote_itself(self, escape_drawtext):
         """呼び出し側の text='...' と合わせて text=''<本体>'' になる構造"""

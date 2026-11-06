@@ -37,7 +37,7 @@ def vce():
         and not (isinstance(n, ast.FunctionDef) and n.name == "main")
         and not isinstance(n, ast.If)
     ]
-    ns = {}
+    ns = {"__file__": str(VCE_ENCODE)}
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(VCE_ENCODE), "exec"), ns)
     return ns
 
